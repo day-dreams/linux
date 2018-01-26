@@ -1,0 +1,7 @@
+{
+    "editor.formatOnSave": false,
+    "C_Cpp.clang_format_sortIncludes": null,
+    "files.associations": {
+        "socket.h": "c"
+    }
+}
