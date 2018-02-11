@@ -221,9 +221,14 @@ typedef unsigned long page_flags_t;
  * a page.
  */
 struct page {
-	page_flags_t flags;		/* Atomic flags, some possibly
+	page_flags_t flags;		/* 页的状态,包括:脏页,正在被写回,激活状态等 
+					 * 提供原子性的操作*/
+					/* Atomic flags, some possibly
 					 * updated asynchronously */
-	atomic_t _count;		/* Usage count, see below. */
+
+	atomic_t _count;		/* 引用计数,有多少进程,用于page_count()函数. */
+					/* Usage count, see below. */
+					
 	atomic_t _mapcount;		/* Count of ptes mapped in mms,
 					 * to show when page is mapped
 					 * & limit reverse map searches.
@@ -235,7 +240,8 @@ struct page {
 					 * When page is free, this indicates
 					 * order in the buddy system.
 					 */
-	struct address_space *mapping;	/* If low bit clear, points to
+	struct address_space *mapping;	/* 属于哪个地址空间 */
+					/* If low bit clear, points to
 					 * inode address_space, or NULL.
 					 * If page mapped as anonymous
 					 * memory, low bit is set, and

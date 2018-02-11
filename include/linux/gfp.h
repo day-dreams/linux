@@ -107,13 +107,13 @@ extern struct page *alloc_page_vma(unsigned gfp_mask,
 			struct vm_area_struct *vma, unsigned long addr);
 #else
 #define alloc_pages(gfp_mask, order) \
-		alloc_pages_node(numa_node_id(), gfp_mask, order)
+		alloc_pages_node(numa_node_id(), gfp_mask, order)/* 请求分配一系列页 */
 #define alloc_page_vma(gfp_mask, vma, addr) alloc_pages(gfp_mask, 0)
 #endif
-#define alloc_page(gfp_mask) alloc_pages(gfp_mask, 0)
+#define alloc_page(gfp_mask) alloc_pages(gfp_mask, 0)/* 请求分配一个页 */
 
 extern unsigned long FASTCALL(__get_free_pages(unsigned int gfp_mask, unsigned int order));
-extern unsigned long FASTCALL(get_zeroed_page(unsigned int gfp_mask));
+extern unsigned long FASTCALL(get_zeroed_page(unsigned int gfp_mask));/* 请求分配并初始化一个页 */
 
 #define __get_free_page(gfp_mask) \
 		__get_free_pages((gfp_mask),0)

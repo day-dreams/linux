@@ -208,8 +208,9 @@ struct slab {
 	struct list_head	list;
 	unsigned long		colouroff;
 	void			*s_mem;		/* including colour offset */
-	unsigned int		inuse;		/* num of objs active in slab */
-	kmem_bufctl_t		free;
+	unsigned int		inuse;		/* 这个slab中已经分配了多少对象 */
+						/* num of objs active in slab */
+	kmem_bufctl_t		free;		/* 指向第一个空闲的对象,如果有的话 */
 };
 
 /*
@@ -1182,6 +1183,15 @@ static void slab_destroy (kmem_cache_t *cachep, struct slab *slabp)
  * %SLAB_HWCACHE_ALIGN - Align the objects in this cache to a hardware
  * cacheline.  This can be beneficial if you're counting cycles as closely
  * as davem.
+ * 
+ * NOTE: 
+ * By ZhangNan:
+ * name:		高速缓存的名字
+ * size:		高速缓存内每个对象的大小
+ * align:		slab内第一个对象的偏移量,用于对齐
+ * flags:		一些选项
+ * ctor:		构造函数
+ * dtor:		析构函数
  */
 kmem_cache_t *
 kmem_cache_create (const char *name, size_t size, size_t align,

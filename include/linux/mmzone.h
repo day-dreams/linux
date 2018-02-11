@@ -62,9 +62,9 @@ struct per_cpu_pageset {
 #endif
 } ____cacheline_aligned_in_smp;
 
-#define ZONE_DMA		0
-#define ZONE_NORMAL		1
-#define ZONE_HIGHMEM		2
+#define ZONE_DMA		0	/* 有些IO设备只能使用固定物理内存作为DMA */
+#define ZONE_NORMAL		1	/* 一般性的内存区,可以随意使用 */
+#define ZONE_HIGHMEM		2	/* 高端内存区,这个区里的页和物理页的对应关系是不固定的,方便内核访问更多的内存 */
 
 #define MAX_NR_ZONES		3	/* Sync this with ZONES_SHIFT */
 #define ZONES_SHIFT		2	/* ceil(log2(MAX_NR_ZONES)) */
