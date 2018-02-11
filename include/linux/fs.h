@@ -752,42 +752,42 @@ extern spinlock_t sb_lock;
 #define sb_entry(list)	list_entry((list), struct super_block, s_list)
 #define S_BIAS (1<<30)
 struct super_block {
-	struct list_head	s_list;		/* Keep this first */
-	dev_t			s_dev;		/* search index; _not_ kdev_t */
-	unsigned long		s_blocksize;
-	unsigned long		s_old_blocksize;
-	unsigned char		s_blocksize_bits;
-	unsigned char		s_dirt;
-	unsigned long long	s_maxbytes;	/* Max file size */
-	struct file_system_type	*s_type;
-	struct super_operations	*s_op;
-	struct dquot_operations	*dq_op;
+	struct list_head			s_list;			/* 链表头,链表内是所有超级块对象 */
+	dev_t					s_dev;			/* 设备标识号 */
+	unsigned long				s_blocksize;		/* 块大小(byte) */
+    	unsigned long 				s_old_blocksize;      	/* 块大小(bit) */
+    	unsigned char				s_blocksize_bits;
+	unsigned char				s_dirt;
+	unsigned long long			s_maxbytes;		/* Max file size */
+	struct file_system_type			*s_type;
+	struct super_operations			*s_op;			/* 超级块方法 */
+	struct dquot_operations			*dq_op;
  	struct quotactl_ops	*s_qcop;
-	struct export_operations *s_export_op;
-	unsigned long		s_flags;
-	unsigned long		s_magic;
-	struct dentry		*s_root;
-	struct rw_semaphore	s_umount;
-	struct semaphore	s_lock;
-	int			s_count;
-	int			s_syncing;
-	int			s_need_sync_fs;
-	atomic_t		s_active;
-	void                    *s_security;
-	struct xattr_handler	**s_xattr;
+	struct export_operations 		*s_export_op;
+	unsigned long				s_flags;
+	unsigned long				s_magic;
+	struct dentry				*s_root;		/* 目录挂载点 */
+	struct rw_semaphore			s_umount;
+	struct semaphore			s_lock;
+	int					s_count;
+	int					s_syncing;
+	int					s_need_sync_fs;
+	atomic_t				s_active;
+	void                    		*s_security;
+	struct xattr_handler			**s_xattr;
 
-	struct list_head	s_inodes;	/* all inodes */
-	struct list_head	s_dirty;	/* dirty inodes */
-	struct list_head	s_io;		/* parked for writeback */
-	struct hlist_head	s_anon;		/* anonymous dentries for (nfs) exporting */
-	struct list_head	s_files;
+	struct list_head			s_inodes;		/* 这个超级块下所有的inodes链表 */
+	struct list_head			s_dirty;		/* 被修改过了的inodes链表 */
+	struct list_head			s_io;			/* 需要回写的inodes链表 */
+	struct hlist_head			s_anon;			/* anonymous dentries for (nfs) exporting */
+	struct list_head			s_files;
 
-	struct block_device	*s_bdev;
-	struct list_head	s_instances;
-	struct quota_info	s_dquot;	/* Diskquota specific options */
+	struct block_device			*s_bdev;
+	struct list_head			s_instances;
+	struct quota_info			s_dquot;	/* Diskquota specific options */
 
-	int			s_frozen;
-	wait_queue_head_t	s_wait_unfrozen;
+	int					s_frozen;
+	wait_queue_head_t			s_wait_unfrozen;
 
 	char s_id[32];				/* Informational name */
 

@@ -83,24 +83,24 @@ struct dcookie_struct;
 struct dentry {
 	atomic_t d_count;
 	unsigned int d_flags;		/* protected by d_lock */
-	spinlock_t d_lock;		/* per dentry lock */
+	spinlock_t d_lock;		/* 每个目录项目都有一个锁 */
 	struct inode *d_inode;		/* Where the name belongs to - NULL is
 					 * negative */
 	/*
 	 * The next three fields are touched by __d_lookup.  Place them here
 	 * so they all fit in a 16-byte range, with 16-byte alignment.
 	 */
-	struct dentry *d_parent;	/* parent directory */
+	struct dentry *d_parent;	/* 父目录项 */
 	struct qstr d_name;
 
 	struct list_head d_lru;		/* LRU list */
 	struct list_head d_child;	/* child of parent list */
-	struct list_head d_subdirs;	/* our children */
+	struct list_head d_subdirs;	/* 子目录项的链表*/
 	struct list_head d_alias;	/* inode alias list */
 	unsigned long d_time;		/* used by d_revalidate */
 	struct dentry_operations *d_op;
-	struct super_block *d_sb;	/* The root of the dentry tree */
-	void *d_fsdata;			/* fs-specific data */
+	struct super_block *d_sb;	/* 这个目录项所在的超级块对象,即是这个目录项被挂载的那个文件系统 */
+	void *d_fsdata;			/* 文件系统特有数据 */
  	struct rcu_head d_rcu;
 	struct dcookie_struct *d_cookie; /* cookie, if any */
 	struct hlist_node d_hash;	/* lookup hash list */	
