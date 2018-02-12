@@ -1,7 +1,16 @@
 {
     "editor.formatOnSave": false,
+    "editor.tabSize": 8,
     "C_Cpp.clang_format_sortIncludes": null,
-    "files.associations": {
-        "socket.h": "c"
-    }
+"files.associations": {
+	"socket.h": "c",
+	"*.ipp": "c",
+	"fs.h": "c",
+	"bitops.h": "c",
+	"ratio": "c",
+	"hash_map": "c",
+	"hash_set": "c",
+	"chrono": "c",
+	"algorithm": "c"
+}
 }
