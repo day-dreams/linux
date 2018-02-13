@@ -745,7 +745,9 @@ extern unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 
 /* 
  * 创建一个内存区域,这个内存区域可能要映射磁盘文件的某些区域(比如代码段,数据段).
- * 新创建的内存区域可能会和进程相邻的内存区域合并.下
+ * 
+ * NOTE:新创建的内存区域可能会和进程相邻的内存区域合并.
+ * NOTE:新创建的内存区域没有被分配内存页,除非VM_LOCKED标志被设置.
  *
  * 对用户进程反映为系统调用mmap()函数
  * 
