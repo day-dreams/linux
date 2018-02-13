@@ -204,9 +204,10 @@ extern void arch_unmap_area(struct vm_area_struct *area);
 extern void arch_unmap_area_topdown(struct vm_area_struct *area);
 
 
-struct mm_struct {
-	struct vm_area_struct * mmap;		/* list of VMAs */
-	struct rb_root mm_rb;
+struct mm_struct {				
+	struct vm_area_struct * mmap;		/* mmap指向内存区域结构体,每个结构体代表一段连续的属性相同的内存区域, */
+						/* list of VMAs */
+	struct rb_root mm_rb;			/* mmap本身以链表的形式组织,但当内存区域过多时,链表效率低下,转而使用红黑树来组织 */
 	struct vm_area_struct * mmap_cache;	/* last find_vma result */
 	unsigned long (*get_unmapped_area) (struct file *filp,
 				unsigned long addr, unsigned long len,
@@ -214,10 +215,12 @@ struct mm_struct {
 	void (*unmap_area) (struct vm_area_struct *area);
 	unsigned long mmap_base;		/* base of mmap area */
 	unsigned long free_area_cache;		/* first hole */
-	pgd_t * pgd;
-	atomic_t mm_users;			/* How many users with user space? */
+	pgd_t *pgd;				/* 用户进程自己的页表.内核进程虽然没有mm_struct,但会直接使用上一个用户进程的页表 */
+	atomic_t mm_users;			/* 有多少进程使用了这个地址空间 */
+						/* How many users with user space? */
 	atomic_t mm_count;			/* How many references to "struct mm_struct" (users count as 1) */
-	int map_count;				/* number of VMAs */
+	int map_count;				/* 这个内存空间的内存区域个数 */
+						/* number of VMAs */
 	struct rw_semaphore mmap_sem;
 	spinlock_t page_table_lock;		/* Protects page tables, mm->rss, mm->anon_rss */
 
@@ -558,7 +561,10 @@ struct task_struct {
 	struct list_head ptrace_children;
 	struct list_head ptrace_list;
 
-	struct mm_struct *mm, *active_mm;
+	struct mm_struct *mm, *active_mm;/* 对于内核进程,mm为空,active_mm指向前一个用户进程的地址空间;
+					  * 对于用户进程,这两个是一样的. 
+					  * 因为内核进程没有自己的地址空间(不需要),但由需要页表来进行地址转化,
+					  * 所以存在这两个相似的数据域.	*/
 
 /* task state */
 	struct linux_binfmt *binfmt;

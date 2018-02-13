@@ -284,7 +284,7 @@ static inline void mm_free_pgd(struct mm_struct * mm)
  __cacheline_aligned_in_smp DEFINE_SPINLOCK(mmlist_lock);
 
 #define allocate_mm()	(kmem_cache_alloc(mm_cachep, SLAB_KERNEL))
-#define free_mm(mm)	(kmem_cache_free(mm_cachep, (mm)))
+#define free_mm(mm)	(kmem_cache_free(mm_cachep, (mm)))/* 销毁地址空间.只有地址空间的引用计数为0才调用 */
 
 #include <linux/init_task.h>
 

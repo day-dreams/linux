@@ -58,19 +58,22 @@ extern int sysctl_legacy_va_layout;
  * space that has a special rule for the page-fault handlers (ie a shared
  * library, the executable area etc).
  */
-struct vm_area_struct {
+struct vm_area_struct {			/* 代表一个内存区域 */
 	struct mm_struct * vm_mm;	/* The address space we belong to. */
-	unsigned long vm_start;		/* Our start address within vm_mm. */
-	unsigned long vm_end;		/* The first byte after our end address
+	unsigned long vm_start;		/* 起始地址 */
+					/* Our start address within vm_mm. */
+	unsigned long vm_end;		/* 结束地址 */
+					/* The first byte after our end address
 					   within vm_mm. */
 
 	/* linked list of VM areas per task, sorted by address */
-	struct vm_area_struct *vm_next;
+	struct vm_area_struct *vm_next; /* 链表相关 */
 
-	pgprot_t vm_page_prot;		/* Access permissions of this VMA. */
+	pgprot_t vm_page_prot;		/* 访问权限 */
+					/* Access permissions of this VMA. */
 	unsigned long vm_flags;		/* Flags, listed below. */
 
-	struct rb_node vm_rb;
+	struct rb_node vm_rb;		/* 红黑树相关 */
 
 	/*
 	 * For areas with an address space and backing store,
@@ -98,7 +101,7 @@ struct vm_area_struct {
 	struct anon_vma *anon_vma;	/* Serialized by page_table_lock */
 
 	/* Function pointers to deal with this struct. */
-	struct vm_operations_struct * vm_ops;
+	struct vm_operations_struct * vm_ops;	/* 相关操作表 */
 
 	/* Information about our backing store: */
 	unsigned long vm_pgoff;		/* Offset (within vm_file) in PAGE_SIZE
@@ -740,6 +743,19 @@ extern unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 	unsigned long len, unsigned long prot,
 	unsigned long flag, unsigned long pgoff);
 
+/* 
+ * 创建一个内存区域,这个内存区域可能要映射磁盘文件的某些区域(比如代码段,数据段).
+ * 新创建的内存区域可能会和进程相邻的内存区域合并.下
+ *
+ * 对用户进程反映为系统调用mmap()函数
+ * 
+ * file:	需要映射的文件,如果有的话
+ * addr:	从何处开始查找空闲的内存区域
+ * len:		需要多大的内存区域
+ * prot:	访问权限,分配的内存区域含有的所有页具有相同的权限性质
+ * flag:	一些标志,是否有文件跟这个内存区域关联等
+ * offset:	从文件何处开始映射
+ * */
 static inline unsigned long do_mmap(struct file *file, unsigned long addr,
 	unsigned long len, unsigned long prot,
 	unsigned long flag, unsigned long offset)
@@ -753,6 +769,11 @@ out:
 	return ret;
 }
 
+/* 销毁某地址空间中的某个内存区域,指定内存区域的起始地址和大小 
+ * 
+ * 在系统调用反映为munmap 
+ * 
+ * */
 extern int do_munmap(struct mm_struct *, unsigned long, size_t);
 
 extern unsigned long do_brk(unsigned long, unsigned long);
@@ -792,12 +813,16 @@ unsigned long max_sane_readahead(unsigned long nr);
 extern int expand_stack(struct vm_area_struct * vma, unsigned long address);
 
 /* Look up the first VMA which satisfies  addr < vm_end,  NULL if none. */
+/* 查找并返回第一个终止地址大于addr的内存区域;如果没有则返回NULL */
 extern struct vm_area_struct * find_vma(struct mm_struct * mm, unsigned long addr);
+
+/* 查找并返回第一个终止地址小于addr的内存区域;如果没有则返回NULL */
 extern struct vm_area_struct * find_vma_prev(struct mm_struct * mm, unsigned long addr,
 					     struct vm_area_struct **pprev);
 
 /* Look up the first VMA which intersects the interval start_addr..end_addr-1,
    NULL if none.  Assume start_addr < end_addr. */
+/* 查找并返回地一个与给定区间交叉的内存区域;如果没有则返回NULL */
 static inline struct vm_area_struct * find_vma_intersection(struct mm_struct * mm, unsigned long start_addr, unsigned long end_addr)
 {
 	struct vm_area_struct * vma = find_vma(mm,start_addr);
