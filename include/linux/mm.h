@@ -243,7 +243,12 @@ struct page {
 					 * When page is free, this indicates
 					 * order in the buddy system.
 					 */
-	struct address_space *mapping;	/* 属于哪个地址空间 */
+	struct address_space *mapping;	/* NOTE:不是代表属于哪个地址空间
+					 * 多个地址空间可能会共享同一个物理页,所以这个说法是显然不成立的
+					 * 当page属于交换分区,mapping指向交换分区的地址空间(swapper_space)
+					 * 当page属于文件映射或者是页缓存,mapping指向文件的地址空间(address_space)
+					 * 当page属于匿名映射,也就是用于进程间通信,mapping只想struct anon_vma对象.
+					 */
 					/* If low bit clear, points to
 					 * inode address_space, or NULL.
 					 * If page mapped as anonymous
@@ -251,7 +256,10 @@ struct page {
 					 * it points to anon_vma object:
 					 * see PAGE_MAPPING_ANON below.
 					 */
-	pgoff_t index;			/* Our offset within mapping. */
+	pgoff_t index;			/* 这个页在所属内存区域(vma_area_struct)中的偏移量;
+					 * 如果这个页是映射到文件的某部分,那么index是page在这个部分里的偏移量,而不是在整个文件中的偏移量.
+					 * */
+					/* Our offset within mapping. */
 	struct list_head lru;		/* Pageout list, eg. active_list
 					 * protected by zone->lru_lock !
 					 */

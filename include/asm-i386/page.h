@@ -45,6 +45,7 @@
 extern int nx_enabled;
 #ifdef CONFIG_X86_PAE
 extern unsigned long long __supported_pte_mask;
+/* x86体系下的页表分级 */
 typedef struct { unsigned long pte_low, pte_high; } pte_t;
 typedef struct { unsigned long long pmd; } pmd_t;
 typedef struct { unsigned long long pgd; } pgd_t;
@@ -131,6 +132,10 @@ extern int sysctl_legacy_va_layout;
 #define PAGE_OFFSET		((unsigned long)__PAGE_OFFSET)
 #define VMALLOC_RESERVE		((unsigned long)__VMALLOC_RESERVE)
 #define MAXMEM			(-__PAGE_OFFSET-__VMALLOC_RESERVE)
+
+/* linux中,物理地址的0x00000000对应到虚拟地址的PAGE_OFFSET,一般为0xc0000000.
+ * 这里是逆向的映射过程
+ * */
 #define __pa(x)			((unsigned long)(x)-PAGE_OFFSET)
 #define __va(x)			((void *)((unsigned long)(x)+PAGE_OFFSET))
 #define pfn_to_kaddr(pfn)      __va((pfn) << PAGE_SHIFT)
@@ -139,6 +144,8 @@ extern int sysctl_legacy_va_layout;
 #define page_to_pfn(page)	((unsigned long)((page) - mem_map))
 #define pfn_valid(pfn)		((pfn) < max_mapnr)
 #endif /* !CONFIG_DISCONTIGMEM */
+
+/* 虚拟地址转化成struct page结构体的地址 */
 #define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
 
 #define virt_addr_valid(kaddr)	pfn_valid(__pa(kaddr) >> PAGE_SHIFT)

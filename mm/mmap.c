@@ -1922,12 +1922,14 @@ unsigned long do_brk(unsigned long addr, unsigned long len)
  munmap_back:
 	vma = find_vma_prepare(mm, addr, &prev, &rb_link, &rb_parent);
 	if (vma && vma->vm_start < addr + len) {
+		/* 如果是要求缩小堆,那么调用do_munmmap,解除mm_struct对于相关虚拟地址的使用 */
 		if (do_munmap(mm, addr, len))
 			return -ENOMEM;
 		goto munmap_back;
 	}
 
 	/* Check against address space limits *after* clearing old maps... */
+	/* 检查扩大堆会不会超出某些限制 */
 	if ((mm->total_vm << PAGE_SHIFT) + len
 	    > current->signal->rlim[RLIMIT_AS].rlim_cur)
 		return -ENOMEM;
@@ -1941,6 +1943,7 @@ unsigned long do_brk(unsigned long addr, unsigned long len)
 	flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags;
 
 	/* Can we just expand an old private anonymous mapping? */
+	/* 是不是可以直接扩展,即堆内存区域后面有现成可用的空闲内存区域 */
 	if (vma_merge(mm, prev, addr, addr + len, flags,
 					NULL, NULL, pgoff, NULL))
 		goto out;
@@ -1948,6 +1951,7 @@ unsigned long do_brk(unsigned long addr, unsigned long len)
 	/*
 	 * create a vma struct for an anonymous mapping
 	 */
+	/* 建一个全新的内存区域,并把旧内存区域的地址映射迁移到新的内存区域 */
 	vma = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!vma) {
 		vm_unacct_memory(len >> PAGE_SHIFT);

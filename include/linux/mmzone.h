@@ -22,7 +22,7 @@
 
 struct free_area {
 	struct list_head	free_list;
-	unsigned long		nr_free;
+	unsigned long		nr_free;/* 这个空闲块链表维护的空闲块的个数 */
 };
 
 struct pglist_data;
@@ -125,6 +125,8 @@ struct zone {
 
 	/*
 	 * free areas of different sizes
+	 *
+	 * 空闲块链表数组,分别对应order为1,2,3,...,10的空闲块链表
 	 */
 	spinlock_t		lock;
 	struct free_area	free_area[MAX_ORDER];
@@ -190,6 +192,7 @@ struct zone {
 	 * primary users of these fields, and in mm/page_alloc.c
 	 * free_area_init_core() performs the initialization of them.
 	 */
+	 /* 以下三个变量维护一个hash表,用于记录有哪些进程正在等待页变为合法页*/
 	wait_queue_head_t	* wait_table;
 	unsigned long		wait_table_size;
 	unsigned long		wait_table_bits;
@@ -198,7 +201,7 @@ struct zone {
 	 * Discontig memory support fields.
 	 */
 	struct pglist_data	*zone_pgdat;
-	struct page		*zone_mem_map;
+	struct page		*zone_mem_map;/* 这个区的页数组的首地址,是mem_map的一部分 */
 	/* zone_start_pfn == zone_start_paddr >> PAGE_SHIFT */
 	unsigned long		zone_start_pfn;
 

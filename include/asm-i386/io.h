@@ -60,6 +60,9 @@
  *	This function does not give bus mappings for DMA transfers. In
  *	almost all conceivable cases a device driver should not be using
  *	this function
+ *
+ * 	NOTE:这个函数只为内核的虚拟地址服务．进程的虚拟地址不要应该使用这个函数，而应该使用４级页表查询机制．
+ * 
  */
  
 static inline unsigned long virt_to_phys(volatile void * address)
