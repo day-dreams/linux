@@ -81,10 +81,11 @@ struct dcookie_struct;
 #define DNAME_INLINE_LEN_MIN 36
 
 struct dentry {
-	atomic_t d_count;
+	atomic_t d_count;		/* 引用计数  */
 	unsigned int d_flags;		/* protected by d_lock */
 	spinlock_t d_lock;		/* 每个目录项目都有一个锁 */
-	struct inode *d_inode;		/* Where the name belongs to - NULL is
+	struct inode *d_inode;		/* 相关联的索引节点 */
+					/* Where the name belongs to - NULL is
 					 * negative */
 	/*
 	 * The next three fields are touched by __d_lookup.  Place them here

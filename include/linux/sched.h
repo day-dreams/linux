@@ -629,9 +629,9 @@ struct task_struct {
 /* CPU-specific state of this task */
 	struct thread_struct thread;
 /* filesystem information */
-	struct fs_struct *fs;
+	struct fs_struct *fs;/* 记录这个进程在哪个目录下启动的(当前工作目录,根目录等信息) */
 /* open file information */
-	struct files_struct *files;
+	struct files_struct *files;/* 进程文件表,记录这个进程打开了哪些文件;可以进程间共享 */
 /* namespace */
 	struct namespace *namespace;
 /* signal handlers */

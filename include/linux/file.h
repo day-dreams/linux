@@ -20,17 +20,17 @@
  * Open file table structure
  */
 struct files_struct {
-        atomic_t count;
+        atomic_t count;		/*引用计数;允许不同进程共享同一个files_struct,或者一个进程的多个线程使用同一个files_struct  */
         spinlock_t file_lock;     /* Protects all the below members.  Nests inside tsk->alloc_lock */
-        int max_fds;
+        int max_fds;		
         int max_fdset;
         int next_fd;
         struct file ** fd;      /* current fd array */
-        fd_set *close_on_exec;
+        fd_set *close_on_exec;	/* 进程执行exec()需要关闭的文件描述符 */
         fd_set *open_fds;
         fd_set close_on_exec_init;
         fd_set open_fds_init;
-        struct file * fd_array[NR_OPEN_DEFAULT];
+        struct file * fd_array[NR_OPEN_DEFAULT];/* 本进程打开的所有文件对象,默认长度32;如果打开文件超出32,会动态增长 */
 };
 
 extern void FASTCALL(__fput(struct file *));

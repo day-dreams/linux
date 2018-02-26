@@ -5,7 +5,7 @@ struct dentry;
 struct vfsmount;
 
 struct fs_struct {
-	atomic_t count;
+	atomic_t count;/* 有多少进程共享这个表 */
 	rwlock_t lock;
 	int umask;
 	struct dentry * root, * pwd, * altroot;

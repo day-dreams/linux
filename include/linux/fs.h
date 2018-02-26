@@ -428,20 +428,20 @@ struct inode {
 	struct list_head	i_list;
 	struct list_head	i_sb_list;
 	struct list_head	i_dentry;
-	unsigned long		i_ino;
+	unsigned long		i_ino;	/* 索引节点号，在块设备内是唯一的 */
 	atomic_t		i_count;
-	umode_t			i_mode;
+	umode_t			i_mode;/* 文件类型与访问权限 */
 	unsigned int		i_nlink;
-	uid_t			i_uid;
-	gid_t			i_gid;
-	dev_t			i_rdev;
-	loff_t			i_size;
+	uid_t			i_uid;	/* 所有者标识符 */
+	gid_t			i_gid;	/* 组标识符 */
+	dev_t			i_rdev;	
+	loff_t			i_size;	/* 文件大小(bytes) */
 	struct timespec		i_atime;
 	struct timespec		i_mtime;
 	struct timespec		i_ctime;
 	unsigned int		i_blkbits;
 	unsigned long		i_blksize;
-	unsigned long		i_version;
+	unsigned long		i_version;/* 版本号,文件每被使用一次都会加1 */
 	unsigned long		i_blocks;
 	unsigned short          i_bytes;
 	unsigned char		i_sock;
@@ -990,7 +990,7 @@ struct super_operations {
    	struct inode *(*alloc_inode)(struct super_block *sb);
 	void (*destroy_inode)(struct inode *);
 
-	void (*read_inode) (struct inode *);
+	void (*read_inode) (struct inode *);/* 读是指,用磁盘上inode的数据填充内存里的inode对象. */
   
    	void (*dirty_inode) (struct inode *);
 	int (*write_inode) (struct inode *, int);
