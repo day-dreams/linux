@@ -174,22 +174,23 @@ get_max:
 #define POLLOUT_SET (POLLWRBAND | POLLWRNORM | POLLOUT | POLLERR)
 #define POLLEX_SET (POLLPRI)
 
+/* select的真正细节 */
 int do_select(int n, fd_set_bits *fds, long *timeout)
 {
 	struct poll_wqueues table;
 	poll_table *wait;
-	int retval, i;
+	int retval, i;/* i是当前已经检测了的socket fd的最大值 */
 	long __timeout = *timeout;
 
  	spin_lock(&current->files->file_lock);
-	retval = max_select_fd(n, fds);
+	retval = max_select_fd(n, fds);/* 返回max(n,进程打开的最大描述符),因为设计到操作读文件表,所以需要加锁 */
 	spin_unlock(&current->files->file_lock);
 
 	if (retval < 0)
 		return retval;
 	n = retval;
 
-	poll_initwait(&table);
+	poll_initwait(&table);/* ??? */
 	wait = &table.pt;
 	if (!__timeout)
 		wait = NULL;
@@ -197,51 +198,62 @@ int do_select(int n, fd_set_bits *fds, long *timeout)
 	for (;;) {
 		unsigned long *rinp, *routp, *rexp, *inp, *outp, *exp;
 
-		set_current_state(TASK_INTERRUPTIBLE);
+		set_current_state(TASK_INTERRUPTIBLE);/* 设置当前(内核)进程状态:可中断 */
 
+		/* 取出待检测socket的bitmap的指针 */
 		inp = fds->in; outp = fds->out; exp = fds->ex;
 		rinp = fds->res_in; routp = fds->res_out; rexp = fds->res_ex;
 
 		for (i = 0; i < n; ++rinp, ++routp, ++rexp) {
-			unsigned long in, out, ex, all_bits, bit = 1, mask, j;
+			unsigned long in, out, ex, all_bits, bit = 1, mask, j;//bit代表当前bitmap块里，正被检测的socket fd
 			unsigned long res_in = 0, res_out = 0, res_ex = 0;
 			struct file_operations *f_op = NULL;
 			struct file *file = NULL;
 
+			// 取出要检测的socket,因为一个socket有可能同时出现在3个或2个或1个bitmap里,所以要合并在一起,保证没有遗漏
+			// 把指针移动到下一块要检测的bitmap
 			in = *inp++; out = *outp++; ex = *exp++;
 			all_bits = in | out | ex;
+
+			// 如果当前bitmpa块没有要检测的socket,则跳过
 			if (all_bits == 0) {
 				i += __NFDBITS;
 				continue;
 			}
 
+			// 遍历socket fd的块;按照其他代码,这个块有8*sizeof(usigned long)个socket
 			for (j = 0; j < __NFDBITS; ++j, ++i, bit <<= 1) {
-				if (i >= n)
+				if (i >= n) //如果检测完成
 					break;
 				if (!(bit & all_bits))
 					continue;
-				file = fget(i);
+				file = fget(i);//根据fd获取文件对象引用
 				if (file) {
 					f_op = file->f_op;
 					mask = DEFAULT_POLLMASK;
 					if (f_op && f_op->poll)
+						//使用文件操作表里的poll函数，来取出状态码;这个状态码可以指示文件发生了什么操作
 						mask = (*f_op->poll)(file, retval ? NULL : wait);
-					fput(file);
+					fput(file);//解引用
 					if ((mask & POLLIN_SET) && (in & bit)) {
+						//如果当前socket对应的文件 发生了输入操作
 						res_in |= bit;
 						retval++;
 					}
 					if ((mask & POLLOUT_SET) && (out & bit)) {
+						//如果当前socket对应的文件 发生了输出操作
 						res_out |= bit;
 						retval++;
 					}
 					if ((mask & POLLEX_SET) && (ex & bit)) {
+						//如果当前socket对应的文件 发生了错误
 						res_ex |= bit;
 						retval++;
 					}
 				}
 				cond_resched();
 			}
+			// 更新返回值
 			if (res_in)
 				*rinp = res_in;
 			if (res_out)
@@ -250,6 +262,7 @@ int do_select(int n, fd_set_bits *fds, long *timeout)
 				*rexp = res_ex;
 		}
 		wait = NULL;
+		// 如果检测到有可操作的socket，或者超时了，或者当前进程需要处理信号，就推出
 		if (retval || !__timeout || signal_pending(current))
 			break;
 		if(table.error) {
@@ -258,8 +271,11 @@ int do_select(int n, fd_set_bits *fds, long *timeout)
 		}
 		__timeout = schedule_timeout(__timeout);
 	}
+
+	// 改变当前进程状态
 	__set_current_state(TASK_RUNNING);
 
+	// 唤醒正在等待select返回的用户进程
 	poll_freewait(&table);
 
 	/*
@@ -298,8 +314,8 @@ sys_select(int n, fd_set __user *inp, fd_set __user *outp, fd_set __user *exp, s
 	long timeout;
 	int ret, size, max_fdset;
 
-	timeout = MAX_SCHEDULE_TIMEOUT;
-	if (tvp) {
+	timeout = MAX_SCHEDULE_TIMEOUT; /* 最大超时时限 */
+	if (tvp) {			/* 如果传入了tvp,则设置好timoout变量  */
 		time_t sec, usec;
 
 		if ((ret = verify_area(VERIFY_READ, tvp, sizeof(*tvp)))
@@ -322,7 +338,7 @@ sys_select(int n, fd_set __user *inp, fd_set __user *outp, fd_set __user *exp, s
 		goto out_nofds;
 
 	/* max_fdset can increase, so grab it once to avoid race */
-	max_fdset = current->files->max_fdset;
+	max_fdset = current->files->max_fdset;		/* 检查n是否超过了当前进程的最大fd */
 	if (n > max_fdset)
 		n = max_fdset;
 
@@ -333,16 +349,17 @@ sys_select(int n, fd_set __user *inp, fd_set __user *outp, fd_set __user *exp, s
 	 */
 	ret = -ENOMEM;
 	size = FDS_BYTES(n);
-	bits = select_bits_alloc(size);
+	bits = select_bits_alloc(size); /* 内部调用kmalloc,为bitmap分配内存*/
 	if (!bits)
 		goto out_nofds;
-	fds.in      = (unsigned long *)  bits;
+	fds.in      = (unsigned long *)  bits;	
 	fds.out     = (unsigned long *) (bits +   size);
 	fds.ex      = (unsigned long *) (bits + 2*size);
 	fds.res_in  = (unsigned long *) (bits + 3*size);
 	fds.res_out = (unsigned long *) (bits + 4*size);
 	fds.res_ex  = (unsigned long *) (bits + 5*size);
 
+	/* 初始化bitmap,一部分作为输入,一部分作为返回值 */
 	if ((ret = get_fd_set(n, inp, fds.in)) ||
 	    (ret = get_fd_set(n, outp, fds.out)) ||
 	    (ret = get_fd_set(n, exp, fds.ex)))
@@ -351,8 +368,10 @@ sys_select(int n, fd_set __user *inp, fd_set __user *outp, fd_set __user *exp, s
 	zero_fd_set(n, fds.res_out);
 	zero_fd_set(n, fds.res_ex);
 
+	/* 超时时间内调用do_select */
 	ret = do_select(n, &fds, &timeout);
 
+	/* 更新timeval */
 	if (tvp && !(current->personality & STICKY_TIMEOUTS)) {
 		time_t sec = 0, usec = 0;
 		if (timeout) {
@@ -368,18 +387,19 @@ sys_select(int n, fd_set __user *inp, fd_set __user *outp, fd_set __user *exp, s
 		goto out;
 	if (!ret) {
 		ret = -ERESTARTNOHAND;
-		if (signal_pending(current))
+		if (signal_pending(current))	/* 如果有延迟信号需要处理,直接返回,这次select算作失败,指示调用着重新seelct */
 			goto out;
 		ret = 0;
 	}
 
+	/* 如果调用成功了,传入的fdset会被适当修改;否则,传入的fdset为全0 */	
 	if (set_fd_set(n, inp, fds.res_in) ||
 	    set_fd_set(n, outp, fds.res_out) ||
 	    set_fd_set(n, exp, fds.res_ex))
 		ret = -EFAULT;
 
 out:
-	select_bits_free(bits, size);
+	select_bits_free(bits, size);/* 释放内存 */
 out_nofds:
 	return ret;
 }
