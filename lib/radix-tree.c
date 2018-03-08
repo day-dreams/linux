@@ -44,10 +44,11 @@
 #define RADIX_TREE_TAG_LONGS	\
 	((RADIX_TREE_MAP_SIZE + BITS_PER_LONG - 1) / BITS_PER_LONG)
 
+/* address_space中基树的节点 */
 struct radix_tree_node {
-	unsigned int	count;
-	void		*slots[RADIX_TREE_MAP_SIZE];
-	unsigned long	tags[RADIX_TREE_TAGS][RADIX_TREE_TAG_LONGS];
+	unsigned int	count;/* slots中非空指针数量 */
+	void		*slots[RADIX_TREE_MAP_SIZE];/* 2^6次方个子节点 */
+	unsigned long	tags[RADIX_TREE_TAGS][RADIX_TREE_TAG_LONGS];/* 每个子节点的标志,包括脏页标记等 */
 };
 
 struct radix_tree_path {

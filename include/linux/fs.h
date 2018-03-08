@@ -333,17 +333,22 @@ struct address_space_operations {
 
 struct backing_dev_info;
 struct address_space {
-	struct inode		*host;		/* owner: inode, block_device */
-	struct radix_tree_root	page_tree;	/* radix tree of all pages */
+	struct inode		*host;		/* 这个页缓存的所有者 */
+						/* owner: inode, block_device */
+	struct radix_tree_root	page_tree;	/* 页缓存中的所有页,以树的形式来组织,方便查找 */
+						/* radix tree of all pages */
 	spinlock_t		tree_lock;	/* and spinlock protecting it */
-	unsigned int		i_mmap_writable;/* count VM_SHARED mappings */
+	unsigned int		i_mmap_writable;/* 页缓存被几个进程共享.如果没有被共享,则可以写入*/
+						/* count VM_SHARED mappings */
 	struct prio_tree_root	i_mmap;		/* tree of private and shared mappings */
 	struct list_head	i_mmap_nonlinear;/*list VM_NONLINEAR mappings */
 	spinlock_t		i_mmap_lock;	/* protect tree, count, list */
 	unsigned int		truncate_count;	/* Cover race condition with truncate */
-	unsigned long		nrpages;	/* number of total pages */
+	unsigned long		nrpages;	/* 所有者的页总数 */
+						/* number of total pages */
 	pgoff_t			writeback_index;/* writeback starts here */
-	struct address_space_operations *a_ops;	/* methods */
+	struct address_space_operations *a_ops;	/* 页的操作方法 */
+						/* methods */
 	unsigned long		flags;		/* error bits/gfp mask */
 	struct backing_dev_info *backing_dev_info; /* device readahead, etc */
 	spinlock_t		private_lock;	/* for use by the address_space */
@@ -452,7 +457,7 @@ struct inode {
 	struct file_operations	*i_fop;	/* former ->i_op->default_file_ops */
 	struct super_block	*i_sb;
 	struct file_lock	*i_flock;
-	struct address_space	*i_mapping;
+	struct address_space	*i_mapping;/* 映射到的'地址空间' */
 	struct address_space	i_data;
 #ifdef CONFIG_QUOTA
 	struct dquot		*i_dquot[MAXQUOTAS];
@@ -923,6 +928,7 @@ struct file_operations {
 	struct module *owner;
 	loff_t (*llseek) (struct file *, loff_t, int);
 	ssize_t (*read) (struct file *, char __user *, size_t, loff_t *);
+	/* 通用的读操作 */
 	ssize_t (*aio_read) (struct kiocb *, char __user *, size_t, loff_t);
 	ssize_t (*write) (struct file *, const char __user *, size_t, loff_t *);
 	ssize_t (*aio_write) (struct kiocb *, const char __user *, size_t, loff_t);

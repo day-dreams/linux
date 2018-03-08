@@ -22,6 +22,7 @@
 #include <linux/preempt.h>
 #include <linux/types.h>
 
+/* address_space中基树的树根 */
 struct radix_tree_root {
 	unsigned int		height;
 	int			gfp_mask;

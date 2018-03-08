@@ -2098,6 +2098,7 @@ __generic_file_aio_write_nolock(struct kiocb *iocb, const struct iovec *iov,
 	inode_update_time(inode, 1);
 
 	/* coalesce the iovecs and go direct-to-BIO for O_DIRECT */
+	/* 同步写 */
 	if (unlikely(file->f_flags & O_DIRECT)) {
 		written = generic_file_direct_write(iocb, iov,
 				&nr_segs, pos, ppos, count, ocount);

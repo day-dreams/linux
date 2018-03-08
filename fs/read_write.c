@@ -223,6 +223,7 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
 
+	// 检查:文件打开模式,操作表,用户提供的数据区域是不是属于用户空间
 	if (!(file->f_mode & FMODE_READ))
 		return -EBADF;
 	if (!file->f_op || (!file->f_op->read && !file->f_op->aio_read))
@@ -230,10 +231,14 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 	if (unlikely(!access_ok(VERIFY_WRITE, buf, count)))
 		return -EFAULT;
 
+	// 检查:申请读取的文件部分是否合法(大于0)
 	ret = rw_verify_area(READ, file, pos, count);
 	if (!ret) {
+
+		// 是否可读
 		ret = security_file_permission (file, MAY_READ);
 		if (!ret) {
+			// 如果文件本身有专用的读方法,直接使用;否则使用bio层发起读请求
 			if (file->f_op->read)
 				ret = file->f_op->read(file, buf, count, pos);
 			else
