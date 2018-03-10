@@ -1,6 +1,6 @@
 代码来自linux-2.6.11.1,除注释外不做任何修改.
 
-目前已经注释过的文件有:
+## 注释过的文件
 
 * include
     * linux
@@ -37,7 +37,9 @@
 
 
 
+## 特别重要的文件
 
+* net/ipv4/af_inet.c,IPV4下的TCP和UDP socket的相关操作都在里面,包括bind等.
 
 
 

@@ -1301,16 +1301,22 @@ asmlinkage long sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
 	char address[MAX_SOCK_ADDR];
 	int err;
 
+	/* 根据fd查找到对应的socket对象 */
 	if((sock = sockfd_lookup(fd,&err))!=NULL)
 	{
+		/* 把要绑定的地址传给内核 */
 		if((err=move_addr_to_kernel(umyaddr,addrlen,address))>=0) {
+			/* 检查绑定操作是不是安全的 */
 			err = security_socket_bind(sock, (struct sockaddr *)address, addrlen);
 			if (err) {
+				/* 减小socket对应的file对象的引用计数 */
 				sockfd_put(sock);
 				return err;
 			}
+			/* 真正的bind */
 			err = sock->ops->bind(sock, (struct sockaddr *)address, addrlen);
 		}
+		/* 减小socket对应的file对象的引用计数 */
 		sockfd_put(sock);
 	}			
 	return err;

@@ -385,6 +385,7 @@ int inet_release(struct socket *sock)
 /* It is off by default, see below. */
 int sysctl_ip_nonlocal_bind;
 
+/* 这个函数主要是设置sock对象的一些字段,用于指定sock可以收到哪些地址的包等 */
 int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 {
 	struct sockaddr_in *addr = (struct sockaddr_in *)uaddr;
@@ -412,6 +413,8 @@ int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	 * (ie. your servers still start up even if your ISDN link
 	 *  is temporarily down)
 	 */
+
+	/* 各种各样的检查,比如inet socket是否可以自由绑定,是否可以绑定到多播广播地址等 */
 	err = -EADDRNOTAVAIL;
 	if (!sysctl_ip_nonlocal_bind &&
 	    !inet->freebind &&
@@ -783,7 +786,7 @@ struct proto_ops inet_stream_ops = {
 	.family =	PF_INET,
 	.owner =	THIS_MODULE,
 	.release =	inet_release,
-	.bind =		inet_bind,
+	.bind =		inet_bind,/* TCP socket 使用inet_bind */
 	.connect =	inet_stream_connect,
 	.socketpair =	sock_no_socketpair,
 	.accept =	inet_accept,
@@ -804,7 +807,7 @@ struct proto_ops inet_dgram_ops = {
 	.family =	PF_INET,
 	.owner =	THIS_MODULE,
 	.release =	inet_release,
-	.bind =		inet_bind,
+	.bind =		inet_bind,/* UDP socket 使用inet_bind */
 	.connect =	inet_dgram_connect,
 	.socketpair =	sock_no_socketpair,
 	.accept =	sock_no_accept,
@@ -829,7 +832,7 @@ static struct proto_ops inet_sockraw_ops = {
 	.family =	PF_INET,
 	.owner =	THIS_MODULE,
 	.release =	inet_release,
-	.bind =		inet_bind,
+	.bind =		inet_bind,/* raw socket 使用inet_bind */
 	.connect =	inet_dgram_connect,
 	.socketpair =	sock_no_socketpair,
 	.accept =	sock_no_accept,

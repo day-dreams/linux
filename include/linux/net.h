@@ -121,6 +121,7 @@ struct sockaddr;
 struct msghdr;
 struct module;
 
+/* socket操作表,根据socket类型不同,操作会有变化 */
 struct proto_ops {
 	int		family;
 	struct module	*owner;
