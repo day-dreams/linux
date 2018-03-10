@@ -361,7 +361,7 @@ static struct dentry_operations sockfs_dentry_operations = {
  *	with shared fd spaces, we cannot solve it inside kernel,
  *	but we take care of internal coherence yet.
  */
-
+/* 建立socket和文件表的联系 */
 int sock_map_fd(struct socket *sock)
 {
 	int fd;
@@ -374,6 +374,7 @@ int sock_map_fd(struct socket *sock)
 
 	fd = get_unused_fd();
 	if (fd >= 0) {
+		/* 获取一个空闲的file结构体 */
 		struct file *file = get_empty_filp();
 
 		if (!file) {
@@ -387,6 +388,7 @@ int sock_map_fd(struct socket *sock)
 		this.len = strlen(name);
 		this.hash = SOCK_INODE(sock)->i_ino;
 
+		/* 分配一个dentry对象 */
 		file->f_dentry = d_alloc(sock_mnt->mnt_sb->s_root, &this);
 		if (!file->f_dentry) {
 			put_filp(file);
@@ -394,16 +396,21 @@ int sock_map_fd(struct socket *sock)
 			fd = -ENOMEM;
 			goto out;
 		}
+		/* 更新dentry的操作表 */
 		file->f_dentry->d_op = &sockfs_dentry_operations;
+		/* 把dentry关联到socket对应的inode上 */
 		d_add(file->f_dentry, SOCK_INODE(sock));
 		file->f_vfsmnt = mntget(sock_mnt);
 		file->f_mapping = file->f_dentry->d_inode->i_mapping;
 
+		/* 把file关联到socket上 */
 		sock->file = file;
+		/* 更新file的操作表 */
 		file->f_op = SOCK_INODE(sock)->i_fop = &socket_file_ops;
 		file->f_mode = FMODE_READ | FMODE_WRITE;
 		file->f_flags = O_RDWR;
 		file->f_pos = 0;
+		/* 设置文件表 */
 		fd_install(fd, file);
 	}
 
@@ -464,17 +471,21 @@ static struct socket *sock_alloc(void)
 	struct inode * inode;
 	struct socket * sock;
 
+	/* 从专门的socket超级块上创建inode,可能是调用超级块自带的方法,也可能是调用slab机制来创建 */
 	inode = new_inode(sock_mnt->mnt_sb);
 	if (!inode)
 		return NULL;
 
+	/* socket超级块创建的inode,自然都带有一个socket,那么获得这个socket的引用 */
 	sock = SOCKET_I(inode);
 
+	/* 设置inode字段 */
 	inode->i_mode = S_IFSOCK|S_IRWXUGO;
 	inode->i_sock = 1;
 	inode->i_uid = current->fsuid;
 	inode->i_gid = current->fsgid;
 
+	/* 修改当前系统使用的sockets的数量,因为涉及到修改cpu的数据,需要暂时关闭cpu抢占功能并迅速打开 */
 	get_cpu_var(sockets_in_use)++;
 	put_cpu_var(sockets_in_use);
 	return sock;
@@ -1068,14 +1079,13 @@ int sock_wake_async(struct socket *sock, int how, int band)
 	return 0;
 }
 
+/* 根据协议类型等信息创建sock对象 */
 static int __sock_create(int family, int type, int protocol, struct socket **res, int kern)
 {
 	int err;
 	struct socket *sock;
 
-	/*
-	 *	Check protocol is in range
-	 */
+	/* 检查协议和类型是否合法 */
 	if (family < 0 || family >= NPROTO)
 		return -EAFNOSUPPORT;
 	if (type < 0 || type >= SOCK_MAX)
@@ -1086,6 +1096,7 @@ static int __sock_create(int family, int type, int protocol, struct socket **res
 	   This uglymoron is moved from INET layer to here to avoid
 	   deadlock in module load.
 	 */
+	/* 一些兼容性的操作 */
 	if (family == PF_INET && type == SOCK_PACKET) {
 		static int warned; 
 		if (!warned) {
@@ -1095,6 +1106,7 @@ static int __sock_create(int family, int type, int protocol, struct socket **res
 		family = PF_PACKET;
 	}
 
+	/* 检查安全性,并不创建socket */
 	err = security_socket_create(family, type, protocol, kern);
 	if (err)
 		return err;
@@ -1112,6 +1124,7 @@ static int __sock_create(int family, int type, int protocol, struct socket **res
 	}
 #endif
 
+	/* 检查是否支持这个socket类型 */
 	net_family_read_lock();
 	if (net_families[family] == NULL) {
 		err = -EAFNOSUPPORT;
@@ -1123,7 +1136,7 @@ static int __sock_create(int family, int type, int protocol, struct socket **res
  *	the protocol is 0, the family is instructed to select an appropriate
  *	default.
  */
-
+	/* 创建socket对象 */
 	if (!(sock = sock_alloc())) {
 		printk(KERN_WARNING "socket: no more sockets\n");
 		err = -ENFILE;		/* Not exactly a match, but its the
@@ -1137,16 +1150,20 @@ static int __sock_create(int family, int type, int protocol, struct socket **res
 	 * We will call the ->create function, that possibly is in a loadable
 	 * module, so we have to bump that loadable module refcnt first.
 	 */
+
+	/* 因为这段代码用到了相关模块,所以增加相关模块的引用计数 */
 	err = -EAFNOSUPPORT;
 	if (!try_module_get(net_families[family]->owner))
 		goto out_release;
 
+	/* 把socket注册到内核模块 */
 	if ((err = net_families[family]->create(sock, protocol)) < 0)
 		goto out_module_put;
 	/*
 	 * Now to bump the refcnt of the [loadable] module that owns this
 	 * socket at sock_release time we decrement its refcnt.
 	 */
+	/* 因为socket被注册了,要再次增加相关模块的引用计数 */
 	if (!try_module_get(sock->ops->owner)) {
 		sock->ops = NULL;
 		goto out_module_put;
@@ -1155,6 +1172,7 @@ static int __sock_create(int family, int type, int protocol, struct socket **res
 	 * Now that we're done with the ->create function, the [loadable]
 	 * module can have its refcnt decremented
 	 */
+	/* socket创建好了,也被注册到了相关模块;这段代码不再使用相关模块,所以减小相关模块的引用计数 */
 	module_put(net_families[family]->owner);
 	*res = sock;
 	security_socket_post_create(sock, family, type, protocol, kern);
@@ -1184,10 +1202,12 @@ asmlinkage long sys_socket(int family, int type, int protocol)
 	int retval;
 	struct socket *sock;
 
+	/* 创建socket对象 */
 	retval = sock_create(family, type, protocol, &sock);
 	if (retval < 0)
 		goto out;
 
+	/* 把socket对象映射到文件对象,返回值即是文件对象描述副 */
 	retval = sock_map_fd(sock);
 	if (retval < 0)
 		goto out_release;

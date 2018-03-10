@@ -102,15 +102,15 @@ enum sock_type {
  *  @type - socket type (%SOCK_STREAM, etc)
  *  @passcred - credentials (used only in Unix Sockets (aka PF_LOCAL))
  */
-struct socket {
-	socket_state		state;
-	unsigned long		flags;
-	struct proto_ops	*ops;
-	struct fasync_struct	*fasync_list;
-	struct file		*file;
-	struct sock		*sk;
+struct socket {/* socket对象 */
+	socket_state		state;/* socket状态,比如connected等 */
+	unsigned long		flags;/* socket标志 */
+	struct proto_ops	*ops;/* socket相关的操作,与协议相关 */
+	struct fasync_struct	*fasync_list;/* TODO:异步的等待队列 */
+	struct file		*file;/* 相关联的文件对象 */
+	struct sock		*sk;/* 相关联的sock对象 */
 	wait_queue_head_t	wait;
-	short			type;
+	short type; /* socket类型,如sock_stream,sock_raw */
 	unsigned char		passcred;
 };
 

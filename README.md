@@ -2,9 +2,6 @@
 
 目前已经注释过的文件有:
 
-* fs  
-    * select.c
-    * read_write.c
 * include
     * linux
         * fs.h
@@ -17,13 +14,15 @@
         * mmzone.h
         * gfp.h
         * slab.h
-
+	* net.h
     * asm-alpha
         * page.h
     * asm-i386
         * io.h
         * page.h
-
+* fs  
+    * select.c
+    * read_write.c
 * lib
     * radix-tree.c
 * mm
@@ -32,7 +31,8 @@
     * slab.c
 * kernel
     * fork.c
-
+* net
+    * socket.c
 
 
 
