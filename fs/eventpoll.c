@@ -531,53 +531,48 @@ sys_epoll_ctl(int epfd, int op, int fd, struct epoll_event __user *event)
 	DNPRINTK(3, (KERN_INFO "[%p] eventpoll: sys_epoll_ctl(%d, %d, %d, %p)\n",
 		     current, epfd, op, fd, event));
 
+	/* 检查是否是申请删除event,并把event从用户空间复制到内核空间(可见每次) */
 	error = -EFAULT;
 	if (EP_OP_HASH_EVENT(op) &&
 	    copy_from_user(&epds, event, sizeof(struct epoll_event)))
 		goto eexit_1;
 
-	/* Get the "struct file *" for the eventpoll file */
+	/* 获取eventpoll对应的文件对象 */
 	error = -EBADF;
 	file = fget(epfd);
 	if (!file)
 		goto eexit_1;
 
-	/* Get the "struct file *" for the target file */
+	/* 获取目标监听文件对应的文件对象 */
 	tfile = fget(fd);
 	if (!tfile)
 		goto eexit_2;
 
-	/* The target file descriptor must support poll */
+	/* 两部分检查,必须确认用户传进来的是个eventpoll对象,并且要监听的文件对象必须支持epoll相关操作 */
 	error = -EPERM;
 	if (!tfile->f_op || !tfile->f_op->poll)
 		goto eexit_3;
 
-	/*
-	 * We have to check that the file structure underneath the file descriptor
-	 * the user passed to us _is_ an eventpoll file. And also we do not permit
-	 * adding an epoll file descriptor inside itself.
-	 */
 	error = -EINVAL;
 	if (file == tfile || !IS_FILE_EPOLL(file))
 		goto eexit_3;
 
-	/*
-	 * At this point it is safe to assume that the "private_data" contains
-	 * our own data structure.
-	 */
+	/* 检查完毕,获取eventpoll */
 	ep = file->private_data;
 
 	down_write(&ep->sem);
 
-	/* Try to lookup the file inside our hash table */
+	/* 在hash表中查找文件对象 */
 	epi = ep_find(ep, tfile, fd);
 
+	/* 增加,删除,修改event */
 	error = -EINVAL;
 	switch (op) {
 	case EPOLL_CTL_ADD:
 		if (!epi) {
 			epds.events |= POLLERR | POLLHUP;
 
+			/* 把文件对象添加到eventpoll,并设置好回调函数 */
 			error = ep_insert(ep, &epds, tfile, fd);
 		} else
 			error = -EEXIST;
@@ -636,28 +631,21 @@ asmlinkage long sys_epoll_wait(int epfd, struct epoll_event __user *events,
 	if (maxevents <= 0)
 		return -EINVAL;
 
-	/* Verify that the area passed by the user is writeable */
+	/* 内核要把数据写入用户空间,需要检查是否可写 */
 	if ((error = verify_area(VERIFY_WRITE, events, maxevents * sizeof(struct epoll_event))))
 		goto eexit_1;
 
-	/* Get the "struct file *" for the eventpoll file */
+	/* 获取eventpoll的文件对象,并检查之 */
 	error = -EBADF;
 	file = fget(epfd);
 	if (!file)
 		goto eexit_1;
 
-	/*
-	 * We have to check that the file structure underneath the fd
-	 * the user passed to us _is_ an eventpoll file.
-	 */
 	error = -EINVAL;
 	if (!IS_FILE_EPOLL(file))
 		goto eexit_2;
 
-	/*
-	 * At this point it is safe to assume that the "private_data" contains
-	 * our own data structure.
-	 */
+	/* 获取eventpoll */
 	ep = file->private_data;
 
 	/* Time to fish for events ... */
@@ -882,6 +870,8 @@ static void ep_release_epitem(struct epitem *epi)
 
 
 /*
+ * 这里设置好回调函数,是epoll高效的原因之一.
+ * 这个回调用于把等待队列添加到文件需要唤醒的列表.
  * This is the callback that is used to add our wait queue to the
  * target file wakeup lists.
  */
@@ -950,6 +940,7 @@ static int ep_insert(struct eventpoll *ep, struct epoll_event *event,
 	epi->nwait = 0;
 
 	/* Initialize the poll table using the queue callback */
+	/* 这里设置回调函数,这里的回调函数不是文件IO事件发生时调用的,而是用于把等待队列添加到文件对象需要唤醒的进程列表里 */
 	epq.epi = epi;
 	init_poll_funcptr(&epq.pt, ep_ptable_queue_proc);
 
@@ -1204,6 +1195,7 @@ eexit_1:
 
 
 /*
+ * 这才是文件IO发生时,需要调用的回调.如果文件对象有IO事件可以报告,就调用这个回调,唤醒等待队列
  * This is the callback that is passed to the wait queue wakeup
  * machanism. It is called by the stored file descriptors when they
  * have events to report.
@@ -1439,6 +1431,8 @@ static void ep_reinject_items(struct eventpoll *ep, struct list_head *txlist)
 
 
 /*
+ * 把内核监测到的IO事件导出到用户空间
+ * 
  * Perform the transfer of events to user space.
  */
 static int ep_events_transfer(struct eventpoll *ep,
@@ -1470,6 +1464,7 @@ static int ep_events_transfer(struct eventpoll *ep,
 }
 
 
+/* epoll_wait的真正细节 */
 static int ep_poll(struct eventpoll *ep, struct epoll_event __user *events,
 		   int maxevents, long timeout)
 {
@@ -1492,6 +1487,8 @@ retry:
 	res = 0;
 	if (list_empty(&ep->rdllist)) {
 		/*
+		 * 没有就绪的文件,所以陷入sleep,直到文件IO事件发生,再把进程唤醒
+		 * 
 		 * We don't have any available event to return to the caller.
 		 * We need to sleep here, and we will be wake up by
 		 * ep_poll_callback() when events will become available.
@@ -1501,6 +1498,9 @@ retry:
 
 		for (;;) {
 			/*
+			 * 为什么是循环? 因为可能文件IO事件发生了需要返回,但同时有些信号要处理,应该优先处理信号.那么需要
+			 * 在循环里处理信号的可能性,通过状态码让后面的代码返回.
+			 * 
 			 * We don't want to sleep if the ep_poll_callback() sends us
 			 * a wakeup in between. That's why we set the task state
 			 * to TASK_INTERRUPTIBLE before doing the checks.
@@ -1514,7 +1514,10 @@ retry:
 			}
 
 			write_unlock_irqrestore(&ep->lock, flags);
+
+			/* 这个是调度函数,让进程陷入sleep */
 			jtimeout = schedule_timeout(jtimeout);
+			
 			write_lock_irqsave(&ep->lock, flags);
 		}
 		remove_wait_queue(&ep->wq, &wait);
@@ -1528,6 +1531,10 @@ retry:
 	write_unlock_irqrestore(&ep->lock, flags);
 
 	/*
+	 * 处理信号 和 处理文件IO事件发生 写在了一起.
+	 * 
+	 * 如果是IO事件发生了,就直接把事件相关信息复制到用户空间,然后返回.
+	 * 
 	 * Try to transfer events to user space. In case we get 0 events and
 	 * there's still timeout left over, we go trying again in search of
 	 * more luck.
