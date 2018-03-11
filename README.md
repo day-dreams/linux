@@ -25,6 +25,7 @@
 * fs  
     * select.c
     * read_write.c
+    * eventpoll.c
 * lib
     * radix-tree.c
 * mm
@@ -46,7 +47,7 @@
 
 * net/ipv4/af_inet.c,IPV4下的TCP和UDP socket的相关操作都在里面,包括bind等.
 
-
+* fs/eventpoll.c,epoll机制全在里面。
 
 
 
