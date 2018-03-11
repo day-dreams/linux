@@ -227,6 +227,7 @@ static struct sock *udp_v4_lookup_longway(u32 saddr, u16 sport,
 	unsigned short hnum = ntohs(dport);
 	int badness = -1;
 
+	/* sk_for_each是个宏定义,扩展开了是个for循环,感觉简直是黑科技.... */
 	sk_for_each(sk, node, &udp_hash[hnum & (UDP_HTABLE_SIZE - 1)]) {
 		struct inet_sock *inet = inet_sk(sk);
 

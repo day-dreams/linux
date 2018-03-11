@@ -20,6 +20,8 @@
     * asm-i386
         * io.h
         * page.h
+    * net
+	* sock.h
 * fs  
     * select.c
     * read_write.c
@@ -33,6 +35,9 @@
     * fork.c
 * net
     * socket.c
+    * ipv4
+	* af_inet.c
+	* udp.c
 
 
 
