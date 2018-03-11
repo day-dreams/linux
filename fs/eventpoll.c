@@ -479,23 +479,21 @@ asmlinkage long sys_epoll_create(int size)
 	struct inode *inode;
 	struct file *file;
 
+	/* debug输出 */
 	DNPRINTK(3, (KERN_INFO "[%p] eventpoll: sys_epoll_create(%d)\n",
 		     current, size));
 
-	/* Sanity check on the size parameter */
+	/* size<0则退出 */
 	error = -EINVAL;
 	if (size <= 0)
 		goto eexit_1;
 
-	/*
-	 * Creates all the items needed to setup an eventpoll file. That is,
-	 * a file structure, and inode and a free file descriptor.
-	 */
+	/* 创建eventpoll需要的所有结构:inode,file,和文件描述符 */
 	error = ep_getfd(&fd, &inode, &file);
 	if (error)
 		goto eexit_1;
 
-	/* Setup the file internal data structure ( "struct eventpoll" ) */
+	/* 初始化好eventpoll */
 	error = ep_file_init(file);
 	if (error)
 		goto eexit_2;
@@ -687,28 +685,25 @@ static int ep_getfd(int *efd, struct inode **einode, struct file **efile)
 	struct file *file;
 	int error, fd;
 
-	/* Get an ready to use file */
+	/* 获取一个可用的文件对象 */
 	error = -ENFILE;
 	file = get_empty_filp();
 	if (!file)
 		goto eexit_1;
 
-	/* Allocates an inode from the eventpoll file system */
+	/* 使用eventpoll文件系统的slab机制,分配一个节点 */
 	inode = ep_eventpoll_inode();
 	error = PTR_ERR(inode);
 	if (IS_ERR(inode))
 		goto eexit_2;
 
-	/* Allocates a free descriptor to plug the file onto */
+	/* 从进程文件表里获取一个空闲fd,失败则退出 */
 	error = get_unused_fd();
 	if (error < 0)
 		goto eexit_3;
 	fd = error;
 
-	/*
-	 * Link the inode to a directory entry by creating a unique name
-	 * using the inode number.
-	 */
+	/* 创建一个dentry,并把dentry关联到inode节点上,dentry的路径名根据inode的节点号来生成. */
 	error = -ENOMEM;
 	sprintf(name, "[%lu]", inode->i_ino);
 	this.name = name;
@@ -719,18 +714,22 @@ static int ep_getfd(int *efd, struct inode **einode, struct file **efile)
 		goto eexit_4;
 	dentry->d_op = &eventpollfs_dentry_operations;
 	d_add(dentry, inode);
+
+	/* 设置文件对象指向的超级块,即全局变量eventpoll_mnt */
 	file->f_vfsmnt = mntget(eventpoll_mnt);
+
+	/* 设置其他文件属性 */
 	file->f_dentry = dentry;
 	file->f_mapping = inode->i_mapping;
-
 	file->f_pos = 0;
 	file->f_flags = O_RDONLY;
+	/* 把文件操作表设置为eventpoll专有的操作表 */
 	file->f_op = &eventpoll_fops;
 	file->f_mode = FMODE_READ;
 	file->f_version = 0;
 	file->private_data = NULL;
 
-	/* Install the new setup file into the allocated fd. */
+	/* 把文件对象安装到进程文件表 */
 	fd_install(fd, file);
 
 	*efd = fd;
@@ -753,17 +752,23 @@ static int ep_file_init(struct file *file)
 {
 	struct eventpoll *ep;
 
+	/* 分配一个eventpoll */
 	if (!(ep = kmalloc(sizeof(struct eventpoll), GFP_KERNEL)))
 		return -ENOMEM;
 
 	memset(ep, 0, sizeof(*ep));
+	/* 初始化读写锁 */
 	rwlock_init(&ep->lock);
 	init_rwsem(&ep->sem);
+	/* 初始化等待队列,其实就是把:wq->next=wq,wq->prev=wq */
 	init_waitqueue_head(&ep->wq);
 	init_waitqueue_head(&ep->poll_wait);
 	INIT_LIST_HEAD(&ep->rdllist);
+
+	/* 初始化红黑树,用于管理被监听的fd */
 	ep->rbr = RB_ROOT;
 
+	/* eventpoll直接被存储在file->private_data里 */
 	file->private_data = ep;
 
 	DNPRINTK(3, (KERN_INFO "[%p] eventpoll: ep_file_init() ep=%p\n",
