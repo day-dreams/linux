@@ -576,6 +576,7 @@ static int copy_files(unsigned long clone_flags, struct task_struct * tsk)
 	 */
 	tsk->files = NULL;
 	error = -ENOMEM;
+	/* 创建新的文件表 */
 	newf = kmem_cache_alloc(files_cachep, SLAB_KERNEL);
 	if (!newf) 
 		goto out;
@@ -592,6 +593,7 @@ static int copy_files(unsigned long clone_flags, struct task_struct * tsk)
 
 	spin_lock(&oldf->file_lock);
 
+	/* 打开的文件数量 */
 	open_files = count_open_files(oldf, oldf->max_fdset);
 	expand = 0;
 
@@ -609,6 +611,7 @@ static int copy_files(unsigned long clone_flags, struct task_struct * tsk)
 	}
 
 	/* if the old fdset gets grown now, we'll only copy up to "size" fds */
+	/* 扩张文件表 */
 	if (expand) {
 		spin_unlock(&oldf->file_lock);
 		spin_lock(&newf->file_lock);
@@ -622,12 +625,15 @@ static int copy_files(unsigned long clone_flags, struct task_struct * tsk)
 	old_fds = oldf->fd;
 	new_fds = newf->fd;
 
+	/* 复制已打开的、退出时需要关闭的文件位图 */
 	memcpy(newf->open_fds->fds_bits, oldf->open_fds->fds_bits, open_files/8);
 	memcpy(newf->close_on_exec->fds_bits, oldf->close_on_exec->fds_bits, open_files/8);
 
+	/* 依次增加file的引用计数 */
 	for (i = open_files; i != 0; i--) {
 		struct file *f = *old_fds++;
 		if (f) {
+			/* 增加文件对象的引用计数 */
 			get_file(f);
 		} else {
 			/*
@@ -638,6 +644,8 @@ static int copy_files(unsigned long clone_flags, struct task_struct * tsk)
 			 */
 			FD_CLR(open_files - i, newf->open_fds);
 		}
+
+		/* NOTE:直接复制了文件对象的地址,并没有创建新的文件,所以文件的偏移量都没有改变 */
 		*new_fds++ = f;
 	}
 	spin_unlock(&oldf->file_lock);
@@ -817,10 +825,11 @@ static task_t *copy_process(unsigned long clone_flags,
 		goto fork_out;
 
 	retval = -ENOMEM;
-	p = dup_task_struct(current);
+	p = dup_task_struct(current);/* 复制task结构体 */
 	if (!p)
 		goto fork_out;
 
+	/* 检查用户创建的进程是否超出了限制 */
 	retval = -EAGAIN;
 	if (atomic_read(&p->user->processes) >=
 			p->signal->rlim[RLIMIT_NPROC].rlim_cur) {
@@ -909,21 +918,21 @@ static task_t *copy_process(unsigned long clone_flags,
 	/* copy all the process information */
 	if ((retval = copy_semundo(clone_flags, p)))
 		goto bad_fork_cleanup_audit;
-	if ((retval = copy_files(clone_flags, p)))
+	if ((retval = copy_files(clone_flags, p)))/* 复制文件表,整个fd array都被复制过来了 */
 		goto bad_fork_cleanup_semundo;
-	if ((retval = copy_fs(clone_flags, p)))
+	if ((retval = copy_fs(clone_flags, p)))/* 复制文件系统信息,即工作目录,root目录等 */
 		goto bad_fork_cleanup_files;
-	if ((retval = copy_sighand(clone_flags, p)))
+	if ((retval = copy_sighand(clone_flags, p)))/* 复制信号handle */
 		goto bad_fork_cleanup_fs;
 	if ((retval = copy_signal(clone_flags, p)))
 		goto bad_fork_cleanup_sighand;
-	if ((retval = copy_mm(clone_flags, p)))
+	if ((retval = copy_mm(clone_flags, p)))/* 复制内存控制结构体,包括页表、mmap相关信息;但是没有真正复制内存,即没有为新进程分配新的struct page */
 		goto bad_fork_cleanup_signal;
 	if ((retval = copy_keys(clone_flags, p)))
 		goto bad_fork_cleanup_mm;
 	if ((retval = copy_namespace(clone_flags, p)))
 		goto bad_fork_cleanup_keys;
-	retval = copy_thread(0, clone_flags, stack_start, stack_size, p, regs);
+	retval = copy_thread(0, clone_flags, stack_start, stack_size, p, regs);/* 复制硬件上下文信息 */
 	if (retval)
 		goto bad_fork_cleanup_namespace;
 

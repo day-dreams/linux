@@ -530,7 +530,7 @@ struct mempolicy;
 
 struct task_struct {
 	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
-	struct thread_info *thread_info;
+	struct thread_info *thread_info;/* 上下文信息，包括寄存器等硬件上下文 */
 	atomic_t usage;
 	unsigned long flags;	/* per process flags, defined below */
 	unsigned long ptrace;

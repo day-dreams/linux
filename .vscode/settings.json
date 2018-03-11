@@ -11,6 +11,10 @@
 	"hash_map": "c",
 	"hash_set": "c",
 	"chrono": "c",
-	"algorithm": "c"
+	"algorithm": "c",
+	"pgalloc.h": "c",
+	"mutex": "c",
+	"functional": "c",
+	"condition_variable": "c"
 }
 }
