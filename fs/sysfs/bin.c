@@ -102,6 +102,7 @@ static ssize_t write(struct file * file, const char __user * userbuf,
 	return count;
 }
 
+/* 把file和vma关联起来 */
 static int mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct dentry *dentry = file->f_dentry;

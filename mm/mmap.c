@@ -875,6 +875,7 @@ unsigned long do_mmap_pgoff(struct file * file, unsigned long addr,
 	int accountable = 1;
 	unsigned long charged = 0;
 
+	/* 检查是不是映射到文件;如果是,那么上级调用已经拿到了文件对象,要检查文件是不是支持mmap操作,以及是不是可以作为可执行区域 */
 	if (file) {
 		if (is_file_hugepages(file))
 			accountable = 0;
@@ -886,6 +887,7 @@ unsigned long do_mmap_pgoff(struct file * file, unsigned long addr,
 		    (file->f_vfsmnt->mnt_flags & MNT_NOEXEC))
 			return -EPERM;
 	}
+
 	/*
 	 * Does the application expect PROT_READ to imply PROT_EXEC?
 	 *
@@ -896,6 +898,7 @@ unsigned long do_mmap_pgoff(struct file * file, unsigned long addr,
 		if (!(file && (file->f_vfsmnt->mnt_flags & MNT_NOEXEC)))
 			prot |= PROT_EXEC;
 
+	/* 可见len是不能为0的! */
 	if (!len)
 		return addr;
 
@@ -904,17 +907,15 @@ unsigned long do_mmap_pgoff(struct file * file, unsigned long addr,
 	if (!len || len > TASK_SIZE)
 		return -EINVAL;
 
-	/* offset overflow? */
+	/* 申请的地址是不是溢出到内核空间了? */
 	if ((pgoff + (len >> PAGE_SHIFT)) < pgoff)
 		return -EINVAL;
 
-	/* Too many mappings? */
+	/* 进程是不是已经创建了太多的mmap? */
 	if (mm->map_count > sysctl_max_map_count)
 		return -ENOMEM;
 
-	/* Obtain the address to map to. we verify (or select) it and ensure
-	 * that it represents a valid section of the address space.
-	 */
+	/* 从用户地址空间里划分出合适的内存区域,addr指向其首地址;此时addr还不一定合法,内存区域也没有被创建完成 */
 	addr = get_unmapped_area(file, addr, len, pgoff, flags);
 	if (addr & ~PAGE_MASK)
 		return addr;
@@ -943,6 +944,7 @@ unsigned long do_mmap_pgoff(struct file * file, unsigned long addr,
 
 	inode = file ? file->f_dentry->d_inode : NULL;
 
+	/* 这个if-else主要是做点检查,比如读写权限;同时会设定好vm_flags */
 	if (file) {
 		switch (flags & MAP_TYPE) {
 		case MAP_SHARED:
@@ -991,11 +993,14 @@ unsigned long do_mmap_pgoff(struct file * file, unsigned long addr,
 		}
 	}
 
+	/* 检查下权限和mmap模式是否合法 */
 	error = security_file_mmap(file, prot, flags);
 	if (error)
 		return error;
 		
-	/* Clear old maps */
+	/* 这里检查是不是有内存区域和分配的内存区域重合,
+	 * 如果有,就删除新分配的,返回错误代码;
+	 * 如果没有,说明是可用的*/
 	error = -ENOMEM;
 munmap_back:
 	vma = find_vma_prepare(mm, addr, &prev, &rb_link, &rb_parent);
@@ -1005,11 +1010,12 @@ munmap_back:
 		goto munmap_back;
 	}
 
-	/* Check against address space limit. */
+	/* 检查进程可用地址空间大小限制 */
 	if ((mm->total_vm << PAGE_SHIFT) + len
 	    > current->signal->rlim[RLIMIT_AS].rlim_cur)
 		return -ENOMEM;
 
+	/* 检查是不是有足够的可用物理页 */
 	if (accountable && (!(flags & MAP_NORESERVE) ||
 			    sysctl_overcommit_memory == OVERCOMMIT_NEVER)) {
 		if (vm_flags & VM_SHARED) {
@@ -1031,6 +1037,7 @@ munmap_back:
 	 * The VM_SHARED test is necessary because shmem_zero_setup
 	 * will create the file object for a shared anonymous map below.
 	 */
+	/* 检查是不是可以跟前面的区间合并 */
 	if (!file && !(vm_flags & VM_SHARED) &&
 	    vma_merge(mm, prev, addr, addr + len, vm_flags,
 					NULL, NULL, pgoff, NULL))
@@ -1041,11 +1048,13 @@ munmap_back:
 	 * specific mapper. the address has already been validated, but
 	 * not unmapped, but the maps are removed from the list.
 	 */
+	/* 分配一个vma_area_struct结构提 */
 	vma = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!vma) {
 		error = -ENOMEM;
 		goto unacct_error;
 	}
+	/* 初始化之 */
 	memset(vma, 0, sizeof(*vma));
 
 	vma->vm_mm = mm;
@@ -1055,6 +1064,7 @@ munmap_back:
 	vma->vm_page_prot = protection_map[vm_flags & 0x0f];
 	vma->vm_pgoff = pgoff;
 
+	/* 如果是映射到文件,就做一些检查,并且把文件映射到vma,这是通过文件操作表里的mmap完成的. */
 	if (file) {
 		error = -EINVAL;
 		if (vm_flags & (VM_GROWSDOWN|VM_GROWSUP))
@@ -1111,11 +1121,11 @@ munmap_back:
 out:	
 	mm->total_vm += len >> PAGE_SHIFT;
 	__vm_stat_account(mm, vm_flags, file, len >> PAGE_SHIFT);
-	if (vm_flags & VM_LOCKED) {
+	if (vm_flags & VM_LOCKED) {/* 如果是设置了locked,要立即分配物理页,内部会设置好page table */
 		mm->locked_vm += len >> PAGE_SHIFT;
 		make_pages_present(addr, addr + len);
 	}
-	if (flags & MAP_POPULATE) {
+	if (flags & MAP_POPULATE) {/* 如果设置了populate,及采用预读机制,尽量减少block */
 		up_write(&mm->mmap_sem);
 		sys_remap_file_pages(addr, len, 0,
 					pgoff, flags & MAP_NONBLOCK);

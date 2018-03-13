@@ -120,6 +120,7 @@ do_mmap2(unsigned long addr, unsigned long len, unsigned long prot,
 	unsigned long error = -EBADF;
 	struct file * file = NULL;
 
+	/* 如果不是创建匿名区域,需要映射到文件,就先拿到文件对象 */
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	if (!(flags & MAP_ANONYMOUS)) {
 		file = fget(fd);
