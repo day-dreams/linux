@@ -20,6 +20,7 @@
     * asm-i386
         * io.h
         * page.h
+        * signal.h
     * net
 	* sock.h
 * fs  
@@ -36,6 +37,7 @@
     * slab.c
 * kernel
     * fork.c
+    * signal.c
 * net
     * socket.c
     * ipv4

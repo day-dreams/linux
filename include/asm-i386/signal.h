@@ -31,6 +31,7 @@ typedef unsigned long sigset_t;
 
 #endif /* __KERNEL__ */
 
+/* i386的signal宏定义 */
 #define SIGHUP		 1
 #define SIGINT		 2
 #define SIGQUIT		 3
@@ -87,6 +88,7 @@ typedef unsigned long sigset_t;
  * SA_ONESHOT and SA_NOMASK are the historical Linux names for the Single
  * Unix names RESETHAND and NODEFER respectively.
  */
+/* 这些宏定义代表：应该如何处理信号 */
 #define SA_NOCLDSTOP	0x00000001u
 #define SA_NOCLDWAIT	0x00000002u
 #define SA_SIGINFO	0x00000004u
@@ -135,6 +137,7 @@ typedef __signalfn_t __user *__sighandler_t;
 typedef void __restorefn_t(void);
 typedef __restorefn_t __user *__sigrestore_t;
 
+/* 这里把0/1/-1转化为函数指针 */
 #define SIG_DFL	((__sighandler_t)0)	/* default signal handling */
 #define SIG_IGN	((__sighandler_t)1)	/* ignore signal */
 #define SIG_ERR	((__sighandler_t)-1)	/* error return from signal */
@@ -162,12 +165,12 @@ struct k_sigaction {
 
 struct sigaction {
 	union {
-	  __sighandler_t _sa_handler;
-	  void (*_sa_sigaction)(int, struct siginfo *, void *);
-	} _u;
-	sigset_t sa_mask;
-	unsigned long sa_flags;
-	void (*sa_restorer)(void);
+		__sighandler_t _sa_handler;
+		void (*_sa_sigaction)(int, struct siginfo *, void *);
+	} _u;			   /* 用户提供的handle */
+	sigset_t sa_mask;	  /* 进程处理当前信号时，哪些信号应该屏蔽，避免受到干扰 */
+	unsigned long sa_flags;    /* 信号默认的处理方式 */
+	void (*sa_restorer)(void); /* 这个似乎没什么用，内核注释写着：linux没有使用这个成员*/
 };
 
 #define sa_handler	_u._sa_handler

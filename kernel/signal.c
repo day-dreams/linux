@@ -1062,11 +1062,15 @@ __group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
 	 * Put this signal on the shared-pending queue, or fail with EAGAIN.
 	 * We always use the shared queue for process-wide signals,
 	 * to avoid several races.
+	 * 
+	 * 向信号的队列里添加一个进程
+	 * 
 	 */
 	ret = send_signal(sig, info, p, &p->signal->shared_pending);
 	if (unlikely(ret))
 		return ret;
 
+	/* 唤醒这个进程下的所有线程之一，即唤醒轻量级进程 */
 	__group_complete_signal(sig, p);
 	return 0;
 }
@@ -1130,7 +1134,7 @@ int group_send_sig_info(int sig, struct siginfo *info, struct task_struct *p)
  * kill_pg_info() sends a signal to a process group: this is what the tty
  * control characters do (^C, ^Z etc)
  */
-
+/* 向进程组发信号 */
 int __kill_pg_info(int sig, struct siginfo *info, pid_t pgrp)
 {
 	struct task_struct *p = NULL;
@@ -1141,7 +1145,11 @@ int __kill_pg_info(int sig, struct siginfo *info, pid_t pgrp)
 
 	success = 0;
 	retval = -ESRCH;
+
+	/* 遍历进程组里的每个进程 */
 	do_each_task_pid(pgrp, PIDTYPE_PGID, p) {
+
+		/* 向进程线程组里的每个轻量级进程发信号 */
 		int err = group_send_sig_info(sig, info, p);
 		success |= !err;
 		retval = err;
@@ -1150,7 +1158,7 @@ int __kill_pg_info(int sig, struct siginfo *info, pid_t pgrp)
 }
 
 int
-kill_pg_info(int sig, struct siginfo *info, pid_t pgrp)
+kill_pg_info(int si不ag, struct siginfo *info, pid_t pgrp)
 {
 	int retval;
 
@@ -1168,11 +1176,16 @@ kill_proc_info(int sig, struct siginfo *info, pid_t pid)
 	struct task_struct *p;
 
 	read_lock(&tasklist_lock);
+
+	/* 通过pid查找进程描述符 */
 	p = find_task_by_pid(pid);
+	
+	/* 发信号 */
 	error = -ESRCH;
 	if (p)
 		error = group_send_sig_info(sig, info, p);
 	read_unlock(&tasklist_lock);
+
 	return error;
 }
 
@@ -1187,14 +1200,19 @@ kill_proc_info(int sig, struct siginfo *info, pid_t pid)
 static int kill_something_info(int sig, struct siginfo *info, int pid)
 {
 	if (!pid) {
+	/* 如果pid为0，向当前进程的进程组发送信号。终端下的Ctrl+C Ctrl+Z 就是这样的调用*/
 		return kill_pg_info(sig, info, process_group(current));
 	} else if (pid == -1) {
+	/* 遍历所有进程，向当前进程具有发送信号权限的所有进程发送信号*/
 		int retval = 0, count = 0;
 		struct task_struct * p;
 
 		read_lock(&tasklist_lock);
+		/* 从1号进程开始，遍历所有进程 */
 		for_each_process(p) {
+			/* 如果进程不是init进程，并且不属于当前进程的进程组 */
 			if (p->pid > 1 && p->tgid != current->tgid) {
+				/* 尝试向这个进程组中的每个进程发送signal */
 				int err = group_send_sig_info(sig, info, p);
 				++count;
 				if (err != -EPERM)
@@ -1204,8 +1222,10 @@ static int kill_something_info(int sig, struct siginfo *info, int pid)
 		read_unlock(&tasklist_lock);
 		return count ? retval : -ESRCH;
 	} else if (pid < 0) {
+	/* 向当前进程组-pid中的每个进程发信号 */
 		return kill_pg_info(sig, info, -pid);
 	} else {
+	/* 向进程pid发信号 */
 		return kill_proc_info(sig, info, pid);
 	}
 }
@@ -2230,11 +2250,12 @@ sys_kill(int pid, int sig)
 {
 	struct siginfo info;
 
-	info.si_signo = sig;
+	/* 填好siginfo */
+	info.si_signo = sig;/* 信号的标号 */
 	info.si_errno = 0;
-	info.si_code = SI_USER;
-	info.si_pid = current->tgid;
-	info.si_uid = current->uid;
+	info.si_code = SI_USER;/* 用户进程发来的信号 */
+	info.si_pid = current->tgid;/* 用户进程的pid */
+	info.si_uid = current->uid;/* 用户进程的uid */
 
 	return kill_something_info(sig, &info, pid);
 }
@@ -2348,11 +2369,14 @@ do_sigaction(int sig, const struct k_sigaction *act, struct k_sigaction *oact)
 {
 	struct k_sigaction *k;
 
+	/* 检查信号是否合法 */
 	if (sig < 1 || sig > _NSIG || (act && sig_kernel_only(sig)))
 		return -EINVAL;
 
+	/* 从本进程的handle表里取出对应的表项 */
 	k = &current->sighand->action[sig-1];
 
+	/* 获取锁;如果有信号正在等待处理，那么直接退出 */
 	spin_lock_irq(&current->sighand->siglock);
 	if (signal_pending(current)) {
 		/*
@@ -2363,16 +2387,20 @@ do_sigaction(int sig, const struct k_sigaction *act, struct k_sigaction *oact)
 		return -ERESTARTNOINTR;
 	}
 
+	/* 把k_sigaction拷贝到用户空间 */
 	if (oact)
 		*oact = *k;
 
+	/* 设置信号handle */
 	if (act) {
 		/*
 		 * POSIX 3.3.1.3:
 		 *  "Setting a signal action to SIG_IGN for a signal that is
 		 *   pending shall cause the pending signal to be discarded,
 		 *   whether or not it is blocked."
-		 *
+		 * 
+		 *   （当有一个信号正在等待处理，如果进程尝试去修改这个信号的handle，那么正在等待处理的信号会被丢弃）
+		 * 
 		 *  "Setting a signal action to SIG_DFL for a signal that is
 		 *   pending and whose default action is to ignore the signal
 		 *   (for example, SIGCHLD), shall cause the pending signal to
@@ -2386,6 +2414,11 @@ do_sigaction(int sig, const struct k_sigaction *act, struct k_sigaction *oact)
 			 * tasklist_lock once we're sure we'll need it.
 			 * Now we must do this little unlock and relock
 			 * dance to maintain the lock hierarchy.
+			 * 
+			 * 1.获取一些锁，再设置信号handle表。
+			 * 
+			 * 2.把正在等待进程处理的信号丢弃掉，因为handle已经改变了，不应该让以前的信号触发老旧的handle
+			 * 
 			 */
 			struct task_struct *t = current;
 			spin_unlock_irq(&t->sighand->siglock);
@@ -2405,7 +2438,9 @@ do_sigaction(int sig, const struct k_sigaction *act, struct k_sigaction *oact)
 			return 0;
 		}
 
+		/* 把act拷贝到内核，即设置进程信号handle表里的对应表项 */
 		*k = *act;
+		/* 设置这个信号需要屏蔽哪些信号 */
 		sigdelsetmask(&k->sa.sa_mask,
 			      sigmask(SIGKILL) | sigmask(SIGSTOP));
 	}

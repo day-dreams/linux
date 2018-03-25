@@ -262,9 +262,9 @@ struct mm_struct {
 };
 
 struct sighand_struct {
-	atomic_t		count;
-	struct k_sigaction	action[_NSIG];
-	spinlock_t		siglock;
+	atomic_t		count;/* 因为父子进程可以共享sighandle，所以需要引用计数 */
+	struct k_sigaction	action[_NSIG];/* 用来记录信号处理函数的数据结构数组，64个元素 */
+	spinlock_t		siglock;/* 自旋锁 */
 };
 
 /*
@@ -274,9 +274,10 @@ struct sighand_struct {
  * sighand_struct is always a proper superset of
  * the locking of signal_struct.
  */
+/* 信号描述符 */
 struct signal_struct {
 	atomic_t		count;
-	atomic_t		live;
+	atomic_t		live;/* 线程组中活动的线程数 */
 
 	wait_queue_head_t	wait_chldexit;	/* for wait4() */
 
@@ -284,7 +285,7 @@ struct signal_struct {
 	task_t			*curr_target;
 
 	/* shared signal handling: */
-	struct sigpending	shared_pending;
+	struct sigpending	shared_pending;/* 共享的需要处理信号队列，由线程组里的每个线程处理 */
 
 	/* thread group exit support */
 	int			group_exit_code;
@@ -575,7 +576,7 @@ struct task_struct {
 	unsigned long personality;
 	unsigned did_exec:1;
 	pid_t pid;
-	pid_t tgid;
+	pid_t tgid;/* 线程组描述符 */
 	/* 
 	 * pointers to (original) parent process, youngest child, younger sibling,
 	 * older sibling, respectively.  (p->father can be replaced with 
@@ -635,11 +636,11 @@ struct task_struct {
 /* namespace */
 	struct namespace *namespace;
 /* signal handlers */
-	struct signal_struct *signal;
-	struct sighand_struct *sighand;
+	struct signal_struct *signal;/* 进程的信号描述符 */
+	struct sighand_struct *sighand;/* 信号的处理函数描述符 */
 
 	sigset_t blocked, real_blocked;
-	struct sigpending pending;
+	struct sigpending pending;/* 这个进程独有的需要处理的信号 */
 
 	unsigned long sas_ss_sp;
 	size_t sas_ss_size;
