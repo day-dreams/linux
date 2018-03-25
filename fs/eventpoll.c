@@ -809,6 +809,10 @@ static void ep_free(struct eventpoll *ep)
 
 
 /*
+ * 虽然这里注释写的是hash查找,实际上是根据fd大小来搜索红黑树.
+ * 
+ * 整个eventpoll.c里,只有epoll_ctl在删除fd时才调用了这个查找函数,因为查找主要是服务于管理,而不涉及具体的文件对象回调.
+ * 
  * Search the file inside the eventpoll hash. It add usage count to
  * the returned item, so the caller must call ep_release_epitem()
  * after finished using the "struct epitem".

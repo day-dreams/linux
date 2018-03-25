@@ -457,6 +457,8 @@ static int do_poll(unsigned int nfds,  struct poll_list *list,
 		struct poll_list *walk;
 		set_current_state(TASK_INTERRUPTIBLE);
 		walk = list;
+
+		/* 轮讯整个链表 */
 		while(walk != NULL) {
 			do_pollfd( walk->len, walk->entries, &pt, &count);
 			walk = walk->next;
@@ -515,6 +517,7 @@ asmlinkage long sys_poll(struct pollfd __user * ufds, unsigned int nfds, long ti
 			walk->next = pp;
 
 		walk = pp;
+		/* copy_from_user,可以看到,每次调用poll还是需要复制 */
 		if (copy_from_user(pp->entries, ufds + nfds-i, 
 				sizeof(struct pollfd)*pp->len)) {
 			err = -EFAULT;
@@ -522,6 +525,8 @@ asmlinkage long sys_poll(struct pollfd __user * ufds, unsigned int nfds, long ti
 		}
 		i -= pp->len;
 	}
+
+	/* head是个pollfd链表 */
 	fdcount = do_poll(nfds, head, &table, timeout);
 
 	/* OK, now copy the revents fields back to user space. */
