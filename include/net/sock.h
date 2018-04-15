@@ -196,29 +196,29 @@ struct sock {
 	unsigned char		sk_shutdown;
 	unsigned char		sk_use_write_queue;
 	unsigned char		sk_userlocks;
-	socket_lock_t		sk_lock;
-	int			sk_rcvbuf;
-	wait_queue_head_t	*sk_sleep;
+	socket_lock_t		sk_lock;/* 锁 */
+	int			sk_rcvbuf;/* 接收缓冲区大小(byte) */
+	wait_queue_head_t	*sk_sleep;/* 等待队列 */
 	struct dst_entry	*sk_dst_cache;
 	rwlock_t		sk_dst_lock;
 	struct xfrm_policy	*sk_policy[2];
 	atomic_t		sk_rmem_alloc;
-	struct sk_buff_head	sk_receive_queue;
+	struct sk_buff_head	sk_receive_queue;/* 已接受到的数据包缓冲队列 */
 	atomic_t		sk_wmem_alloc;
-	struct sk_buff_head	sk_write_queue;
-	atomic_t		sk_omem_alloc;
+        struct sk_buff_head sk_write_queue; /* 待发送的数据包缓冲队列 */
+        atomic_t		sk_omem_alloc;
 	int			sk_wmem_queued;
 	int			sk_forward_alloc;
 	unsigned int		sk_allocation;
-	int			sk_sndbuf;
+	int			sk_sndbuf;/* 发送缓冲区大小(byte) */
 	unsigned long 		sk_flags;
-	char		 	sk_no_check;
+	char		 	sk_no_check;/* 禁用校验和标志 */
 	unsigned char		sk_debug;
 	unsigned char		sk_rcvtstamp;
 	unsigned char		sk_no_largesend;
 	int			sk_route_caps;
 	unsigned long	        sk_lingertime;
-	int			sk_hashent;
+	int			sk_hashent;/* hash entry */
 	/*
 	 * The backlog queue is special, it is always used with
 	 * the per-socket spinlock held and requires low latency
@@ -238,11 +238,11 @@ struct sock {
 	__u32			sk_priority;
 	unsigned short		sk_type;
 	unsigned char		sk_localroute;
-	unsigned char		sk_protocol;
+	unsigned char		sk_protocol;/* 协议类型，创建socket时设定的 */
 	struct ucred		sk_peercred;
 	int			sk_rcvlowat;
-	long			sk_rcvtimeo;
-	long			sk_sndtimeo;
+	long			sk_rcvtimeo;/* 默认的接受超时时间 */
+	long			sk_sndtimeo;/* 默认的发送超时时间 */
 	struct sk_filter      	*sk_filter;
 	void			*sk_protinfo;
 	kmem_cache_t		*sk_slab;
@@ -259,8 +259,8 @@ struct sock {
 	__u8			sk_queue_shrunk;
 	/* three bytes hole, try to pack */
 	void			(*sk_state_change)(struct sock *sk);
-	void			(*sk_data_ready)(struct sock *sk, int bytes);
-	void			(*sk_write_space)(struct sock *sk);
+	void			(*sk_data_ready)(struct sock *sk, int bytes);/* 回调，当有新数据到达时调用 */
+	void			(*sk_write_space)(struct sock *sk);/* 回调，用于指出可用于数据传输的内存 */
 	void			(*sk_error_report)(struct sock *sk);
   	int			(*sk_backlog_rcv)(struct sock *sk,
 						  struct sk_buff *skb);  
@@ -642,6 +642,7 @@ static inline struct kiocb *siocb_to_kiocb(struct sock_iocb *si)
 	return si->kiocb;
 }
 
+/* sock_mnt->ops->alloc_inode创建的应该是这个结构 */
 struct socket_alloc {
 	struct socket socket;
 	struct inode vfs_inode;

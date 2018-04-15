@@ -114,6 +114,7 @@
 
 DEFINE_SNMP_STAT(struct udp_mib, udp_statistics);
 
+/* UDP hash表 */
 struct hlist_head udp_hash[UDP_HTABLE_SIZE];
 DEFINE_RWLOCK(udp_hash_lock);
 
@@ -494,7 +495,7 @@ int udp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	u16 dport;
 	u8  tos;
 	int err;
-	int corkreq = up->corkflag || msg->msg_flags&MSG_MORE;
+	int corkreq = up->corkflag || msg->msg_flags&MSG_MORE;/* 这个flag用于控制，是否要立即发送数据(默认行为) */
 
 	if (len > 0xFFFF)
 		return -EMSGSIZE;
@@ -508,6 +509,7 @@ int udp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 
 	ipc.opt = NULL;
 
+        /* 如果有这个upd有其他数据等待被推入IP层，即socket已经被锁住，那么先尝试获得锁，陷入等待 */
 	if (up->pending) {
 		/*
 		 * There are pending frames.
@@ -528,6 +530,7 @@ int udp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	/*
 	 *	Get and verify the address. 
 	 */
+        /* 获取目的ip地址和端口 */
 	if (msg->msg_name) {
 		struct sockaddr_in * usin = (struct sockaddr_in*)msg->msg_name;
 		if (msg->msg_namelen < sizeof(*usin))
@@ -592,6 +595,7 @@ int udp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	if (connected)
 		rt = (struct rtable*)sk_dst_check(sk, 0);
 
+        /* 查找路由表 */
 	if (rt == NULL) {
 		struct flowi fl = { .oif = ipc.oif,
 				    .nl_u = { .ip4_u =
@@ -622,6 +626,7 @@ back_from_confirm:
 	if (!ipc.addr)
 		daddr = ipc.addr = rt->rt_dst;
 
+        /* 再次获得udp socket的锁 */
 	lock_sock(sk);
 	if (unlikely(up->pending)) {
 		/* The socket is already corked while preparing it. */
@@ -643,9 +648,12 @@ back_from_confirm:
 
 do_append_data:
 	up->len += ulen;
+        /* 把组好的数据包推入IP层，但不立即发送;并且可能涉及到IP层的数据分片*/
 	err = ip_append_data(sk, ip_generic_getfrag, msg->msg_iov, ulen, 
 			sizeof(struct udphdr), &ipc, rt, 
 			corkreq ? msg->msg_flags|MSG_MORE : msg->msg_flags);
+
+        /* 如果ip_append_data发生了错误，或者没有设置corked选项，就必须把这个udp socket下所有等待发送的数据包全部发送出去 */
 	if (err)
 		udp_flush_pending_frames(sk);
 	else if (!corkreq)
@@ -792,7 +800,10 @@ static int udp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 		return ip_recv_error(sk, msg, len);
 
 try_again:
+        /* 尝试从socket的接受缓冲区队列获取一个sk_buff，可能引起阻塞 */
 	skb = skb_recv_datagram(sk, flags, noblock, &err);
+
+        /* 如果没获取到，代表这个socket还没接受到数据，那么直接返回 */
 	if (!skb)
 		goto out;
   
@@ -802,6 +813,7 @@ try_again:
 		msg->msg_flags |= MSG_TRUNC;
 	}
 
+        /* 进行校验工作，并把数据从sk_buff复制到用户提供的缓冲区里 */
 	if (skb->ip_summed==CHECKSUM_UNNECESSARY) {
 		err = skb_copy_datagram_iovec(skb, sizeof(struct udphdr), msg->msg_iov,
 					      copied);
@@ -820,6 +832,7 @@ try_again:
 	if (err)
 		goto out_free;
 
+        /* 打时间戳，存储在sock->recvstamp或者sock->stamp中 */
 	sock_recv_timestamp(msg, sk, skb);
 
 	/* Copy the address. */
@@ -838,6 +851,7 @@ try_again:
 		err = skb->len - sizeof(struct udphdr);
   
 out_free:
+        /* 释放sk_buff内存 */
   	skb_free_datagram(sk, skb);
 out:
   	return err;
@@ -1121,6 +1135,7 @@ int udp_rcv(struct sk_buff *skb)
   	struct udphdr *uh;
 	unsigned short ulen;
 	struct rtable *rt = (struct rtable*)skb->dst;
+        /* 从sk_buff中取出地址信息 */
 	u32 saddr = skb->nh.iph->saddr;
 	u32 daddr = skb->nh.iph->daddr;
 	int len = skb->len;
@@ -1141,15 +1156,18 @@ int udp_rcv(struct sk_buff *skb)
 	if (pskb_trim(skb, ulen))
 		goto short_packet;
 
+        /* 检查校验和 */
 	if (udp_checksum_init(skb, uh, ulen, saddr, daddr) < 0)
 		goto csum_error;
 
 	if(rt->rt_flags & (RTCF_BROADCAST|RTCF_MULTICAST))
 		return udp_v4_mcast_deliver(skb, uh, saddr, daddr);
 
+        /* 根据端口、地址信息，在hash表中查找对应的socket */
 	sk = udp_v4_lookup(saddr, uh->source, daddr, uh->dest, skb->dev->ifindex);
 
 	if (sk != NULL) {
+                /* 把sk_buff复制到socket的接受缓冲队列 */
 		int ret = udp_queue_rcv_skb(sk, skb);
 		sock_put(sk);
 
@@ -1197,6 +1215,7 @@ csum_error:
 	 * RFC1122: OK.  Discards the bad packet silently (as far as 
 	 * the network is concerned, anyway) as per 4.1.3.4 (MUST). 
 	 */
+        /* 以warning级别，输出这个错误信息 */
 	NETDEBUG(if (net_ratelimit())
 		 printk(KERN_DEBUG "UDP: bad checksum. From %d.%d.%d.%d:%d to %d.%d.%d.%d:%d ulen %d\n",
 			NIPQUAD(saddr),
@@ -1205,6 +1224,7 @@ csum_error:
 			ntohs(uh->dest),
 			ulen));
 drop:
+        /* 丢弃数据包 */
 	UDP_INC_STATS_BH(UDP_MIB_INERRORS);
 	kfree_skb(skb);
 	return(0);

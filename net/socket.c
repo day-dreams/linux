@@ -476,7 +476,8 @@ static struct socket *sock_alloc(void)
 	if (!inode)
 		return NULL;
 
-	/* socket超级块创建的inode,自然都带有一个socket,那么获得这个socket的引用 */
+	/* version 1:socket超级块创建的inode,自然都带有一个socket,那么获得这个socket的引用 */
+        /* version 2:socket_mnt创建inode节点时，伴随着socket的创建，即上面那个inode对象实际上嵌入到了struct socket_alloc，所以这里通过inode节点获得socket对象地址 */
 	sock = SOCKET_I(inode);
 
 	/* 设置inode字段 */

@@ -51,13 +51,19 @@ struct linger {
  */
  
 struct msghdr {
-	void	*	msg_name;	/* Socket name			*/
-	int		msg_namelen;	/* Length of name		*/
-	struct iovec *	msg_iov;	/* Data blocks			*/
-	__kernel_size_t	msg_iovlen;	/* Number of blocks		*/
-	void 	*	msg_control;	/* Per protocol magic (eg BSD file descriptor passing) */
-	__kernel_size_t	msg_controllen;	/* Length of cmsg list */
-	unsigned	msg_flags;
+	void	*	msg_name;	/* socket的地址 */
+                                        /* Socket name			*/
+	int		msg_namelen;	/* socket地址的长度 */
+                                        /* Length of name		*/
+	struct iovec *	msg_iov;	/* 数据块矢量数组的首地址（就是数据地址+长度） */
+                                        /* Data blocks			*/
+	__kernel_size_t	msg_iovlen;	/* 数据块矢量的个数 */
+                                        /* Number of blocks		*/
+	void 	*	msg_control;	/* 控制块地址 */
+                                        /* Per protocol magic (eg BSD file descriptor passing) */
+	__kernel_size_t	msg_controllen;	/* 控制块长度 */
+                                        /* Length of cmsg list */
+	unsigned	msg_flags;      /* 标志 */
 };
 
 /*

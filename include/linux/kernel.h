@@ -239,6 +239,8 @@ extern void dump_stack(void);
  * @type:	the type of the container struct this is embedded in.
  * @member:	the name of the member within the struct.
  *
+ * 通过成员变量的地址，计算出整个struct的地址。
+ * 
  */
 #define container_of(ptr, type, member) ({			\
         const typeof( ((type *)0)->member ) *__mptr = (ptr);	\

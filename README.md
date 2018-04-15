@@ -15,6 +15,8 @@
         * gfp.h
         * slab.h
 	* net.h
+        * kernel.h
+        * socket.h
     * asm-alpha
         * page.h
     * asm-i386
@@ -39,6 +41,7 @@
     * fork.c
     * signal.c
 * net
+    * sock.c
     * socket.c
     * ipv4
 	* af_inet.c
