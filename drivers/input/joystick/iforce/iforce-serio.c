@@ -1,8 +1,6 @@
 /*
- * $Id: iforce-serio.c,v 1.4 2002/01/28 22:45:00 jdeneux Exp $
- *
  *  Copyright (c) 2000-2001 Vojtech Pavlik <vojtech@ucw.cz>
- *  Copyright (c) 2001 Johann Deneux <deneux@ifrance.com>
+ *  Copyright (c) 2001, 2007 Johann Deneux <johann.deneux@gmail.com>
  *
  *  USB/RS232 I-Force joysticks and wheels.
  */
@@ -75,13 +73,15 @@ again:
 
 static void iforce_serio_write_wakeup(struct serio *serio)
 {
-	iforce_serial_xmit((struct iforce *)serio->private);
+	struct iforce *iforce = serio_get_drvdata(serio);
+
+	iforce_serial_xmit(iforce);
 }
 
 static irqreturn_t iforce_serio_irq(struct serio *serio,
-		unsigned char data, unsigned int flags, struct pt_regs *regs)
+		unsigned char data, unsigned int flags)
 {
-	struct iforce* iforce = serio->private;
+	struct iforce *iforce = serio_get_drvdata(serio);
 
 	if (!iforce->pkt) {
 		if (data == 0x2b)
@@ -113,7 +113,7 @@ static irqreturn_t iforce_serio_irq(struct serio *serio,
 	}
 
 	if (iforce->idx == iforce->len) {
-		iforce_process_packet(iforce, (iforce->id << 8) | iforce->idx, iforce->data, regs);
+		iforce_process_packet(iforce, (iforce->id << 8) | iforce->idx, iforce->data);
 		iforce->pkt = 0;
 		iforce->id  = 0;
 		iforce->len = 0;
@@ -124,45 +124,64 @@ out:
 	return IRQ_HANDLED;
 }
 
-static void iforce_serio_connect(struct serio *serio, struct serio_driver *drv)
+static int iforce_serio_connect(struct serio *serio, struct serio_driver *drv)
 {
 	struct iforce *iforce;
-	if (serio->type != (SERIO_RS232 | SERIO_IFORCE))
-		return;
+	int err;
 
-	if (!(iforce = kmalloc(sizeof(struct iforce), GFP_KERNEL))) return;
-	memset(iforce, 0, sizeof(struct iforce));
+	iforce = kzalloc(sizeof(struct iforce), GFP_KERNEL);
+	if (!iforce)
+		return -ENOMEM;
 
 	iforce->bus = IFORCE_232;
 	iforce->serio = serio;
-	serio->private = iforce;
 
-	if (serio_open(serio, drv)) {
-		kfree(iforce);
-		return;
-	}
+	serio_set_drvdata(serio, iforce);
 
-	if (iforce_init_device(iforce)) {
-		serio_close(serio);
-		kfree(iforce);
-		return;
-	}
+	err = serio_open(serio, drv);
+	if (err)
+		goto fail1;
+
+	err = iforce_init_device(iforce);
+	if (err)
+		goto fail2;
+
+	return 0;
+
+ fail2:	serio_close(serio);
+ fail1:	serio_set_drvdata(serio, NULL);
+	kfree(iforce);
+	return err;
 }
 
 static void iforce_serio_disconnect(struct serio *serio)
 {
-	struct iforce* iforce = serio->private;
+	struct iforce *iforce = serio_get_drvdata(serio);
 
-	input_unregister_device(&iforce->dev);
+	input_unregister_device(iforce->dev);
 	serio_close(serio);
+	serio_set_drvdata(serio, NULL);
 	kfree(iforce);
 }
+
+static const struct serio_device_id iforce_serio_ids[] = {
+	{
+		.type	= SERIO_RS232,
+		.proto	= SERIO_IFORCE,
+		.id	= SERIO_ANY,
+		.extra	= SERIO_ANY,
+	},
+	{ 0 }
+};
+
+MODULE_DEVICE_TABLE(serio, iforce_serio_ids);
 
 struct serio_driver iforce_serio_drv = {
 	.driver		= {
 		.name	= "iforce",
 	},
 	.description	= "RS232 I-Force joysticks and wheels driver",
+	.id_table	= iforce_serio_ids,
 	.write_wakeup	= iforce_serio_write_wakeup,
 	.interrupt	= iforce_serio_irq,
 	.connect	= iforce_serio_connect,

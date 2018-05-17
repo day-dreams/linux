@@ -4,7 +4,7 @@
 1) Other documentation....
 
    o Project Home Pages
-       http://www.chygwyn.com/DECnet/                      - Kernel info
+       http://www.chygwyn.com/                      	    - Kernel info
        http://linux-decnet.sourceforge.net/                - Userland tools
        http://www.sourceforge.net/projects/linux-decnet/   - Status page
 
@@ -60,7 +60,7 @@ operation of the local communications in any other way though.
 
 The kernel command line takes options looking like the following:
 
-    decnet=1,2
+    decnet.addr=1,2
 
 the two numbers are the node address 1,2 = 1.2 For 2.2.xx kernels
 and early 2.3.xx kernels, you must use a comma when specifying the
@@ -82,7 +82,7 @@ ethernet address of your ethernet card has to be set according to the DECnet
 address of the node in order for it to be autoconfigured (and then appear in
 /proc/net/decnet_dev). There is a utility available at the above
 FTP sites called dn2ethaddr which can compute the correct ethernet
-address to use. The address can be set by ifconfig either before at
+address to use. The address can be set by ifconfig either before or
 at the time the device is brought up. If you are using RedHat you can
 add the line:
 
@@ -176,8 +176,6 @@ information (_most_ of which _is_ _essential_) includes:
  - Which client caused the problem ?
  - How much data was being transferred ?
  - Was the network congested ?
- - If there was a kernel panic, please run the output through ksymoops
-   before sending it to me, otherwise its _useless_.
  - How can the problem be reproduced ?
  - Can you use tcpdump to get a trace ? (N.B. Most (all?) versions of 
    tcpdump don't understand how to dump DECnet properly, so including

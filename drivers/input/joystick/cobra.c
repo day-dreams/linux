@@ -1,6 +1,4 @@
 /*
- * $Id: cobra.c,v 1.19 2002/01/22 20:26:52 vojtech Exp $
- *
  *  Copyright (c) 1999-2001 Vojtech Pavlik
  */
 
@@ -31,27 +29,24 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
-#include <linux/init.h>
 #include <linux/gameport.h>
 #include <linux/input.h>
+#include <linux/jiffies.h>
+
+#define DRIVER_DESC	"Creative Labs Blaster GamePad Cobra driver"
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
-MODULE_DESCRIPTION("Creative Labs Blaster GamePad Cobra driver");
+MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
 #define COBRA_MAX_STROBE	45	/* 45 us max wait for first strobe */
-#define COBRA_REFRESH_TIME	HZ/50	/* 20 ms between reads */
 #define COBRA_LENGTH		36
-
-static char* cobra_name = "Creative Labs Blaster GamePad Cobra";
 
 static int cobra_btn[] = { BTN_START, BTN_SELECT, BTN_TL, BTN_TR, BTN_X, BTN_Y, BTN_Z, BTN_A, BTN_B, BTN_C, BTN_TL2, BTN_TR2, 0 };
 
 struct cobra {
 	struct gameport *gameport;
-	struct timer_list timer;
-	struct input_dev dev[2];
-	int used;
+	struct input_dev *dev[2];
 	int reads;
 	int bads;
 	unsigned char exists;
@@ -112,23 +107,24 @@ static unsigned char cobra_read_packet(struct gameport *gameport, unsigned int *
 	return ret;
 }
 
-static void cobra_timer(unsigned long private)
+static void cobra_poll(struct gameport *gameport)
 {
-	struct cobra *cobra = (void *) private;
+	struct cobra *cobra = gameport_get_drvdata(gameport);
 	struct input_dev *dev;
 	unsigned int data[2];
 	int i, j, r;
 
 	cobra->reads++;
 
-	if ((r = cobra_read_packet(cobra->gameport, data)) != cobra->exists)
+	if ((r = cobra_read_packet(gameport, data)) != cobra->exists) {
 		cobra->bads++;
-	else
+		return;
+	}
 
 	for (i = 0; i < 2; i++)
 		if (cobra->exists & r & (1 << i)) {
 
-			dev = cobra->dev + i;
+			dev = cobra->dev[i];
 
 			input_report_abs(dev, ABS_X, ((data[i] >> 4) & 1) - ((data[i] >> 3) & 1));
 			input_report_abs(dev, ABS_Y, ((data[i] >> 2) & 1) - ((data[i] >> 1) & 1));
@@ -139,43 +135,41 @@ static void cobra_timer(unsigned long private)
 			input_sync(dev);
 
 		}
-
-	mod_timer(&cobra->timer, jiffies + COBRA_REFRESH_TIME);
 }
 
 static int cobra_open(struct input_dev *dev)
 {
-	struct cobra *cobra = dev->private;
-	if (!cobra->used++)
-		mod_timer(&cobra->timer, jiffies + COBRA_REFRESH_TIME);
+	struct cobra *cobra = input_get_drvdata(dev);
+
+	gameport_start_polling(cobra->gameport);
 	return 0;
 }
 
 static void cobra_close(struct input_dev *dev)
 {
-	struct cobra *cobra = dev->private;
-	if (!--cobra->used)
-		del_timer(&cobra->timer);
+	struct cobra *cobra = input_get_drvdata(dev);
+
+	gameport_stop_polling(cobra->gameport);
 }
 
-static void cobra_connect(struct gameport *gameport, struct gameport_dev *dev)
+static int cobra_connect(struct gameport *gameport, struct gameport_driver *drv)
 {
 	struct cobra *cobra;
+	struct input_dev *input_dev;
 	unsigned int data[2];
 	int i, j;
+	int err;
 
-	if (!(cobra = kmalloc(sizeof(struct cobra), GFP_KERNEL)))
-		return;
-	memset(cobra, 0, sizeof(struct cobra));
-
-	gameport->private = cobra;
+	cobra = kzalloc(sizeof(struct cobra), GFP_KERNEL);
+	if (!cobra)
+		return -ENOMEM;
 
 	cobra->gameport = gameport;
-	init_timer(&cobra->timer);
-	cobra->timer.data = (long) cobra;
-	cobra->timer.function = cobra_timer;
 
-	if (gameport_open(gameport, dev, GAMEPORT_MODE_RAW))
+	gameport_set_drvdata(gameport, cobra);
+
+	err = gameport_open(gameport, drv, GAMEPORT_MODE_RAW);
+	if (err)
 		goto fail1;
 
 	cobra->exists = cobra_read_packet(gameport, data);
@@ -187,70 +181,83 @@ static void cobra_connect(struct gameport *gameport, struct gameport_dev *dev)
 			cobra->exists &= ~(1 << i);
 		}
 
-	if (!cobra->exists)
+	if (!cobra->exists) {
+		err = -ENODEV;
 		goto fail2;
+	}
 
-	for (i = 0; i < 2; i++)
-		if ((cobra->exists >> i) & 1) {
+	gameport_set_poll_handler(gameport, cobra_poll);
+	gameport_set_poll_interval(gameport, 20);
 
-			sprintf(cobra->phys[i], "%s/input%d", gameport->phys, i);
+	for (i = 0; i < 2; i++) {
+		if (~(cobra->exists >> i) & 1)
+			continue;
 
-			cobra->dev[i].private = cobra;
-			cobra->dev[i].open = cobra_open;
-			cobra->dev[i].close = cobra_close;
-
-			cobra->dev[i].name = cobra_name;
-			cobra->dev[i].phys = cobra->phys[i];
-			cobra->dev[i].id.bustype = BUS_GAMEPORT;
-			cobra->dev[i].id.vendor = GAMEPORT_ID_VENDOR_CREATIVE;
-			cobra->dev[i].id.product = 0x0008;
-			cobra->dev[i].id.version = 0x0100;
-
-			cobra->dev[i].evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);
-			cobra->dev[i].absbit[0] = BIT(ABS_X) | BIT(ABS_Y);
-
-			for (j = 0; cobra_btn[j]; j++)
-				set_bit(cobra_btn[j], cobra->dev[i].keybit);
-
-			cobra->dev[i].absmin[ABS_X] = -1; cobra->dev[i].absmax[ABS_X] = 1;
-			cobra->dev[i].absmin[ABS_Y] = -1; cobra->dev[i].absmax[ABS_Y] = 1;
-
-			input_register_device(cobra->dev + i);
-			printk(KERN_INFO "input: %s on %s\n", cobra_name, gameport->phys);
+		cobra->dev[i] = input_dev = input_allocate_device();
+		if (!input_dev) {
+			err = -ENOMEM;
+			goto fail3;
 		}
 
-	return;
-fail2:	gameport_close(gameport);
-fail1:	kfree(cobra);
+		snprintf(cobra->phys[i], sizeof(cobra->phys[i]),
+			 "%s/input%d", gameport->phys, i);
+
+		input_dev->name = "Creative Labs Blaster GamePad Cobra";
+		input_dev->phys = cobra->phys[i];
+		input_dev->id.bustype = BUS_GAMEPORT;
+		input_dev->id.vendor = GAMEPORT_ID_VENDOR_CREATIVE;
+		input_dev->id.product = 0x0008;
+		input_dev->id.version = 0x0100;
+		input_dev->dev.parent = &gameport->dev;
+
+		input_set_drvdata(input_dev, cobra);
+
+		input_dev->open = cobra_open;
+		input_dev->close = cobra_close;
+
+		input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
+		input_set_abs_params(input_dev, ABS_X, -1, 1, 0, 0);
+		input_set_abs_params(input_dev, ABS_Y, -1, 1, 0, 0);
+		for (j = 0; cobra_btn[j]; j++)
+			set_bit(cobra_btn[j], input_dev->keybit);
+
+		err = input_register_device(cobra->dev[i]);
+		if (err)
+			goto fail4;
+	}
+
+	return 0;
+
+ fail4:	input_free_device(cobra->dev[i]);
+ fail3:	while (--i >= 0)
+		if (cobra->dev[i])
+			input_unregister_device(cobra->dev[i]);
+ fail2:	gameport_close(gameport);
+ fail1:	gameport_set_drvdata(gameport, NULL);
+	kfree(cobra);
+	return err;
 }
 
 static void cobra_disconnect(struct gameport *gameport)
 {
+	struct cobra *cobra = gameport_get_drvdata(gameport);
 	int i;
 
-	struct cobra *cobra = gameport->private;
 	for (i = 0; i < 2; i++)
 		if ((cobra->exists >> i) & 1)
-			input_unregister_device(cobra->dev + i);
+			input_unregister_device(cobra->dev[i]);
 	gameport_close(gameport);
+	gameport_set_drvdata(gameport, NULL);
 	kfree(cobra);
 }
 
-static struct gameport_dev cobra_dev = {
-	.connect =	cobra_connect,
-	.disconnect =	cobra_disconnect,
+static struct gameport_driver cobra_drv = {
+	.driver		= {
+		.name	= "cobra",
+	},
+	.description	= DRIVER_DESC,
+	.connect	= cobra_connect,
+	.disconnect	= cobra_disconnect,
 };
 
-int __init cobra_init(void)
-{
-	gameport_register_device(&cobra_dev);
-	return 0;
-}
-
-void __exit cobra_exit(void)
-{
-	gameport_unregister_device(&cobra_dev);
-}
-
-module_init(cobra_init);
-module_exit(cobra_exit);
+module_gameport_driver(cobra_drv);

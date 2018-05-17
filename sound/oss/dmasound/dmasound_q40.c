@@ -20,7 +20,7 @@
 #include <linux/soundcard.h>
 #include <linux/interrupt.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/q40ints.h>
 #include <asm/q40_master.h>
 
@@ -36,7 +36,7 @@ static int expand_data;	/* Data for expanding */
 /*** Low level stuff *********************************************************/
 
 
-static void *Q40Alloc(unsigned int size, int flags);
+static void *Q40Alloc(unsigned int size, gfp_t flags);
 static void Q40Free(void *, unsigned int);
 static int Q40IrqInit(void);
 #ifdef MODULE
@@ -48,8 +48,8 @@ static int Q40SetFormat(int format);
 static int Q40SetVolume(int volume);
 static void Q40PlayNextFrame(int index);
 static void Q40Play(void);
-static irqreturn_t Q40StereoInterrupt(int irq, void *dummy, struct pt_regs *fp);
-static irqreturn_t Q40MonoInterrupt(int irq, void *dummy, struct pt_regs *fp);
+static irqreturn_t Q40StereoInterrupt(int irq, void *dummy);
+static irqreturn_t Q40MonoInterrupt(int irq, void *dummy);
 static void Q40Interrupt(void);
 
 
@@ -58,7 +58,7 @@ static void Q40Interrupt(void);
 
 
 /* userCount, frameUsed, frameLeft == byte counts */
-static ssize_t q40_ct_law(const u_char *userPtr, size_t userCount,
+static ssize_t q40_ct_law(const u_char __user *userPtr, size_t userCount,
 			   u_char frame[], ssize_t *frameUsed,
 			   ssize_t frameLeft)
 {
@@ -79,7 +79,7 @@ static ssize_t q40_ct_law(const u_char *userPtr, size_t userCount,
 }
 
 
-static ssize_t q40_ct_s8(const u_char *userPtr, size_t userCount,
+static ssize_t q40_ct_s8(const u_char __user *userPtr, size_t userCount,
 			  u_char frame[], ssize_t *frameUsed,
 			  ssize_t frameLeft)
 {
@@ -98,7 +98,7 @@ static ssize_t q40_ct_s8(const u_char *userPtr, size_t userCount,
 	return used;
 }
 
-static ssize_t q40_ct_u8(const u_char *userPtr, size_t userCount,
+static ssize_t q40_ct_u8(const u_char __user *userPtr, size_t userCount,
 			  u_char frame[], ssize_t *frameUsed,
 			  ssize_t frameLeft)
 {
@@ -114,7 +114,7 @@ static ssize_t q40_ct_u8(const u_char *userPtr, size_t userCount,
 
 
 /* a bit too complicated to optimise right now ..*/
-static ssize_t q40_ctx_law(const u_char *userPtr, size_t userCount,
+static ssize_t q40_ctx_law(const u_char __user *userPtr, size_t userCount,
 			    u_char frame[], ssize_t *frameUsed,
 			    ssize_t frameLeft)
 {
@@ -152,7 +152,7 @@ static ssize_t q40_ctx_law(const u_char *userPtr, size_t userCount,
 }
 
 
-static ssize_t q40_ctx_s8(const u_char *userPtr, size_t userCount,
+static ssize_t q40_ctx_s8(const u_char __user *userPtr, size_t userCount,
 			   u_char frame[], ssize_t *frameUsed,
 			   ssize_t frameLeft)
 {
@@ -189,7 +189,7 @@ static ssize_t q40_ctx_s8(const u_char *userPtr, size_t userCount,
 }
 
 
-static ssize_t q40_ctx_u8(const u_char *userPtr, size_t userCount,
+static ssize_t q40_ctx_u8(const u_char __user *userPtr, size_t userCount,
 			   u_char frame[], ssize_t *frameUsed,
 			   ssize_t frameLeft)
 {
@@ -224,7 +224,7 @@ static ssize_t q40_ctx_u8(const u_char *userPtr, size_t userCount,
 }
 
 /* compressing versions */
-static ssize_t q40_ctc_law(const u_char *userPtr, size_t userCount,
+static ssize_t q40_ctc_law(const u_char __user *userPtr, size_t userCount,
 			    u_char frame[], ssize_t *frameUsed,
 			    ssize_t frameLeft)
 {
@@ -265,7 +265,7 @@ static ssize_t q40_ctc_law(const u_char *userPtr, size_t userCount,
 }
 
 
-static ssize_t q40_ctc_s8(const u_char *userPtr, size_t userCount,
+static ssize_t q40_ctc_s8(const u_char __user *userPtr, size_t userCount,
 			   u_char frame[], ssize_t *frameUsed,
 			   ssize_t frameLeft)
 {
@@ -304,7 +304,7 @@ static ssize_t q40_ctc_s8(const u_char *userPtr, size_t userCount,
 }
 
 
-static ssize_t q40_ctc_u8(const u_char *userPtr, size_t userCount,
+static ssize_t q40_ctc_u8(const u_char __user *userPtr, size_t userCount,
 			   u_char frame[], ssize_t *frameUsed,
 			   ssize_t frameLeft)
 {
@@ -358,7 +358,7 @@ static TRANS transQ40Compressing = {
 
 /*** Low level stuff *********************************************************/
 
-static void *Q40Alloc(unsigned int size, int flags)
+static void *Q40Alloc(unsigned int size, gfp_t flags)
 {
          return kmalloc(size, flags); /* change to vmalloc */
 }
@@ -371,8 +371,9 @@ static void Q40Free(void *ptr, unsigned int size)
 static int __init Q40IrqInit(void)
 {
 	/* Register interrupt handler. */
-	request_irq(Q40_IRQ_SAMPLE, Q40StereoInterrupt, 0,
-		    "DMA sound", Q40Interrupt);
+	if (request_irq(Q40_IRQ_SAMPLE, Q40StereoInterrupt, 0,
+		    "DMA sound", Q40Interrupt))
+		return 0;
 
 	return(1);
 }
@@ -401,6 +402,7 @@ static void Q40PlayNextFrame(int index)
 	u_char *start;
 	u_long size;
 	u_char speed;
+	int error;
 
 	/* used by Q40Play() if all doubts whether there really is something
 	 * to be played are already wiped out.
@@ -419,11 +421,13 @@ static void Q40PlayNextFrame(int index)
 	master_outb( 0,SAMPLE_ENABLE_REG);
 	free_irq(Q40_IRQ_SAMPLE, Q40Interrupt);
 	if (dmasound.soft.stereo)
-	  	request_irq(Q40_IRQ_SAMPLE, Q40StereoInterrupt, 0,
-		    "Q40 sound", Q40Interrupt);
+		error = request_irq(Q40_IRQ_SAMPLE, Q40StereoInterrupt, 0,
+				    "Q40 sound", Q40Interrupt);
 	  else
-	        request_irq(Q40_IRQ_SAMPLE, Q40MonoInterrupt, 0,
-		    "Q40 sound", Q40Interrupt);
+		error = request_irq(Q40_IRQ_SAMPLE, Q40MonoInterrupt, 0,
+				    "Q40 sound", Q40Interrupt);
+	if (error && printk_ratelimit())
+		pr_err("Couldn't register sound interrupt\n");
 
 	master_outb( speed, SAMPLE_RATE_REG);
 	master_outb( 1,SAMPLE_CLEAR_REG);
@@ -451,7 +455,7 @@ static void Q40Play(void)
 	spin_unlock_irqrestore(&dmasound.lock, flags);
 }
 
-static irqreturn_t Q40StereoInterrupt(int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t Q40StereoInterrupt(int irq, void *dummy)
 {
 	spin_lock(&dmasound.lock);
         if (q40_sc>1){
@@ -463,7 +467,7 @@ static irqreturn_t Q40StereoInterrupt(int irq, void *dummy, struct pt_regs *fp)
 	spin_unlock(&dmasound.lock);
 	return IRQ_HANDLED;
 }
-static irqreturn_t Q40MonoInterrupt(int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t Q40MonoInterrupt(int irq, void *dummy)
 {
 	spin_lock(&dmasound.lock);
         if (q40_sc>0){
@@ -611,7 +615,7 @@ static MACHINE machQ40 = {
 /*** Config & Setup **********************************************************/
 
 
-int __init dmasound_q40_init(void)
+static int __init dmasound_q40_init(void)
 {
 	if (MACH_IS_Q40) {
 	    dmasound.mach = machQ40;

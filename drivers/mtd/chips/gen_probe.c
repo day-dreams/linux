@@ -2,7 +2,6 @@
  * Routines common to all CFI-type probes.
  * (C) 2001-2003 Red Hat, Inc.
  * GPL'd
- * $Id: gen_probe.c,v 1.21 2004/08/14 15:14:05 dwmw2 Exp $
  */
 
 #include <linux/kernel.h>
@@ -26,7 +25,7 @@ struct mtd_info *mtd_do_chip_probe(struct map_info *map, struct chip_probe *cp)
 
 	/* First probe the map to see if we have CFI stuff there. */
 	cfi = genprobe_ident_chips(map, cp);
-	
+
 	if (!cfi)
 		return NULL;
 
@@ -36,12 +35,19 @@ struct mtd_info *mtd_do_chip_probe(struct map_info *map, struct chip_probe *cp)
 	mtd = check_cmd_set(map, 1); /* First the primary cmdset */
 	if (!mtd)
 		mtd = check_cmd_set(map, 0); /* Then the secondary */
-	
-	if (mtd)
+
+	if (mtd) {
+		if (mtd->size > map->size) {
+			printk(KERN_WARNING "Reducing visibility of %ldKiB chip to %ldKiB\n",
+			       (unsigned long)mtd->size >> 10,
+			       (unsigned long)map->size >> 10);
+			mtd->size = map->size;
+		}
 		return mtd;
+	}
 
 	printk(KERN_WARNING"gen_probe: No supported Vendor Command Set found\n");
-	
+
 	kfree(cfi->cfiq);
 	kfree(cfi);
 	map->fldrv_priv = NULL;
@@ -60,14 +66,14 @@ static struct cfi_private *genprobe_ident_chips(struct map_info *map, struct chi
 
 	memset(&cfi, 0, sizeof(cfi));
 
-	/* Call the probetype-specific code with all permutations of 
+	/* Call the probetype-specific code with all permutations of
 	   interleave and device type, etc. */
 	if (!genprobe_new_chip(map, cp, &cfi)) {
 		/* The probe didn't like it */
-		printk(KERN_DEBUG "%s: Found no %s device at location zero\n",
-		       cp->name, map->name);
+		pr_debug("%s: Found no %s device at location zero\n",
+			 cp->name, map->name);
 		return NULL;
-	}		
+	}
 
 #if 0 /* Let the CFI probe routine do this sanity check. The Intel and AMD
 	 probe routines won't ever return a broken CFI structure anyway,
@@ -92,22 +98,25 @@ static struct cfi_private *genprobe_ident_chips(struct map_info *map, struct chi
 	} else {
 		BUG();
 	}
-		
+
 	cfi.numchips = 1;
 
-	/* 
-	 * Allocate memory for bitmap of valid chips. 
-	 * Align bitmap storage size to full byte. 
-	 */ 
+	/*
+	 * Allocate memory for bitmap of valid chips.
+	 * Align bitmap storage size to full byte.
+	 */
 	max_chips = map->size >> cfi.chipshift;
-	mapsize = (max_chips / 8) + ((max_chips % 8) ? 1 : 0);
-	chip_map = kmalloc(mapsize, GFP_KERNEL);
+	if (!max_chips) {
+		printk(KERN_WARNING "NOR chip too large to fit in mapping. Attempting to cope...\n");
+		max_chips = 1;
+	}
+
+	mapsize = sizeof(long) * DIV_ROUND_UP(max_chips, BITS_PER_LONG);
+	chip_map = kzalloc(mapsize, GFP_KERNEL);
 	if (!chip_map) {
-		printk(KERN_WARNING "%s: kmalloc failed for CFI chip map\n", map->name);
 		kfree(cfi.cfiq);
 		return NULL;
 	}
-	memset (chip_map, 0, mapsize);
 
 	set_bit(0, chip_map); /* Mark first chip valid */
 
@@ -122,14 +131,13 @@ static struct cfi_private *genprobe_ident_chips(struct map_info *map, struct chi
 	}
 
 	/*
-	 * Now allocate the space for the structures we need to return to 
+	 * Now allocate the space for the structures we need to return to
 	 * our caller, and copy the appropriate data into them.
 	 */
 
 	retcfi = kmalloc(sizeof(struct cfi_private) + cfi.numchips * sizeof(struct flchip), GFP_KERNEL);
 
 	if (!retcfi) {
-		printk(KERN_WARNING "%s: kmalloc failed for CFI private structure\n", map->name);
 		kfree(cfi.cfiq);
 		kfree(chip_map);
 		return NULL;
@@ -145,8 +153,7 @@ static struct cfi_private *genprobe_ident_chips(struct map_info *map, struct chi
 			pchip->start = (i << cfi.chipshift);
 			pchip->state = FL_READY;
 			init_waitqueue_head(&pchip->wq);
-			spin_lock_init(&pchip->_spinlock);
-			pchip->mutex = &pchip->_spinlock;
+			mutex_init(&pchip->mutex);
 		}
 	}
 
@@ -154,7 +161,7 @@ static struct cfi_private *genprobe_ident_chips(struct map_info *map, struct chi
 	return retcfi;
 }
 
-	
+
 static int genprobe_new_chip(struct map_info *map, struct chip_probe *cp,
 			     struct cfi_private *cfi)
 {
@@ -162,7 +169,7 @@ static int genprobe_new_chip(struct map_info *map, struct chip_probe *cp,
 	int max_chips = map_bankwidth(map); /* And minimum 1 */
 	int nr_chips, type;
 
-	for (nr_chips = min_chips; nr_chips <= max_chips; nr_chips <<= 1) {
+	for (nr_chips = max_chips; nr_chips >= min_chips; nr_chips >>= 1) {
 
 		if (!cfi_interleave_supported(nr_chips))
 		    continue;
@@ -189,30 +196,33 @@ extern cfi_cmdset_fn_t cfi_cmdset_0001;
 extern cfi_cmdset_fn_t cfi_cmdset_0002;
 extern cfi_cmdset_fn_t cfi_cmdset_0020;
 
-static inline struct mtd_info *cfi_cmdset_unknown(struct map_info *map, 
+static inline struct mtd_info *cfi_cmdset_unknown(struct map_info *map,
 						  int primary)
 {
 	struct cfi_private *cfi = map->fldrv_priv;
 	__u16 type = primary?cfi->cfiq->P_ID:cfi->cfiq->A_ID;
-#if defined(CONFIG_MODULES) && defined(HAVE_INTER_MODULE)
-	char probename[32];
+#ifdef CONFIG_MODULES
+	char probename[sizeof(VMLINUX_SYMBOL_STR(cfi_cmdset_%4.4X))];
 	cfi_cmdset_fn_t *probe_function;
 
-	sprintf(probename, "cfi_cmdset_%4.4X", type);
-		
-	probe_function = inter_module_get_request(probename, probename);
+	sprintf(probename, VMLINUX_SYMBOL_STR(cfi_cmdset_%4.4X), type);
+
+	probe_function = __symbol_get(probename);
+	if (!probe_function) {
+		request_module("cfi_cmdset_%4.4X", type);
+		probe_function = __symbol_get(probename);
+	}
 
 	if (probe_function) {
 		struct mtd_info *mtd;
 
 		mtd = (*probe_function)(map, primary);
 		/* If it was happy, it'll have increased its own use count */
-		inter_module_put(probename);
+		symbol_put_addr(probe_function);
 		return mtd;
 	}
 #endif
-	printk(KERN_NOTICE "Support for command set %04X not present\n",
-	       type);
+	printk(KERN_NOTICE "Support for command set %04X not present\n", type);
 
 	return NULL;
 }
@@ -221,33 +231,32 @@ static struct mtd_info *check_cmd_set(struct map_info *map, int primary)
 {
 	struct cfi_private *cfi = map->fldrv_priv;
 	__u16 type = primary?cfi->cfiq->P_ID:cfi->cfiq->A_ID;
-	
+
 	if (type == P_ID_NONE || type == P_ID_RESERVED)
 		return NULL;
 
 	switch(type){
-		/* Urgh. Ifdefs. The version with weak symbols was
-		 * _much_ nicer. Shame it didn't seem to work on
-		 * anything but x86, really.
-		 * But we can't rely in inter_module_get() because
-		 * that'd mean we depend on link order.
-		 */
+		/* We need these for the !CONFIG_MODULES case,
+		   because symbol_get() doesn't work there */
 #ifdef CONFIG_MTD_CFI_INTELEXT
-	case 0x0001:
-	case 0x0003:
+	case P_ID_INTEL_EXT:
+	case P_ID_INTEL_STD:
+	case P_ID_INTEL_PERFORMANCE:
 		return cfi_cmdset_0001(map, primary);
 #endif
 #ifdef CONFIG_MTD_CFI_AMDSTD
-	case 0x0002:
+	case P_ID_AMD_STD:
+	case P_ID_SST_OLD:
+	case P_ID_WINBOND:
 		return cfi_cmdset_0002(map, primary);
 #endif
 #ifdef CONFIG_MTD_CFI_STAA
-        case 0x0020:
+        case P_ID_ST_ADV:
 		return cfi_cmdset_0020(map, primary);
 #endif
+	default:
+		return cfi_cmdset_unknown(map, primary);
 	}
-
-	return cfi_cmdset_unknown(map, primary);
 }
 
 MODULE_LICENSE("GPL");

@@ -20,77 +20,75 @@
    along with this program; if not, write to the Free Software Foundation,
    Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.  */
 
-
 #ifndef MODUTILS_GENKSYMS_H
 #define MODUTILS_GENKSYMS_H 1
 
 #include <stdio.h>
-#include <assert.h>
 
-
-enum symbol_type
-{
-  SYM_NORMAL, SYM_TYPEDEF, SYM_ENUM, SYM_STRUCT, SYM_UNION
+enum symbol_type {
+	SYM_NORMAL, SYM_TYPEDEF, SYM_ENUM, SYM_STRUCT, SYM_UNION,
+	SYM_ENUM_CONST
 };
 
-struct string_list
-{
-  struct string_list *next;
-  enum symbol_type tag;
-  char *string;
+enum symbol_status {
+	STATUS_UNCHANGED, STATUS_DEFINED, STATUS_MODIFIED
 };
 
-struct symbol
-{
-  struct symbol *hash_next;
-  const char *name;
-  enum symbol_type type;
-  struct string_list *defn;
-  struct symbol *expansion_trail;
-  int is_extern;
+struct string_list {
+	struct string_list *next;
+	enum symbol_type tag;
+	int in_source_file;
+	char *string;
+};
+
+struct symbol {
+	struct symbol *hash_next;
+	const char *name;
+	enum symbol_type type;
+	struct string_list *defn;
+	struct symbol *expansion_trail;
+	struct symbol *visited;
+	int is_extern;
+	int is_declared;
+	enum symbol_status status;
+	int is_override;
 };
 
 typedef struct string_list **yystype;
 #define YYSTYPE yystype
 
-extern FILE *outfile, *debugfile;
-
 extern int cur_line;
-extern char *cur_filename, *output_directory;
+extern char *cur_filename, *source_file;
+extern int in_source_file;
 
-extern int flag_debug, flag_dump_defs, flag_warnings;
-extern int checksum_version, kernel_version;
-
-extern int want_brace_phrase, want_exp_phrase, discard_phrase_contents;
-extern struct string_list *current_list, *next_list;
-
-
-struct symbol *find_symbol(const char *name, enum symbol_type ns);
+struct symbol *find_symbol(const char *name, enum symbol_type ns, int exact);
 struct symbol *add_symbol(const char *name, enum symbol_type type,
-			   struct string_list *defn, int is_extern);
+			  struct string_list *defn, int is_extern);
 void export_symbol(const char *);
 
-struct string_list *reset_list(void);
-void free_list(struct string_list *s, struct string_list *e);
 void free_node(struct string_list *list);
+void free_list(struct string_list *s, struct string_list *e);
 struct string_list *copy_node(struct string_list *);
-struct string_list *copy_list(struct string_list *s, struct string_list *e);
-int equal_list(struct string_list *a, struct string_list *b);
-void print_list(FILE *, struct string_list *list);
+struct string_list *copy_list_range(struct string_list *start,
+				    struct string_list *end);
 
 int yylex(void);
 int yyparse(void);
 
-void error_with_pos(const char *, ...);
-
-#define version(a,b,c)  ((a << 16) | (b << 8) | (c))
+void error_with_pos(const char *, ...) __attribute__ ((format(printf, 1, 2)));
 
 /*----------------------------------------------------------------------*/
+#define xmalloc(size) ({ void *__ptr = malloc(size);		\
+	if(!__ptr && size != 0) {				\
+		fprintf(stderr, "out of memory\n");		\
+		exit(1);					\
+	}							\
+	__ptr; })
+#define xstrdup(str)  ({ char *__str = strdup(str);		\
+	if (!__str) {						\
+		fprintf(stderr, "out of memory\n");		\
+		exit(1);					\
+	}							\
+	__str; })
 
-#define MODUTILS_VERSION "<in-kernel>"
-
-#define xmalloc(size) ({ void *__ptr = malloc(size); assert(__ptr || size == 0); __ptr; })
-#define xstrdup(str)  ({ char *__str = strdup(str); assert(__str); __str; })
-
-
-#endif /* genksyms.h */
+#endif				/* genksyms.h */

@@ -1,6 +1,4 @@
 /*
- * $Id: evbug.c,v 1.10 2001/09/25 10:12:07 vojtech Exp $
- *
  *  Copyright (c) 1999-2001 Vojtech Pavlik
  */
 
@@ -28,6 +26,8 @@
  * Vojtech Pavlik, Simunkova 1594, Prague 8, 182 00 Czech Republic
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/input.h>
@@ -38,42 +38,59 @@ MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
 MODULE_DESCRIPTION("Input driver event debug module");
 MODULE_LICENSE("GPL");
 
-static char evbug_name[] = "evbug";
-
 static void evbug_event(struct input_handle *handle, unsigned int type, unsigned int code, int value)
 {
-	printk(KERN_DEBUG "evbug.c: Event. Dev: %s, Type: %d, Code: %d, Value: %d\n", handle->dev->phys, type, code, value);
+	printk(KERN_DEBUG pr_fmt("Event. Dev: %s, Type: %d, Code: %d, Value: %d\n"),
+	       dev_name(&handle->dev->dev), type, code, value);
 }
 
-static struct input_handle *evbug_connect(struct input_handler *handler, struct input_dev *dev, struct input_device_id *id)
+static int evbug_connect(struct input_handler *handler, struct input_dev *dev,
+			 const struct input_device_id *id)
 {
 	struct input_handle *handle;
+	int error;
 
-	if (!(handle = kmalloc(sizeof(struct input_handle), GFP_KERNEL)))
-		return NULL;
-	memset(handle, 0, sizeof(struct input_handle));
+	handle = kzalloc(sizeof(struct input_handle), GFP_KERNEL);
+	if (!handle)
+		return -ENOMEM;
 
 	handle->dev = dev;
 	handle->handler = handler;
-	handle->name = evbug_name;
+	handle->name = "evbug";
 
-	input_open_device(handle);
+	error = input_register_handle(handle);
+	if (error)
+		goto err_free_handle;
 
-	printk(KERN_DEBUG "evbug.c: Connected device: \"%s\", %s\n", dev->name, dev->phys);
+	error = input_open_device(handle);
+	if (error)
+		goto err_unregister_handle;
 
-	return handle;
+	printk(KERN_DEBUG pr_fmt("Connected device: %s (%s at %s)\n"),
+	       dev_name(&dev->dev),
+	       dev->name ?: "unknown",
+	       dev->phys ?: "unknown");
+
+	return 0;
+
+ err_unregister_handle:
+	input_unregister_handle(handle);
+ err_free_handle:
+	kfree(handle);
+	return error;
 }
 
 static void evbug_disconnect(struct input_handle *handle)
 {
-	printk(KERN_DEBUG "evbug.c: Disconnected device: %s\n", handle->dev->phys);
+	printk(KERN_DEBUG pr_fmt("Disconnected device: %s\n"),
+	       dev_name(&handle->dev->dev));
 
 	input_close_device(handle);
-
+	input_unregister_handle(handle);
 	kfree(handle);
 }
 
-static struct input_device_id evbug_ids[] = {
+static const struct input_device_id evbug_ids[] = {
 	{ .driver_info = 1 },	/* Matches all devices */
 	{ },			/* Terminating zero entry */
 };
@@ -88,13 +105,12 @@ static struct input_handler evbug_handler = {
 	.id_table =	evbug_ids,
 };
 
-int __init evbug_init(void)
+static int __init evbug_init(void)
 {
-	input_register_handler(&evbug_handler);
-	return 0;
+	return input_register_handler(&evbug_handler);
 }
 
-void __exit evbug_exit(void)
+static void __exit evbug_exit(void)
 {
 	input_unregister_handler(&evbug_handler);
 }

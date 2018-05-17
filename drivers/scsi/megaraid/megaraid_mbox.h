@@ -21,8 +21,8 @@
 #include "megaraid_ioctl.h"
 
 
-#define MEGARAID_VERSION	"2.20.4.5"
-#define MEGARAID_EXT_VERSION	"(Release Date: Thu Feb 03 12:27:22 EST 2005)"
+#define MEGARAID_VERSION	"2.20.5.1"
+#define MEGARAID_EXT_VERSION	"(Release Date: Thu Nov 16 15:32:35 EST 2006)"
 
 
 /*
@@ -37,8 +37,7 @@
 #define PCI_DEVICE_ID_PERC4_DC				0x1960
 #define PCI_SUBSYS_ID_PERC4_DC				0x0518
 
-#define PCI_DEVICE_ID_PERC4_QC				0x0407
-#define PCI_SUBSYS_ID_PERC4_QC				0x0531
+#define PCI_DEVICE_ID_VERDE				0x0407
 
 #define PCI_DEVICE_ID_PERC4_DI_EVERGLADES		0x000F
 #define PCI_SUBSYS_ID_PERC4_DI_EVERGLADES		0x014A
@@ -58,11 +57,7 @@
 #define PCI_DEVICE_ID_PERC4E_DI_GUADALUPE		0x0013
 #define PCI_SUBSYS_ID_PERC4E_DI_GUADALUPE		0x0170
 
-#define PCI_DEVICE_ID_PERC4E_DC_320_2E			0x0408
-#define PCI_SUBSYS_ID_PERC4E_DC_320_2E			0x0002
-
-#define PCI_DEVICE_ID_PERC4E_SC_320_1E			0x0408
-#define PCI_SUBSYS_ID_PERC4E_SC_320_1E			0x0001
+#define PCI_DEVICE_ID_DOBSON				0x0408
 
 #define PCI_DEVICE_ID_MEGARAID_SCSI_320_0		0x1960
 #define PCI_SUBSYS_ID_MEGARAID_SCSI_320_0		0xA520
@@ -73,21 +68,6 @@
 #define PCI_DEVICE_ID_MEGARAID_SCSI_320_2		0x1960
 #define PCI_SUBSYS_ID_MEGARAID_SCSI_320_2		0x0518
 
-#define PCI_DEVICE_ID_MEGARAID_SCSI_320_0x		0x0407
-#define PCI_SUBSYS_ID_MEGARAID_SCSI_320_0x		0x0530
-
-#define PCI_DEVICE_ID_MEGARAID_SCSI_320_2x		0x0407
-#define PCI_SUBSYS_ID_MEGARAID_SCSI_320_2x		0x0532
-
-#define PCI_DEVICE_ID_MEGARAID_SCSI_320_4x		0x0407
-#define PCI_SUBSYS_ID_MEGARAID_SCSI_320_4x		0x0531
-
-#define PCI_DEVICE_ID_MEGARAID_SCSI_320_1E		0x0408
-#define PCI_SUBSYS_ID_MEGARAID_SCSI_320_1E		0x0001
-
-#define PCI_DEVICE_ID_MEGARAID_SCSI_320_2E		0x0408
-#define PCI_SUBSYS_ID_MEGARAID_SCSI_320_2E		0x0002
-
 #define PCI_DEVICE_ID_MEGARAID_I4_133_RAID		0x1960
 #define PCI_SUBSYS_ID_MEGARAID_I4_133_RAID		0x0522
 
@@ -97,52 +77,19 @@
 #define PCI_DEVICE_ID_MEGARAID_SATA_150_6		0x1960
 #define PCI_SUBSYS_ID_MEGARAID_SATA_150_6		0x0523
 
-#define PCI_DEVICE_ID_MEGARAID_SATA_300_4x		0x0409
-#define PCI_SUBSYS_ID_MEGARAID_SATA_300_4x		0x3004
-
-#define PCI_DEVICE_ID_MEGARAID_SATA_300_8x		0x0409
-#define PCI_SUBSYS_ID_MEGARAID_SATA_300_8x		0x3008
-
-#define PCI_DEVICE_ID_INTEL_RAID_SRCU42X		0x0407
-#define PCI_SUBSYS_ID_INTEL_RAID_SRCU42X		0x0532
+#define PCI_DEVICE_ID_LINDSAY				0x0409
 
 #define PCI_DEVICE_ID_INTEL_RAID_SRCS16			0x1960
 #define PCI_SUBSYS_ID_INTEL_RAID_SRCS16			0x0523
 
-#define PCI_DEVICE_ID_INTEL_RAID_SRCU42E		0x0408
-#define PCI_SUBSYS_ID_INTEL_RAID_SRCU42E		0x0002
-
-#define PCI_DEVICE_ID_INTEL_RAID_SRCZCRX		0x0407
-#define PCI_SUBSYS_ID_INTEL_RAID_SRCZCRX		0x0530
-
-#define PCI_DEVICE_ID_INTEL_RAID_SRCS28X		0x0409
-#define PCI_SUBSYS_ID_INTEL_RAID_SRCS28X		0x3008
-
-#define PCI_DEVICE_ID_INTEL_RAID_SROMBU42E_ALIEF	0x0408
-#define PCI_SUBSYS_ID_INTEL_RAID_SROMBU42E_ALIEF	0x3431
-
-#define PCI_DEVICE_ID_INTEL_RAID_SROMBU42E_HARWICH	0x0408
-#define PCI_SUBSYS_ID_INTEL_RAID_SROMBU42E_HARWICH	0x3499
-
 #define PCI_DEVICE_ID_INTEL_RAID_SRCU41L_LAKE_SHETEK	0x1960
 #define PCI_SUBSYS_ID_INTEL_RAID_SRCU41L_LAKE_SHETEK	0x0520
-
-#define PCI_DEVICE_ID_FSC_MEGARAID_PCI_EXPRESS_ROMB	0x0408
-#define PCI_SUBSYS_ID_FSC_MEGARAID_PCI_EXPRESS_ROMB	0x1065
-
-#define PCI_DEVICE_ID_MEGARAID_ACER_ROMB_2E		0x0408
-#define PCI_SUBSYS_ID_MEGARAID_ACER_ROMB_2E		0x004D
 
 #define PCI_SUBSYS_ID_PERC3_QC				0x0471
 #define PCI_SUBSYS_ID_PERC3_DC				0x0493
 #define PCI_SUBSYS_ID_PERC3_SC				0x0475
+#define PCI_SUBSYS_ID_CERC_ATA100_4CH			0x0511
 
-#define PCI_DEVICE_ID_MEGARAID_NEC_ROMB_2E		0x0408
-#define PCI_SUBSYS_ID_MEGARAID_NEC_ROMB_2E		0x8287
-
-#ifndef PCI_SUBSYS_ID_FSC
-#define PCI_SUBSYS_ID_FSC				0x1734
-#endif
 
 #define MBOX_MAX_SCSI_CMDS	128	// number of cmds reserved for kernel
 #define MBOX_MAX_USER_CMDS	32	// number of cmds for applications
@@ -154,6 +101,9 @@
 #define MBOX_BUSY_WAIT		10	// max usec to wait for busy mailbox
 #define MBOX_RESET_WAIT		180	// wait these many seconds in reset
 #define MBOX_RESET_EXT_WAIT	120	// extended wait reset
+#define MBOX_SYNC_WAIT_CNT	0xFFFF	// wait loop index for synchronous mode
+
+#define MBOX_SYNC_DELAY_200	200	// 200 micro-seconds
 
 /*
  * maximum transfer that can happen through the firmware commands issued
@@ -197,29 +147,29 @@ typedef struct {
 
 /**
  * mraid_device_t - adapter soft state structure for mailbox controllers
- * @param una_mbox64		: 64-bit mbox - unaligned
- * @param una_mbox64_dma	: mbox dma addr - unaligned
- * @param mbox			: 32-bit mbox - aligned
- * @param mbox64		: 64-bit mbox - aligned
- * @param mbox_dma		: mbox dma addr - aligned
- * @param mailbox_lock		: exclusion lock for the mailbox
- * @param baseport		: base port of hba memory
- * @param baseaddr		: mapped addr of hba memory
- * @param mbox_pool		: pool of mailboxes
- * @param mbox_pool_handle	: handle for the mailbox pool memory
- * @param epthru_pool		: a pool for extended passthru commands
- * @param epthru_pool_handle	: handle to the pool above
- * @param sg_pool		: pool of scatter-gather lists for this driver
- * @param sg_pool_handle	: handle to the pool above
- * @param ccb_list		: list of our command control blocks
- * @param uccb_list		: list of cmd control blocks for mgmt module
- * @param umbox64		: array of mailbox for user commands (cmm)
- * @param pdrv_state		: array for state of each physical drive.
- * @param last_disp		: flag used to show device scanning
- * @param hw_error		: set if FW not responding
- * @param fast_load		: If set, skip physical device scanning
+ * @una_mbox64			: 64-bit mbox - unaligned
+ * @una_mbox64_dma		: mbox dma addr - unaligned
+ * @mbox			: 32-bit mbox - aligned
+ * @mbox64			: 64-bit mbox - aligned
+ * @mbox_dma			: mbox dma addr - aligned
+ * @mailbox_lock		: exclusion lock for the mailbox
+ * @baseport			: base port of hba memory
+ * @baseaddr			: mapped addr of hba memory
+ * @mbox_pool			: pool of mailboxes
+ * @mbox_pool_handle		: handle for the mailbox pool memory
+ * @epthru_pool			: a pool for extended passthru commands
+ * @epthru_pool_handle		: handle to the pool above
+ * @sg_pool			: pool of scatter-gather lists for this driver
+ * @sg_pool_handle		: handle to the pool above
+ * @ccb_list			: list of our command control blocks
+ * @uccb_list			: list of cmd control blocks for mgmt module
+ * @umbox64			: array of mailbox for user commands (cmm)
+ * @pdrv_state			: array for state of each physical drive.
+ * @last_disp			: flag used to show device scanning
+ * @hw_error			: set if FW not responding
+ * @fast_load			: If set, skip physical device scanning
  * @channel_class		: channel class, RAID or SCSI
- * @sysfs_sem			: semaphore to serialize access to sysfs res.
+ * @sysfs_mtx			: mutex to serialize access to sysfs res.
  * @sysfs_uioc			: management packet to issue FW calls from sysfs
  * @sysfs_mbox64		: mailbox packet to issue FW calls from sysfs
  * @sysfs_buffer		: data buffer for FW commands issued from sysfs
@@ -259,7 +209,7 @@ typedef struct {
 	int				hw_error;
 	int				fast_load;
 	uint8_t				channel_class;
-	struct semaphore		sysfs_sem;
+	struct mutex			sysfs_mtx;
 	uioc_t				*sysfs_uioc;
 	mbox64_t			*sysfs_mbox64;
 	caddr_t				sysfs_buffer;

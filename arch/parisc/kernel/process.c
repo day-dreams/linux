@@ -9,11 +9,11 @@
  *    Copyright (C) 2000-2003 Paul Bame <bame at parisc-linux.org>
  *    Copyright (C) 2000 Philipp Rumpf <prumpf with tux.org>
  *    Copyright (C) 2000 David Kennedy <dkennedy with linuxcare.com>
- *    Copyright (C) 2000 Richard Hirst <rhirst with parisc-lixux.org>
+ *    Copyright (C) 2000 Richard Hirst <rhirst with parisc-linux.org>
  *    Copyright (C) 2000 Grant Grundler <grundler with parisc-linux.org>
  *    Copyright (C) 2001 Alan Modra <amodra at parisc-linux.org>
  *    Copyright (C) 2001-2002 Ryan Bradetich <rbrad at parisc-linux.org>
- *    Copyright (C) 2001-2002 Helge Deller <deller at parisc-linux.org>
+ *    Copyright (C) 2001-2014 Helge Deller <deller@gmx.de>
  *    Copyright (C) 2002 Randolph Chung <tausq with parisc-linux.org>
  *
  *
@@ -38,72 +38,34 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/fs.h>
+#include <linux/cpu.h>
 #include <linux/module.h>
 #include <linux/personality.h>
 #include <linux/ptrace.h>
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/task.h>
+#include <linux/sched/task_stack.h>
+#include <linux/slab.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/kallsyms.h>
+#include <linux/uaccess.h>
+#include <linux/rcupdate.h>
+#include <linux/random.h>
+#include <linux/nmi.h>
 
 #include <asm/io.h>
-#include <asm/offsets.h>
+#include <asm/asm-offsets.h>
+#include <asm/assembly.h>
 #include <asm/pdc.h>
 #include <asm/pdc_chassis.h>
 #include <asm/pgalloc.h>
-#include <asm/uaccess.h>
 #include <asm/unwind.h>
+#include <asm/sections.h>
 
-int hlt_counter;
-
-/*
- * Power off function, if any
- */ 
-void (*pm_power_off)(void);
-
-void disable_hlt(void)
-{
-	hlt_counter++;
-}
-
-EXPORT_SYMBOL(disable_hlt);
-
-void enable_hlt(void)
-{
-	hlt_counter--;
-}
-
-EXPORT_SYMBOL(enable_hlt);
-
-void default_idle(void)
-{
-	barrier();
-}
-
-/*
- * The idle thread. There's no useful work to be
- * done, so just try to conserve power and have a
- * low exit latency (ie sit in a loop waiting for
- * somebody to say that they'd like to reschedule)
- */
-void cpu_idle(void)
-{
-	/* endless idle loop with no priority at all */
-	while (1) {
-		while (!need_resched())
-			barrier();
-		schedule();
-		check_pgt_cache();
-	}
-}
-
-
-#ifdef __LP64__
-#define COMMAND_GLOBAL  0xfffffffffffe0030UL
-#else
-#define COMMAND_GLOBAL  0xfffe0030
-#endif
-
+#define COMMAND_GLOBAL  F_EXTEND(0xfffe0030)
 #define CMD_RESET       5       /* reset any module */
 
 /*
@@ -150,8 +112,6 @@ void machine_restart(char *cmd)
 
 }
 
-EXPORT_SYMBOL(machine_restart);
-
 void machine_halt(void)
 {
 	/*
@@ -160,8 +120,7 @@ void machine_halt(void)
 	*/
 }
 
-EXPORT_SYMBOL(machine_halt);
-
+void (*chassis_power_off)(void);
 
 /*
  * This routine is called from sys_reboot to actually turn off the
@@ -170,8 +129,8 @@ EXPORT_SYMBOL(machine_halt);
 void machine_power_off(void)
 {
 	/* If there is a registered power off handler, call it. */
-	if(pm_power_off)
-		pm_power_off();
+	if (chassis_power_off)
+		chassis_power_off();
 
 	/* Put the soft power button back under hardware control.
 	 * If the user had already pressed the power button, the
@@ -184,42 +143,22 @@ void machine_power_off(void)
 	 * software. The user has to press the button himself. */
 
 	printk(KERN_EMERG "System shut down completed.\n"
-	       KERN_EMERG "Please power this system off now.");
+	       "Please power this system off now.");
+
+	/* prevent soft lockup/stalled CPU messages for endless loop. */
+	rcu_sysrq_start();
+	lockup_detector_soft_poweroff();
+	for (;;);
 }
 
-EXPORT_SYMBOL(machine_power_off);
-
-
-/*
- * Create a kernel thread
- */
-
-extern pid_t __kernel_thread(int (*fn)(void *), void *arg, unsigned long flags);
-pid_t kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
-{
-
-	/*
-	 * FIXME: Once we are sure we don't need any debug here,
-	 *	  kernel_thread can become a #define.
-	 */
-
-	return __kernel_thread(fn, arg, flags);
-}
-EXPORT_SYMBOL(kernel_thread);
-
-/*
- * Free current thread data structures etc..
- */
-void exit_thread(void)
-{
-}
+void (*pm_power_off)(void) = machine_power_off;
+EXPORT_SYMBOL(pm_power_off);
 
 void flush_thread(void)
 {
 	/* Only needs to handle fpu stuff or perf monitors.
 	** REVISIT: several arches implement a "lazy fpu state".
 	*/
-	set_fs(USER_DS);
 }
 
 void release_thread(struct task_struct *dead_task)
@@ -245,141 +184,112 @@ int dump_task_fpu (struct task_struct *tsk, elf_fpregset_t *r)
 	return 1;
 }
 
-/* Note that "fork()" is implemented in terms of clone, with
-   parameters (SIGCHLD, regs->gr[30], regs). */
-int
-sys_clone(unsigned long clone_flags, unsigned long usp,
-	  struct pt_regs *regs)
+/*
+ * Idle thread support
+ *
+ * Detect when running on QEMU with SeaBIOS PDC Firmware and let
+ * QEMU idle the host too.
+ */
+
+int running_on_qemu __read_mostly;
+
+void __cpuidle arch_cpu_idle_dead(void)
 {
-	int *user_tid = (int *)regs->gr[26];
-
-	/* usp must be word aligned.  This also prevents users from
-	 * passing in the value 1 (which is the signal for a special
-	 * return for a kernel thread) */
-	usp = ALIGN(usp, 4);
-
-	/* A zero value for usp means use the current stack */
-	if(usp == 0)
-		usp = regs->gr[30];
-
-	return do_fork(clone_flags, usp, regs, 0, user_tid, NULL);
+	/* nop on real hardware, qemu will offline CPU. */
+	asm volatile("or %%r31,%%r31,%%r31\n":::);
 }
 
-int
-sys_vfork(struct pt_regs *regs)
+void __cpuidle arch_cpu_idle(void)
 {
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs->gr[30], regs, 0, NULL, NULL);
+	local_irq_enable();
+
+	/* nop on real hardware, qemu will idle sleep. */
+	asm volatile("or %%r10,%%r10,%%r10\n":::);
 }
 
-int
-copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
-	    unsigned long unused,	/* in ia64 this is "user_stack_size" */
-	    struct task_struct * p, struct pt_regs * pregs)
+static int __init parisc_idle_init(void)
 {
-	struct pt_regs * cregs = &(p->thread.regs);
-	struct thread_info *ti = p->thread_info;
+	const char *marker;
+
+	/* check QEMU/SeaBIOS marker in PAGE0 */
+	marker = (char *) &PAGE0->pad0;
+	running_on_qemu = (memcmp(marker, "SeaBIOS", 8) == 0);
+
+	if (!running_on_qemu)
+		cpu_idle_poll_ctrl(1);
+
+	return 0;
+}
+arch_initcall(parisc_idle_init);
+
+/*
+ * Copy architecture-specific thread state
+ */
+int
+copy_thread(unsigned long clone_flags, unsigned long usp,
+	    unsigned long kthread_arg, struct task_struct *p)
+{
+	struct pt_regs *cregs = &(p->thread.regs);
+	void *stack = task_stack_page(p);
 	
 	/* We have to use void * instead of a function pointer, because
 	 * function pointers aren't a pointer to the function on 64-bit.
 	 * Make them const so the compiler knows they live in .text */
 	extern void * const ret_from_kernel_thread;
 	extern void * const child_return;
-#ifdef CONFIG_HPUX
-	extern void * const hpux_child_return;
-#endif
 
-	*cregs = *pregs;
-
-	/* Set the return value for the child.  Note that this is not
-           actually restored by the syscall exit path, but we put it
-           here for consistency in case of signals. */
-	cregs->gr[28] = 0; /* child */
-
-	/*
-	 * We need to differentiate between a user fork and a
-	 * kernel fork. We can't use user_mode, because the
-	 * the syscall path doesn't save iaoq. Right now
-	 * We rely on the fact that kernel_thread passes
-	 * in zero for usp.
-	 */
-	if (usp == 1) {
+	if (unlikely(p->flags & PF_KTHREAD)) {
 		/* kernel thread */
-		cregs->ksp = (((unsigned long)(ti)) + THREAD_SZ_ALGN);
+		memset(cregs, 0, sizeof(struct pt_regs));
+		if (!usp) /* idle thread */
+			return 0;
 		/* Must exit via ret_from_kernel_thread in order
 		 * to call schedule_tail()
 		 */
+		cregs->ksp = (unsigned long)stack + THREAD_SZ_ALGN + FRAME_SIZE;
 		cregs->kpc = (unsigned long) &ret_from_kernel_thread;
 		/*
 		 * Copy function and argument to be called from
 		 * ret_from_kernel_thread.
 		 */
-#ifdef __LP64__
-		cregs->gr[27] = pregs->gr[27];
+#ifdef CONFIG_64BIT
+		cregs->gr[27] = ((unsigned long *)usp)[3];
+		cregs->gr[26] = ((unsigned long *)usp)[2];
+#else
+		cregs->gr[26] = usp;
 #endif
-		cregs->gr[26] = pregs->gr[26];
-		cregs->gr[25] = pregs->gr[25];
+		cregs->gr[25] = kthread_arg;
 	} else {
 		/* user thread */
-		/*
-		 * Note that the fork wrappers are responsible
-		 * for setting gr[21].
-		 */
-
-		/* Use same stack depth as parent */
-		cregs->ksp = ((unsigned long)(ti))
-			+ (pregs->gr[21] & (THREAD_SIZE - 1));
-		cregs->gr[30] = usp;
-		if (p->personality == PER_HPUX) {
-#ifdef CONFIG_HPUX
-			cregs->kpc = (unsigned long) &hpux_child_return;
-#else
-			BUG();
-#endif
-		} else {
-			cregs->kpc = (unsigned long) &child_return;
+		/* usp must be word aligned.  This also prevents users from
+		 * passing in the value 1 (which is the signal for a special
+		 * return for a kernel thread) */
+		if (usp) {
+			usp = ALIGN(usp, 4);
+			if (likely(usp))
+				cregs->gr[30] = usp;
 		}
+		cregs->ksp = (unsigned long)stack + THREAD_SZ_ALGN + FRAME_SIZE;
+		cregs->kpc = (unsigned long) &child_return;
+
+		/* Setup thread TLS area from the 4th parameter in clone */
+		if (clone_flags & CLONE_SETTLS)
+			cregs->cr27 = cregs->gr[23];
 	}
 
 	return 0;
 }
 
-unsigned long thread_saved_pc(struct task_struct *t)
-{
-	return t->thread.regs.kpc;
-}
-
-/*
- * sys_execve() executes a new program.
- */
-
-asmlinkage int sys_execve(struct pt_regs *regs)
-{
-	int error;
-	char *filename;
-
-	filename = getname((char *) regs->gr[26]);
-	error = PTR_ERR(filename);
-	if (IS_ERR(filename))
-		goto out;
-	error = do_execve(filename, (char **) regs->gr[25],
-		(char **) regs->gr[24], regs);
-	if (error == 0) {
-		task_lock(current);
-		current->ptrace &= ~PT_DTRACE;
-		task_unlock(current);
-	}
-	putname(filename);
-out:
-
-	return error;
-}
-
-unsigned long 
+unsigned long
 get_wchan(struct task_struct *p)
 {
 	struct unwind_frame_info info;
 	unsigned long ip;
 	int count = 0;
+
+	if (!p || p == current || p->state == TASK_RUNNING)
+		return 0;
+
 	/*
 	 * These bracket the sleeping functions..
 	 */
@@ -393,4 +303,39 @@ get_wchan(struct task_struct *p)
 			return ip;
 	} while (count++ < 16);
 	return 0;
+}
+
+#ifdef CONFIG_64BIT
+void *dereference_function_descriptor(void *ptr)
+{
+	Elf64_Fdesc *desc = ptr;
+	void *p;
+
+	if (!probe_kernel_address(&desc->addr, p))
+		ptr = p;
+	return ptr;
+}
+
+void *dereference_kernel_function_descriptor(void *ptr)
+{
+	if (ptr < (void *)__start_opd ||
+			ptr >= (void *)__end_opd)
+		return ptr;
+
+	return dereference_function_descriptor(ptr);
+}
+#endif
+
+static inline unsigned long brk_rnd(void)
+{
+	return (get_random_int() & BRK_RND_MASK) << PAGE_SHIFT;
+}
+
+unsigned long arch_randomize_brk(struct mm_struct *mm)
+{
+	unsigned long ret = PAGE_ALIGN(mm->brk + brk_rnd());
+
+	if (ret < mm->brk)
+		return mm->brk;
+	return ret;
 }

@@ -17,7 +17,7 @@
  *
  * Copyright (C) IBM Corporation, 2004
  *
- * Author: Max Asböck <amax@us.ibm.com> 
+ * Author: Max AsbÃ¶ck <amax@us.ibm.com>
  *
  */
 
@@ -46,36 +46,40 @@ int ibmasm_send_i2o_message(struct service_processor *sp)
 
 	message = get_i2o_message(sp->base_address, mfa);
 
-	memcpy(&message->header, &header, sizeof(struct i2o_header));
-	memcpy(&message->data, command->buffer, command_size);
+	memcpy_toio(&message->header, &header, sizeof(struct i2o_header));
+	memcpy_toio(&message->data, command->buffer, command_size);
 
 	set_mfa_inbound(sp->base_address, mfa);
 
 	return 0;
 }
 
-irqreturn_t ibmasm_interrupt_handler(int irq, void * dev_id, struct pt_regs *regs)
+irqreturn_t ibmasm_interrupt_handler(int irq, void * dev_id)
 {
 	u32	mfa;
 	struct service_processor *sp = (struct service_processor *)dev_id;
 	void __iomem *base_address = sp->base_address;
+	char tsbuf[32];
 
 	if (!sp_interrupt_pending(base_address))
 		return IRQ_NONE;
 
+	dbg("respond to interrupt at %s\n", get_timestamp(tsbuf));
+
 	if (mouse_interrupt_pending(sp)) {
 		ibmasm_handle_mouse_interrupt(sp);
-		mfa = get_mfa_outbound(base_address);
 		clear_mouse_interrupt(sp);
-		set_mfa_outbound(base_address, mfa);
-		return IRQ_HANDLED;
 	}
 
 	mfa = get_mfa_outbound(base_address);
 	if (valid_mfa(mfa)) {
 		struct i2o_message *msg = get_i2o_message(base_address, mfa);
 		ibmasm_receive_message(sp, &msg->data, incoming_data_size(msg));
-	}
+	} else
+		dbg("didn't get a valid MFA\n");
+
 	set_mfa_outbound(base_address, mfa);
+	dbg("finished interrupt at   %s\n", get_timestamp(tsbuf));
+
 	return IRQ_HANDLED;
 }

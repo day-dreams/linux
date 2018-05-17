@@ -4,14 +4,14 @@
  
 
 #include <linux/module.h>
-#include <linux/sched.h> /* for jiffies */
 #include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/atmdev.h>
 #include <linux/sonet.h>
 #include <linux/init.h>
-#include <asm/uaccess.h>
-#include <asm/atomic.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
+#include <linux/atomic.h>
 
 #include "uPD98402.h"
 

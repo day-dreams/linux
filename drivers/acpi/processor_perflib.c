@@ -20,38 +20,27 @@
  *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  *  General Public License for more details.
  *
- *  You should have received a copy of the GNU General Public License along
- *  with this program; if not, write to the Free Software Foundation, Inc.,
- *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
- *
  */
-
 
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/cpufreq.h>
-
-#ifdef CONFIG_X86_ACPI_CPUFREQ_PROC_INTF
-#include <linux/proc_fs.h>
-#include <linux/seq_file.h>
-
-#include <asm/uaccess.h>
+#include <linux/slab.h>
+#include <linux/acpi.h>
+#include <acpi/processor.h>
+#ifdef CONFIG_X86
+#include <asm/cpufeature.h>
 #endif
 
-#include <acpi/acpi_bus.h>
-#include <acpi/processor.h>
+#define PREFIX "ACPI: "
 
-
-#define ACPI_PROCESSOR_COMPONENT	0x01000000
 #define ACPI_PROCESSOR_CLASS		"processor"
-#define ACPI_PROCESSOR_DRIVER_NAME	"ACPI Processor Driver"
 #define ACPI_PROCESSOR_FILE_PERFORMANCE	"performance"
 #define _COMPONENT		ACPI_PROCESSOR_COMPONENT
-ACPI_MODULE_NAME		("acpi_processor")
+ACPI_MODULE_NAME("processor_perflib");
 
-
-static DECLARE_MUTEX(performance_sem);
+static DEFINE_MUTEX(performance_mutex);
 
 /*
  * _PPC support is implemented as a CPUfreq policy notifier:
@@ -63,61 +52,71 @@ static DECLARE_MUTEX(performance_sem);
  * policy is adjusted accordingly.
  */
 
+/* ignore_ppc:
+ * -1 -> cpufreq low level drivers not initialized -> _PSS, etc. not called yet
+ *       ignore _PPC
+ *  0 -> cpufreq low level drivers initialized -> consider _PPC values
+ *  1 -> ignore _PPC totally -> forced by user through boot param
+ */
+static int ignore_ppc = -1;
+module_param(ignore_ppc, int, 0644);
+MODULE_PARM_DESC(ignore_ppc, "If the frequency of your machine gets wrongly" \
+		 "limited by BIOS, this should help");
+
 #define PPC_REGISTERED   1
 #define PPC_IN_USE       2
 
-static int acpi_processor_ppc_status = 0;
+static int acpi_processor_ppc_status;
 
 static int acpi_processor_ppc_notifier(struct notifier_block *nb,
-	unsigned long event,
-	void *data)
+				       unsigned long event, void *data)
 {
 	struct cpufreq_policy *policy = data;
 	struct acpi_processor *pr;
 	unsigned int ppc = 0;
 
-	down(&performance_sem);
+	if (ignore_ppc < 0)
+		ignore_ppc = 0;
 
-	if (event != CPUFREQ_INCOMPATIBLE)
-		goto out;
+	if (ignore_ppc)
+		return 0;
 
-	pr = processors[policy->cpu];
+	if (event != CPUFREQ_ADJUST)
+		return 0;
+
+	mutex_lock(&performance_mutex);
+
+	pr = per_cpu(processors, policy->cpu);
 	if (!pr || !pr->performance)
 		goto out;
 
-	ppc = (unsigned int) pr->performance_platform_limit;
-	if (!ppc)
-		goto out;
+	ppc = (unsigned int)pr->performance_platform_limit;
 
-	if (ppc > pr->performance->state_count)
+	if (ppc >= pr->performance->state_count)
 		goto out;
 
 	cpufreq_verify_within_limits(policy, 0,
-		pr->performance->states[ppc].core_frequency * 1000);
+				     pr->performance->states[ppc].
+				     core_frequency * 1000);
 
- out:
-	up(&performance_sem);
+      out:
+	mutex_unlock(&performance_mutex);
 
 	return 0;
 }
-
 
 static struct notifier_block acpi_ppc_notifier_block = {
 	.notifier_call = acpi_processor_ppc_notifier,
 };
 
-
-static int
-acpi_processor_get_platform_limit (
-	struct acpi_processor*	pr)
+static int acpi_processor_get_platform_limit(struct acpi_processor *pr)
 {
-	acpi_status		status = 0;
-	unsigned long		ppc = 0;
+	acpi_status status = 0;
+	unsigned long long ppc = 0;
 
-	ACPI_FUNCTION_TRACE("acpi_processor_get_platform_limit");
 
 	if (!pr)
-		return_VALUE(-EINVAL);
+		return -EINVAL;
 
 	/*
 	 * _PPC indicates the maximum state currently supported by the platform
@@ -128,97 +127,114 @@ acpi_processor_get_platform_limit (
 	if (status != AE_NOT_FOUND)
 		acpi_processor_ppc_status |= PPC_IN_USE;
 
-	if(ACPI_FAILURE(status) && status != AE_NOT_FOUND) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Error evaluating _PPC\n"));
-		return_VALUE(-ENODEV);
+	if (ACPI_FAILURE(status) && status != AE_NOT_FOUND) {
+		ACPI_EXCEPTION((AE_INFO, status, "Evaluating _PPC"));
+		return -ENODEV;
 	}
 
-	pr->performance_platform_limit = (int) ppc;
+	pr_debug("CPU %d: _PPC is %d - frequency %s limited\n", pr->id,
+		       (int)ppc, ppc ? "" : "not");
 
-	return_VALUE(0);
+	pr->performance_platform_limit = (int)ppc;
+
+	return 0;
 }
 
-
-int acpi_processor_ppc_has_changed(
-	struct acpi_processor *pr)
+#define ACPI_PROCESSOR_NOTIFY_PERFORMANCE	0x80
+/*
+ * acpi_processor_ppc_ost: Notify firmware the _PPC evaluation status
+ * @handle: ACPI processor handle
+ * @status: the status code of _PPC evaluation
+ *	0: success. OSPM is now using the performance state specificed.
+ *	1: failure. OSPM has not changed the number of P-states in use
+ */
+static void acpi_processor_ppc_ost(acpi_handle handle, int status)
 {
-	int ret = acpi_processor_get_platform_limit(pr);
-	if (ret < 0)
-		return (ret);
-	else
-		return cpufreq_update_policy(pr->id);
+	if (acpi_has_method(handle, "_OST"))
+		acpi_evaluate_ost(handle, ACPI_PROCESSOR_NOTIFY_PERFORMANCE,
+				  status, NULL);
 }
 
+void acpi_processor_ppc_has_changed(struct acpi_processor *pr, int event_flag)
+{
+	int ret;
 
-void acpi_processor_ppc_init(void) {
-	if (!cpufreq_register_notifier(&acpi_ppc_notifier_block, CPUFREQ_POLICY_NOTIFIER))
+	if (ignore_ppc || !pr->performance) {
+		/*
+		 * Only when it is notification event, the _OST object
+		 * will be evaluated. Otherwise it is skipped.
+		 */
+		if (event_flag)
+			acpi_processor_ppc_ost(pr->handle, 1);
+		return;
+	}
+
+	ret = acpi_processor_get_platform_limit(pr);
+	/*
+	 * Only when it is notification event, the _OST object
+	 * will be evaluated. Otherwise it is skipped.
+	 */
+	if (event_flag) {
+		if (ret < 0)
+			acpi_processor_ppc_ost(pr->handle, 1);
+		else
+			acpi_processor_ppc_ost(pr->handle, 0);
+	}
+	if (ret >= 0)
+		cpufreq_update_policy(pr->id);
+}
+
+int acpi_processor_get_bios_limit(int cpu, unsigned int *limit)
+{
+	struct acpi_processor *pr;
+
+	pr = per_cpu(processors, cpu);
+	if (!pr || !pr->performance || !pr->performance->state_count)
+		return -ENODEV;
+	*limit = pr->performance->states[pr->performance_platform_limit].
+		core_frequency * 1000;
+	return 0;
+}
+EXPORT_SYMBOL(acpi_processor_get_bios_limit);
+
+void acpi_processor_ppc_init(void)
+{
+	if (!cpufreq_register_notifier
+	    (&acpi_ppc_notifier_block, CPUFREQ_POLICY_NOTIFIER))
 		acpi_processor_ppc_status |= PPC_REGISTERED;
 	else
-		printk(KERN_DEBUG "Warning: Processor Platform Limit not supported.\n");
+		printk(KERN_DEBUG
+		       "Warning: Processor Platform Limit not supported.\n");
 }
 
-
-void acpi_processor_ppc_exit(void) {
+void acpi_processor_ppc_exit(void)
+{
 	if (acpi_processor_ppc_status & PPC_REGISTERED)
-		cpufreq_unregister_notifier(&acpi_ppc_notifier_block, CPUFREQ_POLICY_NOTIFIER);
+		cpufreq_unregister_notifier(&acpi_ppc_notifier_block,
+					    CPUFREQ_POLICY_NOTIFIER);
 
 	acpi_processor_ppc_status &= ~PPC_REGISTERED;
 }
 
-/*
- * when registering a cpufreq driver with this ACPI processor driver, the
- * _PCT and _PSS structures are read out and written into struct
- * acpi_processor_performance.
- */
-static int acpi_processor_set_pdc (struct acpi_processor *pr)
+static int acpi_processor_get_performance_control(struct acpi_processor *pr)
 {
-	acpi_status             status = AE_OK;
-	u32			arg0_buf[3];
-	union acpi_object	arg0 = {ACPI_TYPE_BUFFER};
-	struct acpi_object_list no_object = {1, &arg0};
-	struct acpi_object_list *pdc;
+	int result = 0;
+	acpi_status status = 0;
+	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
+	union acpi_object *pct = NULL;
+	union acpi_object obj = { 0 };
 
-	ACPI_FUNCTION_TRACE("acpi_processor_set_pdc");
-
-	arg0.buffer.length = 12;
-	arg0.buffer.pointer = (u8 *) arg0_buf;
-	arg0_buf[0] = ACPI_PDC_REVISION_ID;
-	arg0_buf[1] = 0;
-	arg0_buf[2] = 0;
-
-	pdc = (pr->performance->pdc) ? pr->performance->pdc : &no_object;
-
-	status = acpi_evaluate_object(pr->handle, "_PDC", pdc, NULL);
-
-	if ((ACPI_FAILURE(status)) && (pr->performance->pdc))
-		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Error evaluating _PDC, using legacy perf. control...\n"));
-
-	return_VALUE(status);
-}
-
-
-static int
-acpi_processor_get_performance_control (
-	struct acpi_processor *pr)
-{
-	int			result = 0;
-	acpi_status		status = 0;
-	struct acpi_buffer	buffer = {ACPI_ALLOCATE_BUFFER, NULL};
-	union acpi_object	*pct = NULL;
-	union acpi_object	obj = {0};
-
-	ACPI_FUNCTION_TRACE("acpi_processor_get_performance_control");
 
 	status = acpi_evaluate_object(pr->handle, "_PCT", NULL, &buffer);
-	if(ACPI_FAILURE(status)) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Error evaluating _PCT\n"));
-		return_VALUE(-ENODEV);
+	if (ACPI_FAILURE(status)) {
+		ACPI_EXCEPTION((AE_INFO, status, "Evaluating _PCT"));
+		return -ENODEV;
 	}
 
-	pct = (union acpi_object *) buffer.pointer;
+	pct = (union acpi_object *)buffer.pointer;
 	if (!pct || (pct->type != ACPI_TYPE_PACKAGE)
-		|| (pct->package.count != 2)) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Invalid _PCT data\n"));
+	    || (pct->package.count != 2)) {
+		printk(KERN_ERR PREFIX "Invalid _PCT data\n");
 		result = -EFAULT;
 		goto end;
 	}
@@ -230,15 +246,14 @@ acpi_processor_get_performance_control (
 	obj = pct->package.elements[0];
 
 	if ((obj.type != ACPI_TYPE_BUFFER)
-		|| (obj.buffer.length < sizeof(struct acpi_pct_register))
-		|| (obj.buffer.pointer == NULL)) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR,
-			"Invalid _PCT data (control_register)\n"));
+	    || (obj.buffer.length < sizeof(struct acpi_pct_register))
+	    || (obj.buffer.pointer == NULL)) {
+		printk(KERN_ERR PREFIX "Invalid _PCT data (control_register)\n");
 		result = -EFAULT;
 		goto end;
 	}
-	memcpy(&pr->performance->control_register, obj.buffer.pointer, sizeof(struct acpi_pct_register));
-
+	memcpy(&pr->performance->control_register, obj.buffer.pointer,
+	       sizeof(struct acpi_pct_register));
 
 	/*
 	 * status_register
@@ -247,55 +262,89 @@ acpi_processor_get_performance_control (
 	obj = pct->package.elements[1];
 
 	if ((obj.type != ACPI_TYPE_BUFFER)
-		|| (obj.buffer.length < sizeof(struct acpi_pct_register))
-		|| (obj.buffer.pointer == NULL)) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR,
-			"Invalid _PCT data (status_register)\n"));
+	    || (obj.buffer.length < sizeof(struct acpi_pct_register))
+	    || (obj.buffer.pointer == NULL)) {
+		printk(KERN_ERR PREFIX "Invalid _PCT data (status_register)\n");
 		result = -EFAULT;
 		goto end;
 	}
 
-	memcpy(&pr->performance->status_register, obj.buffer.pointer, sizeof(struct acpi_pct_register));
+	memcpy(&pr->performance->status_register, obj.buffer.pointer,
+	       sizeof(struct acpi_pct_register));
 
-end:
-	acpi_os_free(buffer.pointer);
+      end:
+	kfree(buffer.pointer);
 
-	return_VALUE(result);
+	return result;
 }
 
-
-static int
-acpi_processor_get_performance_states (
-	struct acpi_processor	*pr)
+#ifdef CONFIG_X86
+/*
+ * Some AMDs have 50MHz frequency multiples, but only provide 100MHz rounding
+ * in their ACPI data. Calculate the real values and fix up the _PSS data.
+ */
+static void amd_fixup_frequency(struct acpi_processor_px *px, int i)
 {
-	int			result = 0;
-	acpi_status		status = AE_OK;
-	struct acpi_buffer	buffer = {ACPI_ALLOCATE_BUFFER, NULL};
-	struct acpi_buffer	format = {sizeof("NNNNNN"), "NNNNNN"};
-	struct acpi_buffer	state = {0, NULL};
-	union acpi_object 	*pss = NULL;
-	int			i;
+	u32 hi, lo, fid, did;
+	int index = px->control & 0x00000007;
 
-	ACPI_FUNCTION_TRACE("acpi_processor_get_performance_states");
+	if (boot_cpu_data.x86_vendor != X86_VENDOR_AMD)
+		return;
+
+	if ((boot_cpu_data.x86 == 0x10 && boot_cpu_data.x86_model < 10)
+	    || boot_cpu_data.x86 == 0x11) {
+		rdmsr(MSR_AMD_PSTATE_DEF_BASE + index, lo, hi);
+		/*
+		 * MSR C001_0064+:
+		 * Bit 63: PstateEn. Read-write. If set, the P-state is valid.
+		 */
+		if (!(hi & BIT(31)))
+			return;
+
+		fid = lo & 0x3f;
+		did = (lo >> 6) & 7;
+		if (boot_cpu_data.x86 == 0x10)
+			px->core_frequency = (100 * (fid + 0x10)) >> did;
+		else
+			px->core_frequency = (100 * (fid + 8)) >> did;
+	}
+}
+#else
+static void amd_fixup_frequency(struct acpi_processor_px *px, int i) {};
+#endif
+
+static int acpi_processor_get_performance_states(struct acpi_processor *pr)
+{
+	int result = 0;
+	acpi_status status = AE_OK;
+	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
+	struct acpi_buffer format = { sizeof("NNNNNN"), "NNNNNN" };
+	struct acpi_buffer state = { 0, NULL };
+	union acpi_object *pss = NULL;
+	int i;
+	int last_invalid = -1;
+
 
 	status = acpi_evaluate_object(pr->handle, "_PSS", NULL, &buffer);
-	if(ACPI_FAILURE(status)) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Error evaluating _PSS\n"));
-		return_VALUE(-ENODEV);
+	if (ACPI_FAILURE(status)) {
+		ACPI_EXCEPTION((AE_INFO, status, "Evaluating _PSS"));
+		return -ENODEV;
 	}
 
-	pss = (union acpi_object *) buffer.pointer;
+	pss = buffer.pointer;
 	if (!pss || (pss->type != ACPI_TYPE_PACKAGE)) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Invalid _PSS data\n"));
+		printk(KERN_ERR PREFIX "Invalid _PSS data\n");
 		result = -EFAULT;
 		goto end;
 	}
 
 	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Found %d performance states\n",
-		pss->package.count));
+			  pss->package.count));
 
 	pr->performance->state_count = pss->package.count;
-	pr->performance->states = kmalloc(sizeof(struct acpi_processor_px) * pss->package.count, GFP_KERNEL);
+	pr->performance->states =
+	    kmalloc(sizeof(struct acpi_processor_px) * pss->package.count,
+		    GFP_KERNEL);
 	if (!pr->performance->states) {
 		result = -ENOMEM;
 		goto end;
@@ -311,130 +360,165 @@ acpi_processor_get_performance_states (
 		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Extracting state %d\n", i));
 
 		status = acpi_extract_package(&(pss->package.elements[i]),
-			&format, &state);
+					      &format, &state);
 		if (ACPI_FAILURE(status)) {
-			ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Invalid _PSS data\n"));
+			ACPI_EXCEPTION((AE_INFO, status, "Invalid _PSS data"));
 			result = -EFAULT;
 			kfree(pr->performance->states);
 			goto end;
 		}
 
-		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
-			"State [%d]: core_frequency[%d] power[%d] transition_latency[%d] bus_master_latency[%d] control[0x%x] status[0x%x]\n",
-			i,
-			(u32) px->core_frequency,
-			(u32) px->power,
-			(u32) px->transition_latency,
-			(u32) px->bus_master_latency,
-			(u32) px->control,
-			(u32) px->status));
+		amd_fixup_frequency(px, i);
 
-		if (!px->core_frequency) {
-			ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Invalid _PSS data: freq is zero\n"));
-			result = -EFAULT;
-			kfree(pr->performance->states);
-			goto end;
+		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
+				  "State [%d]: core_frequency[%d] power[%d] transition_latency[%d] bus_master_latency[%d] control[0x%x] status[0x%x]\n",
+				  i,
+				  (u32) px->core_frequency,
+				  (u32) px->power,
+				  (u32) px->transition_latency,
+				  (u32) px->bus_master_latency,
+				  (u32) px->control, (u32) px->status));
+
+		/*
+ 		 * Check that ACPI's u64 MHz will be valid as u32 KHz in cpufreq
+		 */
+		if (!px->core_frequency ||
+		    ((u32)(px->core_frequency * 1000) !=
+		     (px->core_frequency * 1000))) {
+			printk(KERN_ERR FW_BUG PREFIX
+			       "Invalid BIOS _PSS frequency found for processor %d: 0x%llx MHz\n",
+			       pr->id, px->core_frequency);
+			if (last_invalid == -1)
+				last_invalid = i;
+		} else {
+			if (last_invalid != -1) {
+				/*
+				 * Copy this valid entry over last_invalid entry
+				 */
+				memcpy(&(pr->performance->states[last_invalid]),
+				       px, sizeof(struct acpi_processor_px));
+				++last_invalid;
+			}
 		}
 	}
 
-end:
-	acpi_os_free(buffer.pointer);
+	if (last_invalid == 0) {
+		printk(KERN_ERR FW_BUG PREFIX
+		       "No valid BIOS _PSS frequency found for processor %d\n", pr->id);
+		result = -EFAULT;
+		kfree(pr->performance->states);
+		pr->performance->states = NULL;
+	}
 
-	return_VALUE(result);
+	if (last_invalid > 0)
+		pr->performance->state_count = last_invalid;
+
+      end:
+	kfree(buffer.pointer);
+
+	return result;
 }
 
-
-static int
-acpi_processor_get_performance_info (
-	struct acpi_processor	*pr)
+int acpi_processor_get_performance_info(struct acpi_processor *pr)
 {
-	int			result = 0;
-	acpi_status		status = AE_OK;
-	acpi_handle		handle = NULL;
-
-	ACPI_FUNCTION_TRACE("acpi_processor_get_performance_info");
+	int result = 0;
 
 	if (!pr || !pr->performance || !pr->handle)
-		return_VALUE(-EINVAL);
+		return -EINVAL;
 
-	acpi_processor_set_pdc(pr);
-
-	status = acpi_get_handle(pr->handle, "_PCT", &handle);
-	if (ACPI_FAILURE(status)) {
+	if (!acpi_has_method(pr->handle, "_PCT")) {
 		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
-			"ACPI-based processor performance control unavailable\n"));
-		return_VALUE(-ENODEV);
+				  "ACPI-based processor performance control unavailable\n"));
+		return -ENODEV;
 	}
 
 	result = acpi_processor_get_performance_control(pr);
 	if (result)
-		return_VALUE(result);
+		goto update_bios;
 
 	result = acpi_processor_get_performance_states(pr);
 	if (result)
-		return_VALUE(result);
+		goto update_bios;
 
-	result = acpi_processor_get_platform_limit(pr);
-	if (result)
-		return_VALUE(result);
+	/* We need to call _PPC once when cpufreq starts */
+	if (ignore_ppc != 1)
+		result = acpi_processor_get_platform_limit(pr);
 
-	return_VALUE(0);
+	return result;
+
+	/*
+	 * Having _PPC but missing frequencies (_PSS, _PCT) is a very good hint that
+	 * the BIOS is older than the CPU and does not know its frequencies
+	 */
+ update_bios:
+#ifdef CONFIG_X86
+	if (acpi_has_method(pr->handle, "_PPC")) {
+		if(boot_cpu_has(X86_FEATURE_EST))
+			printk(KERN_WARNING FW_BUG "BIOS needs update for CPU "
+			       "frequency support\n");
+	}
+#endif
+	return result;
+}
+EXPORT_SYMBOL_GPL(acpi_processor_get_performance_info);
+
+int acpi_processor_pstate_control(void)
+{
+	acpi_status status;
+
+	if (!acpi_gbl_FADT.smi_command || !acpi_gbl_FADT.pstate_control)
+		return 0;
+
+	ACPI_DEBUG_PRINT((ACPI_DB_INFO,
+			  "Writing pstate_control [0x%x] to smi_command [0x%x]\n",
+			  acpi_gbl_FADT.pstate_control, acpi_gbl_FADT.smi_command));
+
+	status = acpi_os_write_port(acpi_gbl_FADT.smi_command,
+				    (u32)acpi_gbl_FADT.pstate_control, 8);
+	if (ACPI_SUCCESS(status))
+		return 1;
+
+	ACPI_EXCEPTION((AE_INFO, status,
+			"Failed to write pstate_control [0x%x] to smi_command [0x%x]",
+			acpi_gbl_FADT.pstate_control, acpi_gbl_FADT.smi_command));
+	return -EIO;
 }
 
-
-int acpi_processor_notify_smm(struct module *calling_module) {
-	acpi_status		status;
-	static int		is_done = 0;
-
-	ACPI_FUNCTION_TRACE("acpi_processor_notify_smm");
+int acpi_processor_notify_smm(struct module *calling_module)
+{
+	static int is_done = 0;
+	int result;
 
 	if (!(acpi_processor_ppc_status & PPC_REGISTERED))
-		return_VALUE(-EBUSY);
+		return -EBUSY;
 
 	if (!try_module_get(calling_module))
-		return_VALUE(-EINVAL);
+		return -EINVAL;
 
-	/* is_done is set to negative if an error occured,
-	 * and to postitive if _no_ error occured, but SMM
+	/* is_done is set to negative if an error occurred,
+	 * and to postitive if _no_ error occurred, but SMM
 	 * was already notified. This avoids double notification
 	 * which might lead to unexpected results...
 	 */
 	if (is_done > 0) {
 		module_put(calling_module);
-		return_VALUE(0);
-	}
-	else if (is_done < 0) {
+		return 0;
+	} else if (is_done < 0) {
 		module_put(calling_module);
-		return_VALUE(is_done);
+		return is_done;
 	}
 
 	is_done = -EIO;
 
-	/* Can't write pstate_cnt to smi_cmd if either value is zero */
-	if ((!acpi_fadt.smi_cmd) ||
-	    (!acpi_fadt.pstate_cnt)) {
-		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
-			"No SMI port or pstate_cnt\n"));
+	result = acpi_processor_pstate_control();
+	if (!result) {
+		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "No SMI port or pstate_control\n"));
 		module_put(calling_module);
-		return_VALUE(0);
+		return 0;
 	}
-
-	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Writing pstate_cnt [0x%x] to smi_cmd [0x%x]\n", acpi_fadt.pstate_cnt, acpi_fadt.smi_cmd));
-
-	/* FADT v1 doesn't support pstate_cnt, many BIOS vendors use
-	 * it anyway, so we need to support it... */
-	if (acpi_fadt_is_v1) {
-		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Using v1.0 FADT reserved value for pstate_cnt\n"));
-	}
-
-	status = acpi_os_write_port (acpi_fadt.smi_cmd,
-				     (u32) acpi_fadt.pstate_cnt, 8);
-	if (ACPI_FAILURE (status)) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR,
-				  "Failed to write pstate_cnt [0x%x] to "
-				  "smi_cmd [0x%x]\n", acpi_fadt.pstate_cnt, acpi_fadt.smi_cmd));
+	if (result < 0) {
 		module_put(calling_module);
-		return_VALUE(status);
+		return result;
 	}
 
 	/* Success. If there's no _PPC, we need to fear nothing, so
@@ -444,223 +528,284 @@ int acpi_processor_notify_smm(struct module *calling_module) {
 	if (!(acpi_processor_ppc_status & PPC_IN_USE))
 		module_put(calling_module);
 
-	return_VALUE(0);
+	return 0;
 }
+
 EXPORT_SYMBOL(acpi_processor_notify_smm);
 
-
-#ifdef CONFIG_X86_ACPI_CPUFREQ_PROC_INTF
-/* /proc/acpi/processor/../performance interface (DEPRECATED) */
-
-static int acpi_processor_perf_open_fs(struct inode *inode, struct file *file);
-static struct file_operations acpi_processor_perf_fops = {
-	.open 		= acpi_processor_perf_open_fs,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
-
-static int acpi_processor_perf_seq_show(struct seq_file *seq, void *offset)
+static int acpi_processor_get_psd(struct acpi_processor	*pr)
 {
-	struct acpi_processor	*pr = (struct acpi_processor *)seq->private;
-	int			i;
+	int result = 0;
+	acpi_status status = AE_OK;
+	struct acpi_buffer buffer = {ACPI_ALLOCATE_BUFFER, NULL};
+	struct acpi_buffer format = {sizeof("NNNNN"), "NNNNN"};
+	struct acpi_buffer state = {0, NULL};
+	union acpi_object  *psd = NULL;
+	struct acpi_psd_package *pdomain;
 
-	ACPI_FUNCTION_TRACE("acpi_processor_perf_seq_show");
+	status = acpi_evaluate_object(pr->handle, "_PSD", NULL, &buffer);
+	if (ACPI_FAILURE(status)) {
+		return -ENODEV;
+	}
 
-	if (!pr)
-		goto end;
-
-	if (!pr->performance) {
-		seq_puts(seq, "<not supported>\n");
+	psd = buffer.pointer;
+	if (!psd || (psd->type != ACPI_TYPE_PACKAGE)) {
+		printk(KERN_ERR PREFIX "Invalid _PSD data\n");
+		result = -EFAULT;
 		goto end;
 	}
 
-	seq_printf(seq, "state count:             %d\n"
-			"active state:            P%d\n",
-			pr->performance->state_count,
-			pr->performance->state);
+	if (psd->package.count != 1) {
+		printk(KERN_ERR PREFIX "Invalid _PSD data\n");
+		result = -EFAULT;
+		goto end;
+	}
 
-	seq_puts(seq, "states:\n");
-	for (i = 0; i < pr->performance->state_count; i++)
-		seq_printf(seq, "   %cP%d:                  %d MHz, %d mW, %d uS\n",
-			(i == pr->performance->state?'*':' '), i,
-			(u32) pr->performance->states[i].core_frequency,
-			(u32) pr->performance->states[i].power,
-			(u32) pr->performance->states[i].transition_latency);
+	pdomain = &(pr->performance->domain_info);
 
+	state.length = sizeof(struct acpi_psd_package);
+	state.pointer = pdomain;
+
+	status = acpi_extract_package(&(psd->package.elements[0]),
+		&format, &state);
+	if (ACPI_FAILURE(status)) {
+		printk(KERN_ERR PREFIX "Invalid _PSD data\n");
+		result = -EFAULT;
+		goto end;
+	}
+
+	if (pdomain->num_entries != ACPI_PSD_REV0_ENTRIES) {
+		printk(KERN_ERR PREFIX "Unknown _PSD:num_entries\n");
+		result = -EFAULT;
+		goto end;
+	}
+
+	if (pdomain->revision != ACPI_PSD_REV0_REVISION) {
+		printk(KERN_ERR PREFIX "Unknown _PSD:revision\n");
+		result = -EFAULT;
+		goto end;
+	}
+
+	if (pdomain->coord_type != DOMAIN_COORD_TYPE_SW_ALL &&
+	    pdomain->coord_type != DOMAIN_COORD_TYPE_SW_ANY &&
+	    pdomain->coord_type != DOMAIN_COORD_TYPE_HW_ALL) {
+		printk(KERN_ERR PREFIX "Invalid _PSD:coord_type\n");
+		result = -EFAULT;
+		goto end;
+	}
 end:
-	return_VALUE(0);
+	kfree(buffer.pointer);
+	return result;
 }
 
-static int acpi_processor_perf_open_fs(struct inode *inode, struct file *file)
+int acpi_processor_preregister_performance(
+		struct acpi_processor_performance __percpu *performance)
 {
-	return single_open(file, acpi_processor_perf_seq_show,
-						PDE(inode)->data);
-}
+	int count_target;
+	int retval = 0;
+	unsigned int i, j;
+	cpumask_var_t covered_cpus;
+	struct acpi_processor *pr;
+	struct acpi_psd_package *pdomain;
+	struct acpi_processor *match_pr;
+	struct acpi_psd_package *match_pdomain;
 
-static ssize_t
-acpi_processor_write_performance (
-        struct file		*file,
-        const char		__user *buffer,
-        size_t			count,
-        loff_t			*data)
-{
-	int			result = 0;
-	struct seq_file		*m = (struct seq_file *) file->private_data;
-	struct acpi_processor	*pr = (struct acpi_processor *) m->private;
-	struct acpi_processor_performance *perf;
-	char			state_string[12] = {'\0'};
-	unsigned int            new_state = 0;
-	struct cpufreq_policy   policy;
+	if (!zalloc_cpumask_var(&covered_cpus, GFP_KERNEL))
+		return -ENOMEM;
 
-	ACPI_FUNCTION_TRACE("acpi_processor_write_performance");
+	mutex_lock(&performance_mutex);
 
-	if (!pr || (count > sizeof(state_string) - 1))
-		return_VALUE(-EINVAL);
+	/*
+	 * Check if another driver has already registered, and abort before
+	 * changing pr->performance if it has. Check input data as well.
+	 */
+	for_each_possible_cpu(i) {
+		pr = per_cpu(processors, i);
+		if (!pr) {
+			/* Look only at processors in ACPI namespace */
+			continue;
+		}
 
-	perf = pr->performance;
-	if (!perf)
-		return_VALUE(-EINVAL);
+		if (pr->performance) {
+			retval = -EBUSY;
+			goto err_out;
+		}
 
-	if (copy_from_user(state_string, buffer, count))
-		return_VALUE(-EFAULT);
-
-	state_string[count] = '\0';
-	new_state = simple_strtoul(state_string, NULL, 0);
-
-	if (new_state >= perf->state_count)
-		return_VALUE(-EINVAL);
-
-	cpufreq_get_policy(&policy, pr->id);
-
-	policy.cpu = pr->id;
-	policy.min = perf->states[new_state].core_frequency * 1000;
-	policy.max = perf->states[new_state].core_frequency * 1000;
-
-	result = cpufreq_set_policy(&policy);
-	if (result)
-		return_VALUE(result);
-
-	return_VALUE(count);
-}
-
-static void
-acpi_cpufreq_add_file (
-	struct acpi_processor *pr)
-{
-	struct proc_dir_entry	*entry = NULL;
-	struct acpi_device	*device = NULL;
-
-	ACPI_FUNCTION_TRACE("acpi_cpufreq_addfile");
-
-	if (acpi_bus_get_device(pr->handle, &device))
-		return_VOID;
-
-	/* add file 'performance' [R/W] */
-	entry = create_proc_entry(ACPI_PROCESSOR_FILE_PERFORMANCE,
-		  S_IFREG|S_IRUGO|S_IWUSR, acpi_device_dir(device));
-	if (!entry)
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR,
-			"Unable to create '%s' fs entry\n",
-			ACPI_PROCESSOR_FILE_PERFORMANCE));
-	else {
-		entry->proc_fops = &acpi_processor_perf_fops;
-		entry->proc_fops->write = acpi_processor_write_performance;
-		entry->data = acpi_driver_data(device);
-		entry->owner = THIS_MODULE;
+		if (!performance || !per_cpu_ptr(performance, i)) {
+			retval = -EINVAL;
+			goto err_out;
+		}
 	}
-	return_VOID;
+
+	/* Call _PSD for all CPUs */
+	for_each_possible_cpu(i) {
+		pr = per_cpu(processors, i);
+		if (!pr)
+			continue;
+
+		pr->performance = per_cpu_ptr(performance, i);
+		cpumask_set_cpu(i, pr->performance->shared_cpu_map);
+		if (acpi_processor_get_psd(pr)) {
+			retval = -EINVAL;
+			continue;
+		}
+	}
+	if (retval)
+		goto err_ret;
+
+	/*
+	 * Now that we have _PSD data from all CPUs, lets setup P-state 
+	 * domain info.
+	 */
+	for_each_possible_cpu(i) {
+		pr = per_cpu(processors, i);
+		if (!pr)
+			continue;
+
+		if (cpumask_test_cpu(i, covered_cpus))
+			continue;
+
+		pdomain = &(pr->performance->domain_info);
+		cpumask_set_cpu(i, pr->performance->shared_cpu_map);
+		cpumask_set_cpu(i, covered_cpus);
+		if (pdomain->num_processors <= 1)
+			continue;
+
+		/* Validate the Domain info */
+		count_target = pdomain->num_processors;
+		if (pdomain->coord_type == DOMAIN_COORD_TYPE_SW_ALL)
+			pr->performance->shared_type = CPUFREQ_SHARED_TYPE_ALL;
+		else if (pdomain->coord_type == DOMAIN_COORD_TYPE_HW_ALL)
+			pr->performance->shared_type = CPUFREQ_SHARED_TYPE_HW;
+		else if (pdomain->coord_type == DOMAIN_COORD_TYPE_SW_ANY)
+			pr->performance->shared_type = CPUFREQ_SHARED_TYPE_ANY;
+
+		for_each_possible_cpu(j) {
+			if (i == j)
+				continue;
+
+			match_pr = per_cpu(processors, j);
+			if (!match_pr)
+				continue;
+
+			match_pdomain = &(match_pr->performance->domain_info);
+			if (match_pdomain->domain != pdomain->domain)
+				continue;
+
+			/* Here i and j are in the same domain */
+
+			if (match_pdomain->num_processors != count_target) {
+				retval = -EINVAL;
+				goto err_ret;
+			}
+
+			if (pdomain->coord_type != match_pdomain->coord_type) {
+				retval = -EINVAL;
+				goto err_ret;
+			}
+
+			cpumask_set_cpu(j, covered_cpus);
+			cpumask_set_cpu(j, pr->performance->shared_cpu_map);
+		}
+
+		for_each_possible_cpu(j) {
+			if (i == j)
+				continue;
+
+			match_pr = per_cpu(processors, j);
+			if (!match_pr)
+				continue;
+
+			match_pdomain = &(match_pr->performance->domain_info);
+			if (match_pdomain->domain != pdomain->domain)
+				continue;
+
+			match_pr->performance->shared_type = 
+					pr->performance->shared_type;
+			cpumask_copy(match_pr->performance->shared_cpu_map,
+				     pr->performance->shared_cpu_map);
+		}
+	}
+
+err_ret:
+	for_each_possible_cpu(i) {
+		pr = per_cpu(processors, i);
+		if (!pr || !pr->performance)
+			continue;
+
+		/* Assume no coordination on any error parsing domain info */
+		if (retval) {
+			cpumask_clear(pr->performance->shared_cpu_map);
+			cpumask_set_cpu(i, pr->performance->shared_cpu_map);
+			pr->performance->shared_type = CPUFREQ_SHARED_TYPE_ALL;
+		}
+		pr->performance = NULL; /* Will be set for real in register */
+	}
+
+err_out:
+	mutex_unlock(&performance_mutex);
+	free_cpumask_var(covered_cpus);
+	return retval;
 }
-
-static void
-acpi_cpufreq_remove_file (
-	struct acpi_processor *pr)
-{
-	struct acpi_device	*device = NULL;
-
-	ACPI_FUNCTION_TRACE("acpi_cpufreq_addfile");
-
-	if (acpi_bus_get_device(pr->handle, &device))
-		return_VOID;
-
-	/* remove file 'performance' */
-	remove_proc_entry(ACPI_PROCESSOR_FILE_PERFORMANCE,
-		  acpi_device_dir(device));
-
-	return_VOID;
-}
-
-#else
-static void acpi_cpufreq_add_file (struct acpi_processor *pr) { return; }
-static void acpi_cpufreq_remove_file (struct acpi_processor *pr) { return; }
-#endif /* CONFIG_X86_ACPI_CPUFREQ_PROC_INTF */
-
+EXPORT_SYMBOL(acpi_processor_preregister_performance);
 
 int
-acpi_processor_register_performance (
-	struct acpi_processor_performance * performance,
-	unsigned int cpu)
+acpi_processor_register_performance(struct acpi_processor_performance
+				    *performance, unsigned int cpu)
 {
 	struct acpi_processor *pr;
 
-	ACPI_FUNCTION_TRACE("acpi_processor_register_performance");
-
 	if (!(acpi_processor_ppc_status & PPC_REGISTERED))
-		return_VALUE(-EINVAL);
+		return -EINVAL;
 
-	down(&performance_sem);
+	mutex_lock(&performance_mutex);
 
-	pr = processors[cpu];
+	pr = per_cpu(processors, cpu);
 	if (!pr) {
-		up(&performance_sem);
-		return_VALUE(-ENODEV);
+		mutex_unlock(&performance_mutex);
+		return -ENODEV;
 	}
 
 	if (pr->performance) {
-		up(&performance_sem);
-		return_VALUE(-EBUSY);
+		mutex_unlock(&performance_mutex);
+		return -EBUSY;
 	}
+
+	WARN_ON(!performance);
 
 	pr->performance = performance;
 
 	if (acpi_processor_get_performance_info(pr)) {
 		pr->performance = NULL;
-		up(&performance_sem);
-		return_VALUE(-EIO);
+		mutex_unlock(&performance_mutex);
+		return -EIO;
 	}
 
-	acpi_cpufreq_add_file(pr);
-
-	up(&performance_sem);
-	return_VALUE(0);
+	mutex_unlock(&performance_mutex);
+	return 0;
 }
+
 EXPORT_SYMBOL(acpi_processor_register_performance);
 
-
-void
-acpi_processor_unregister_performance (
-	struct acpi_processor_performance * performance,
-	unsigned int cpu)
+void acpi_processor_unregister_performance(unsigned int cpu)
 {
 	struct acpi_processor *pr;
 
-	ACPI_FUNCTION_TRACE("acpi_processor_unregister_performance");
+	mutex_lock(&performance_mutex);
 
-	down(&performance_sem);
-
-	pr = processors[cpu];
+	pr = per_cpu(processors, cpu);
 	if (!pr) {
-		up(&performance_sem);
-		return_VOID;
+		mutex_unlock(&performance_mutex);
+		return;
 	}
 
-	kfree(pr->performance->states);
+	if (pr->performance)
+		kfree(pr->performance->states);
 	pr->performance = NULL;
 
-	acpi_cpufreq_remove_file(pr);
+	mutex_unlock(&performance_mutex);
 
-	up(&performance_sem);
-
-	return_VOID;
+	return;
 }
+
 EXPORT_SYMBOL(acpi_processor_unregister_performance);

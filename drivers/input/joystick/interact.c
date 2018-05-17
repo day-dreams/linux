@@ -1,6 +1,4 @@
 /*
- * $Id: interact.c,v 1.16 2002/01/22 20:28:25 vojtech Exp $
- *
  *  Copyright (c) 2001 Vojtech Pavlik
  *
  *  Based on the work of:
@@ -35,27 +33,26 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/delay.h>
-#include <linux/init.h>
 #include <linux/gameport.h>
 #include <linux/input.h>
+#include <linux/jiffies.h>
+
+#define DRIVER_DESC	"InterAct digital joystick driver"
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
-MODULE_DESCRIPTION("InterAct digital joystick driver");
+MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
-#define INTERACT_MAX_START	400	/* 400 us */
-#define INTERACT_MAX_STROBE	40	/* 40 us */
+#define INTERACT_MAX_START	600	/* 400 us */
+#define INTERACT_MAX_STROBE	60	/* 40 us */
 #define INTERACT_MAX_LENGTH	32	/* 32 bits */
-#define INTERACT_REFRESH_TIME	HZ/50	/* 20 ms */
 
 #define INTERACT_TYPE_HHFX	0	/* HammerHead/FX */
 #define INTERACT_TYPE_PP8D	1	/* ProPad 8 */
 
 struct interact {
 	struct gameport *gameport;
-	struct input_dev dev;
-	struct timer_list timer;
-	int used;
+	struct input_dev *dev;
 	int bads;
 	int reads;
 	unsigned char type;
@@ -125,13 +122,13 @@ static int interact_read_packet(struct gameport *gameport, int length, u32 *data
 }
 
 /*
- * interact_timer() reads and analyzes InterAct joystick data.
+ * interact_poll() reads and analyzes InterAct joystick data.
  */
 
-static void interact_timer(unsigned long private)
+static void interact_poll(struct gameport *gameport)
 {
-	struct interact *interact = (struct interact *) private;
-	struct input_dev *dev = &interact->dev;
+	struct interact *interact = gameport_get_drvdata(gameport);
+	struct input_dev *dev = interact->dev;
 	u32 data[3];
 	int i;
 
@@ -177,9 +174,6 @@ static void interact_timer(unsigned long private)
 	}
 
 	input_sync(dev);
-
-	mod_timer(&interact->timer, jiffies + INTERACT_REFRESH_TIME);
-
 }
 
 /*
@@ -188,9 +182,9 @@ static void interact_timer(unsigned long private)
 
 static int interact_open(struct input_dev *dev)
 {
-	struct interact *interact = dev->private;
-	if (!interact->used++)
-		mod_timer(&interact->timer, jiffies + INTERACT_REFRESH_TIME);
+	struct interact *interact = input_get_drvdata(dev);
+
+	gameport_start_polling(interact->gameport);
 	return 0;
 }
 
@@ -200,38 +194,43 @@ static int interact_open(struct input_dev *dev)
 
 static void interact_close(struct input_dev *dev)
 {
-	struct interact *interact = dev->private;
-	if (!--interact->used)
-		del_timer(&interact->timer);
+	struct interact *interact = input_get_drvdata(dev);
+
+	gameport_stop_polling(interact->gameport);
 }
 
 /*
  * interact_connect() probes for InterAct joysticks.
  */
 
-static void interact_connect(struct gameport *gameport, struct gameport_dev *dev)
+static int interact_connect(struct gameport *gameport, struct gameport_driver *drv)
 {
 	struct interact *interact;
+	struct input_dev *input_dev;
 	__u32 data[3];
 	int i, t;
+	int err;
 
-	if (!(interact = kmalloc(sizeof(struct interact), GFP_KERNEL)))
-		return;
-	memset(interact, 0, sizeof(struct interact));
-
-	gameport->private = interact;
+	interact = kzalloc(sizeof(struct interact), GFP_KERNEL);
+	input_dev = input_allocate_device();
+	if (!interact || !input_dev) {
+		err = -ENOMEM;
+		goto fail1;
+	}
 
 	interact->gameport = gameport;
-	init_timer(&interact->timer);
-	interact->timer.data = (long) interact;
-	interact->timer.function = interact_timer;
+	interact->dev = input_dev;
 
-	if (gameport_open(gameport, dev, GAMEPORT_MODE_RAW))
+	gameport_set_drvdata(gameport, interact);
+
+	err = gameport_open(gameport, drv, GAMEPORT_MODE_RAW);
+	if (err)
 		goto fail1;
 
 	i = interact_read_packet(gameport, INTERACT_MAX_LENGTH * 2, data);
 
 	if (i != 32 || (data[0] >> 24) != 0x0c || (data[1] >> 24) != 0x02) {
+		err = -ENODEV;
 		goto fail2;
 	}
 
@@ -242,73 +241,73 @@ static void interact_connect(struct gameport *gameport, struct gameport_dev *dev
 	if (!interact_type[i].length) {
 		printk(KERN_WARNING "interact.c: Unknown joystick on %s. [len %d d0 %08x d1 %08x i2 %08x]\n",
 			gameport->phys, i, data[0], data[1], data[2]);
+		err = -ENODEV;
 		goto fail2;
 	}
 
-	sprintf(interact->phys, "%s/input0", gameport->phys);
+	gameport_set_poll_handler(gameport, interact_poll);
+	gameport_set_poll_interval(gameport, 20);
+
+	snprintf(interact->phys, sizeof(interact->phys), "%s/input0", gameport->phys);
 
 	interact->type = i;
 	interact->length = interact_type[i].length;
 
-	interact->dev.private = interact;
-	interact->dev.open = interact_open;
-	interact->dev.close = interact_close;
+	input_dev->name = interact_type[i].name;
+	input_dev->phys = interact->phys;
+	input_dev->id.bustype = BUS_GAMEPORT;
+	input_dev->id.vendor = GAMEPORT_ID_VENDOR_INTERACT;
+	input_dev->id.product = interact_type[i].id;
+	input_dev->id.version = 0x0100;
+	input_dev->dev.parent = &gameport->dev;
 
-	interact->dev.name = interact_type[i].name;
-	interact->dev.phys = interact->phys;
-	interact->dev.id.bustype = BUS_GAMEPORT;
-	interact->dev.id.vendor = GAMEPORT_ID_VENDOR_INTERACT;
-	interact->dev.id.product = interact_type[i].id;
-	interact->dev.id.version = 0x0100;
+	input_set_drvdata(input_dev, interact);
 
-	interact->dev.evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);
+	input_dev->open = interact_open;
+	input_dev->close = interact_close;
+
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
 
 	for (i = 0; (t = interact_type[interact->type].abs[i]) >= 0; i++) {
-		set_bit(t, interact->dev.absbit);
-		if (i < interact_type[interact->type].b8) {
-			interact->dev.absmin[t] = 0;
-			interact->dev.absmax[t] = 255;
-		} else {
-			interact->dev.absmin[t] = -1;
-			interact->dev.absmax[t] = 1;
-		}
+		if (i < interact_type[interact->type].b8)
+			input_set_abs_params(input_dev, t, 0, 255, 0, 0);
+		else
+			input_set_abs_params(input_dev, t, -1, 1, 0, 0);
 	}
 
 	for (i = 0; (t = interact_type[interact->type].btn[i]) >= 0; i++)
-		set_bit(t, interact->dev.keybit);
+		__set_bit(t, input_dev->keybit);
 
-	input_register_device(&interact->dev);
-	printk(KERN_INFO "input: %s on %s\n",
-		interact_type[interact->type].name, gameport->phys);
+	err = input_register_device(interact->dev);
+	if (err)
+		goto fail2;
 
-	return;
+	return 0;
+
 fail2:	gameport_close(gameport);
-fail1:  kfree(interact);
+fail1:  gameport_set_drvdata(gameport, NULL);
+	input_free_device(input_dev);
+	kfree(interact);
+	return err;
 }
 
 static void interact_disconnect(struct gameport *gameport)
 {
-	struct interact *interact = gameport->private;
-	input_unregister_device(&interact->dev);
+	struct interact *interact = gameport_get_drvdata(gameport);
+
+	input_unregister_device(interact->dev);
 	gameport_close(gameport);
+	gameport_set_drvdata(gameport, NULL);
 	kfree(interact);
 }
 
-static struct gameport_dev interact_dev = {
-	.connect =	interact_connect,
-	.disconnect =	interact_disconnect,
+static struct gameport_driver interact_drv = {
+	.driver		= {
+		.name	= "interact",
+	},
+	.description	= DRIVER_DESC,
+	.connect	= interact_connect,
+	.disconnect	= interact_disconnect,
 };
 
-int __init interact_init(void)
-{
-	gameport_register_device(&interact_dev);
-	return 0;
-}
-
-void __exit interact_exit(void)
-{
-	gameport_unregister_device(&interact_dev);
-}
-
-module_init(interact_init);
-module_exit(interact_exit);
+module_gameport_driver(interact_drv);

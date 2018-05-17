@@ -1,4 +1,5 @@
-/* $Id: printf.c,v 1.5 1996/04/04 16:31:07 tridge Exp $
+// SPDX-License-Identifier: GPL-2.0
+/*
  * printf.c:  Internal prom library printf facility.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -8,7 +9,6 @@
  * about or use it!  It's simple and smelly anyway....
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 
 #include <asm/openprom.h>
@@ -38,13 +38,9 @@ prom_printf(char *fmt, ...)
 
 	bptr = ppbuf;
 
-#ifdef CONFIG_AP1000
-        ap_write(1,bptr,strlen(bptr));
-#else
-
 #ifdef CONFIG_KGDB
 	if (kgdb_initialized) {
-		printk("kgdb_initialized = %d\n", kgdb_initialized);
+		pr_info("kgdb_initialized = %d\n", kgdb_initialized);
 		putpacket(bptr, 1);
 	} else
 #else
@@ -54,7 +50,6 @@ prom_printf(char *fmt, ...)
 
 		prom_putchar(ch);
 	}
-#endif
 #endif
 	va_end(args);
 	return;

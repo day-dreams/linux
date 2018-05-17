@@ -1,15 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- * arch/s390/appldata/appldata_os.c
- *
  * Data gathering module for Linux-VM Monitor Stream, Stage 1.
  * Collects misc. OS related data (CPU utilization, running processes).
  *
- * Copyright (C) 2003 IBM Corporation, IBM Deutschland Entwicklung GmbH.
+ * Copyright IBM Corp. 2003, 2006
  *
- * Author: Gerald Schaefer <geraldsc@de.ibm.com>
+ * Author: Gerald Schaefer <gerald.schaefer@de.ibm.com>
  */
 
-#include <linux/config.h>
+#define KMSG_COMPONENT	"appldata"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
@@ -17,12 +18,14 @@
 #include <linux/kernel_stat.h>
 #include <linux/netdevice.h>
 #include <linux/sched.h>
+#include <linux/sched/loadavg.h>
+#include <linux/sched/stat.h>
+#include <asm/appldata.h>
 #include <asm/smp.h>
 
 #include "appldata.h"
 
 
-#define MY_PRINT_NAME	"appldata_os"		/* for debug messages, etc. */
 #define LOAD_INT(x) ((x) >> FSHIFT)
 #define LOAD_FRAC(x) LOAD_INT(((x) & (FIXED_1-1)) * 100)
 
@@ -44,12 +47,15 @@ struct appldata_os_per_cpu {
 	u32 per_cpu_system;	/* ... spent in kernel mode         */
 	u32 per_cpu_idle;	/* ... spent in idle mode           */
 
-// New in 2.6 -->
+	/* New in 2.6 */
 	u32 per_cpu_irq;	/* ... spent in interrupts          */
 	u32 per_cpu_softirq;	/* ... spent in softirqs            */
 	u32 per_cpu_iowait;	/* ... spent while waiting for I/O  */
-// <-- New in 2.6
-};
+
+	/* New in modification level 01 */
+	u32 per_cpu_steal;	/* ... stolen by hypervisor	    */
+	u32 cpu_id;		/* number of this CPU		    */
+} __attribute__((packed));
 
 struct appldata_os_data {
 	u64 timestamp;
@@ -68,53 +74,23 @@ struct appldata_os_data {
 	u32 avenrun[3];		/* average nr. of running processes during */
 				/* the last 1, 5 and 15 minutes */
 
-// New in 2.6 -->
+	/* New in 2.6 */
 	u32 nr_iowait;		/* number of blocked threads
 				   (waiting for I/O)               */
-// <-- New in 2.6
 
 	/* per cpu data */
 	struct appldata_os_per_cpu os_cpu[0];
-};
+} __attribute__((packed));
 
 static struct appldata_os_data *appldata_os_data;
 
+static struct appldata_ops ops = {
+	.name	   = "os",
+	.record_nr = APPLDATA_RECORD_OS_ID,
+	.owner	   = THIS_MODULE,
+	.mod_lvl   = {0xF0, 0xF1},		/* EBCDIC "01" */
+};
 
-static inline void appldata_print_debug(struct appldata_os_data *os_data)
-{
-	int a0, a1, a2, i;
-
-	P_DEBUG("--- OS - RECORD ---\n");
-	P_DEBUG("nr_threads   = %u\n", os_data->nr_threads);
-	P_DEBUG("nr_running   = %u\n", os_data->nr_running);
-	P_DEBUG("nr_iowait    = %u\n", os_data->nr_iowait);
-	P_DEBUG("avenrun(int) = %8x / %8x / %8x\n", os_data->avenrun[0],
-		os_data->avenrun[1], os_data->avenrun[2]);
-	a0 = os_data->avenrun[0];
-	a1 = os_data->avenrun[1];
-	a2 = os_data->avenrun[2];
-	P_DEBUG("avenrun(float) = %d.%02d / %d.%02d / %d.%02d\n",
-		LOAD_INT(a0), LOAD_FRAC(a0), LOAD_INT(a1), LOAD_FRAC(a1),
-		LOAD_INT(a2), LOAD_FRAC(a2));
-
-	P_DEBUG("nr_cpus = %u\n", os_data->nr_cpus);
-	for (i = 0; i < os_data->nr_cpus; i++) {
-		P_DEBUG("cpu%u : user = %u, nice = %u, system = %u, "
-			"idle = %u, irq = %u, softirq = %u, iowait = %u\n",
-				i,
-				os_data->os_cpu[i].per_cpu_user,
-				os_data->os_cpu[i].per_cpu_nice,
-				os_data->os_cpu[i].per_cpu_system,
-				os_data->os_cpu[i].per_cpu_idle,
-				os_data->os_cpu[i].per_cpu_irq,
-				os_data->os_cpu[i].per_cpu_softirq,
-				os_data->os_cpu[i].per_cpu_iowait);
-	}
-
-	P_DEBUG("sync_count_1 = %u\n", os_data->sync_count_1);
-	P_DEBUG("sync_count_2 = %u\n", os_data->sync_count_2);
-	P_DEBUG("timestamp    = %lX\n", os_data->timestamp);
-}
 
 /*
  * appldata_get_os_data()
@@ -123,13 +99,12 @@ static inline void appldata_print_debug(struct appldata_os_data *os_data)
  */
 static void appldata_get_os_data(void *data)
 {
-	int i, j;
+	int i, j, rc;
 	struct appldata_os_data *os_data;
+	unsigned int new_size;
 
 	os_data = data;
 	os_data->sync_count_1++;
-
-	os_data->nr_cpus = num_online_cpus();
 
 	os_data->nr_threads = nr_threads;
 	os_data->nr_running = nr_running();
@@ -141,37 +116,52 @@ static void appldata_get_os_data(void *data)
 	j = 0;
 	for_each_online_cpu(i) {
 		os_data->os_cpu[j].per_cpu_user =
-					kstat_cpu(i).cpustat.user;
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_USER]);
 		os_data->os_cpu[j].per_cpu_nice =
-					kstat_cpu(i).cpustat.nice;
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_NICE]);
 		os_data->os_cpu[j].per_cpu_system =
-					kstat_cpu(i).cpustat.system;
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_SYSTEM]);
 		os_data->os_cpu[j].per_cpu_idle =
-					kstat_cpu(i).cpustat.idle;
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_IDLE]);
 		os_data->os_cpu[j].per_cpu_irq =
-					kstat_cpu(i).cpustat.irq;
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_IRQ]);
 		os_data->os_cpu[j].per_cpu_softirq =
-					kstat_cpu(i).cpustat.softirq;
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_SOFTIRQ]);
 		os_data->os_cpu[j].per_cpu_iowait =
-					kstat_cpu(i).cpustat.iowait;
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_IOWAIT]);
+		os_data->os_cpu[j].per_cpu_steal =
+			nsecs_to_jiffies(kcpustat_cpu(i).cpustat[CPUTIME_STEAL]);
+		os_data->os_cpu[j].cpu_id = i;
 		j++;
 	}
 
-	os_data->timestamp = get_clock();
+	os_data->nr_cpus = j;
+
+	new_size = sizeof(struct appldata_os_data) +
+		   (os_data->nr_cpus * sizeof(struct appldata_os_per_cpu));
+	if (ops.size != new_size) {
+		if (ops.active) {
+			rc = appldata_diag(APPLDATA_RECORD_OS_ID,
+					   APPLDATA_START_INTERVAL_REC,
+					   (unsigned long) ops.data, new_size,
+					   ops.mod_lvl);
+			if (rc != 0)
+				pr_err("Starting a new OS data collection "
+				       "failed with rc=%d\n", rc);
+
+			rc = appldata_diag(APPLDATA_RECORD_OS_ID,
+					   APPLDATA_STOP_REC,
+					   (unsigned long) ops.data, ops.size,
+					   ops.mod_lvl);
+			if (rc != 0)
+				pr_err("Stopping a faulty OS data "
+				       "collection failed with rc=%d\n", rc);
+		}
+		ops.size = new_size;
+	}
+	os_data->timestamp = get_tod_clock();
 	os_data->sync_count_2++;
-#ifdef APPLDATA_DEBUG
-	appldata_print_debug(os_data);
-#endif
 }
-
-
-static struct appldata_ops ops = {
-	.ctl_nr    = CTL_APPLDATA_OS,
-	.name	   = "os",
-	.record_nr = APPLDATA_RECORD_OS_ID,
-	.callback  = &appldata_get_os_data,
-	.owner     = THIS_MODULE,
-};
 
 
 /*
@@ -181,41 +171,32 @@ static struct appldata_ops ops = {
  */
 static int __init appldata_os_init(void)
 {
-	int rc, size;
+	int rc, max_size;
 
-	size = sizeof(struct appldata_os_data) +
-		(NR_CPUS * sizeof(struct appldata_os_per_cpu));
-	if (size > APPLDATA_MAX_REC_SIZE) {
-		P_ERROR("Size of record = %i, bigger than maximum (%i)!\n",
-			size, APPLDATA_MAX_REC_SIZE);
+	max_size = sizeof(struct appldata_os_data) +
+		   (num_possible_cpus() * sizeof(struct appldata_os_per_cpu));
+	if (max_size > APPLDATA_MAX_REC_SIZE) {
+		pr_err("Maximum OS record size %i exceeds the maximum "
+		       "record size %i\n", max_size, APPLDATA_MAX_REC_SIZE);
 		rc = -ENOMEM;
 		goto out;
 	}
-	P_DEBUG("sizeof(os) = %i, sizeof(os_cpu) = %lu\n", size,
-		sizeof(struct appldata_os_per_cpu));
 
-	appldata_os_data = kmalloc(size, GFP_DMA);
+	appldata_os_data = kzalloc(max_size, GFP_KERNEL | GFP_DMA);
 	if (appldata_os_data == NULL) {
-		P_ERROR("No memory for %s!\n", ops.name);
 		rc = -ENOMEM;
 		goto out;
 	}
-	memset(appldata_os_data, 0, size);
 
 	appldata_os_data->per_cpu_size = sizeof(struct appldata_os_per_cpu);
 	appldata_os_data->cpu_offset   = offsetof(struct appldata_os_data,
 							os_cpu);
-	P_DEBUG("cpu offset = %u\n", appldata_os_data->cpu_offset);
 
 	ops.data = appldata_os_data;
-	ops.size = size;
+	ops.callback  = &appldata_get_os_data;
 	rc = appldata_register_ops(&ops);
-	if (rc != 0) {
-		P_ERROR("Error registering ops, rc = %i\n", rc);
+	if (rc != 0)
 		kfree(appldata_os_data);
-	} else {
-		P_DEBUG("%s-ops registered!\n", ops.name);
-	}
 out:
 	return rc;
 }
@@ -229,7 +210,6 @@ static void __exit appldata_os_exit(void)
 {
 	appldata_unregister_ops(&ops);
 	kfree(appldata_os_data);
-	P_DEBUG("%s-ops unregistered!\n", ops.name);
 }
 
 

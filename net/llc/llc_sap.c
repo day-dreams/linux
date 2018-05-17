@@ -21,35 +21,60 @@
 #include <net/llc_s_ev.h>
 #include <net/llc_s_st.h>
 #include <net/sock.h>
-#include <linux/tcp.h>
+#include <net/tcp_states.h>
 #include <linux/llc.h>
+#include <linux/slab.h>
+
+static int llc_mac_header_len(unsigned short devtype)
+{
+	switch (devtype) {
+	case ARPHRD_ETHER:
+	case ARPHRD_LOOPBACK:
+		return sizeof(struct ethhdr);
+	}
+	return 0;
+}
 
 /**
  *	llc_alloc_frame - allocates sk_buff for frame
+ *	@dev: network device this skb will be sent over
+ *	@type: pdu type to allocate
+ *	@data_size: data size to allocate
  *
  *	Allocates an sk_buff for frame and initializes sk_buff fields.
  *	Returns allocated skb or %NULL when out of memory.
  */
-struct sk_buff *llc_alloc_frame(void)
+struct sk_buff *llc_alloc_frame(struct sock *sk, struct net_device *dev,
+				u8 type, u32 data_size)
 {
-	struct sk_buff *skb = alloc_skb(128, GFP_ATOMIC);
+	int hlen = type == LLC_PDU_TYPE_U ? 3 : 4;
+	struct sk_buff *skb;
+
+	hlen += llc_mac_header_len(dev->type);
+	skb = alloc_skb(hlen + data_size, GFP_ATOMIC);
 
 	if (skb) {
-		skb_reserve(skb, 50);
-		skb->nh.raw   = skb->h.raw = skb->data;
+		skb_reset_mac_header(skb);
+		skb_reserve(skb, hlen);
+		skb_reset_network_header(skb);
+		skb_reset_transport_header(skb);
 		skb->protocol = htons(ETH_P_802_2);
-		skb->dev      = dev_base->next;
-		skb->mac.raw  = skb->head;
+		skb->dev      = dev;
+		if (sk != NULL)
+			skb_set_owner_w(skb, sk);
 	}
 	return skb;
 }
 
-void llc_save_primitive(struct sk_buff* skb, u8 prim)
+void llc_save_primitive(struct sock *sk, struct sk_buff *skb, u8 prim)
 {
-	struct sockaddr_llc *addr = llc_ui_skb_cb(skb);
+	struct sockaddr_llc *addr;
 
        /* save primitive for use by the user. */
-	addr->sllc_family = skb->sk->sk_family;
+	addr		  = llc_ui_skb_cb(skb);
+
+	memset(addr, 0, sizeof(*addr));
+	addr->sllc_family = sk->sk_family;
 	addr->sllc_arphrd = skb->dev->type;
 	addr->sllc_test   = prim == LLC_TEST_PRIM;
 	addr->sllc_xid    = prim == LLC_XID_PRIM;
@@ -89,7 +114,7 @@ void llc_sap_rtn_pdu(struct llc_sap *sap, struct sk_buff *skb)
  *	failure.
  */
 static struct llc_sap_state_trans *llc_find_sap_trans(struct llc_sap *sap,
-						      struct sk_buff* skb)
+						      struct sk_buff *skb)
 {
 	int i = 0;
 	struct llc_sap_state_trans *rc = NULL;
@@ -121,7 +146,7 @@ static int llc_exec_sap_trans_actions(struct llc_sap *sap,
 				      struct sk_buff *skb)
 {
 	int rc = 0;
-	llc_sap_action_t *next_action = trans->ev_actions;
+	const llc_sap_action_t *next_action = trans->ev_actions;
 
 	for (; next_action && *next_action; next_action++)
 		if ((*next_action)(sap, skb))
@@ -189,13 +214,13 @@ static void llc_sap_state_process(struct llc_sap *sap, struct sk_buff *skb)
 		if (skb->sk->sk_state == TCP_LISTEN)
 			kfree_skb(skb);
 		else {
-			llc_save_primitive(skb, ev->prim);
+			llc_save_primitive(skb->sk, skb, ev->prim);
 
 			/* queue skb to the user. */
 			if (sock_queue_rcv_skb(skb->sk, skb))
 				kfree_skb(skb);
 		}
-	} 
+	}
 	kfree_skb(skb);
 }
 
@@ -209,7 +234,7 @@ static void llc_sap_state_process(struct llc_sap *sap, struct sk_buff *skb)
  *	This function is called when upper layer wants to send a TEST pdu.
  *	Returns 0 for success, 1 otherwise.
  */
-void llc_build_and_send_test_pkt(struct llc_sap *sap, 
+void llc_build_and_send_test_pkt(struct llc_sap *sap,
 				 struct sk_buff *skb, u8 *dmac, u8 dsap)
 {
 	struct llc_sap_state_ev *ev = llc_sap_ev(skb);
@@ -218,7 +243,7 @@ void llc_build_and_send_test_pkt(struct llc_sap *sap,
 	ev->daddr.lsap = dsap;
 	memcpy(ev->saddr.mac, skb->dev->dev_addr, IFHWADDRLEN);
 	memcpy(ev->daddr.mac, dmac, IFHWADDRLEN);
-	
+
 	ev->type      = LLC_SAP_EV_TYPE_PRIM;
 	ev->prim      = LLC_TEST_PRIM;
 	ev->prim_type = LLC_PRIM_TYPE_REQ;
@@ -258,13 +283,29 @@ void llc_build_and_send_xid_pkt(struct llc_sap *sap, struct sk_buff *skb,
  *
  *	Sends received pdus to the sap state machine.
  */
-static void llc_sap_rcv(struct llc_sap *sap, struct sk_buff *skb)
+static void llc_sap_rcv(struct llc_sap *sap, struct sk_buff *skb,
+			struct sock *sk)
 {
 	struct llc_sap_state_ev *ev = llc_sap_ev(skb);
 
 	ev->type   = LLC_SAP_EV_TYPE_PDU;
 	ev->reason = 0;
+	skb_orphan(skb);
+	sock_hold(sk);
+	skb->sk = sk;
+	skb->destructor = sock_efree;
 	llc_sap_state_process(sap, skb);
+}
+
+static inline bool llc_dgram_match(const struct llc_sap *sap,
+				   const struct llc_addr *laddr,
+				   const struct sock *sk)
+{
+     struct llc_sock *llc = llc_sk(sk);
+
+     return sk->sk_type == SOCK_DGRAM &&
+	  llc->laddr.lsap == laddr->lsap &&
+	  ether_addr_equal(llc->laddr.mac, laddr->mac);
 }
 
 /**
@@ -276,41 +317,126 @@ static void llc_sap_rcv(struct llc_sap *sap, struct sk_buff *skb)
  *	mac, and local sap. Returns pointer for socket found, %NULL otherwise.
  */
 static struct sock *llc_lookup_dgram(struct llc_sap *sap,
-				     struct llc_addr *laddr)
+				     const struct llc_addr *laddr)
 {
 	struct sock *rc;
-	struct hlist_node *node;
+	struct hlist_nulls_node *node;
+	int slot = llc_sk_laddr_hashfn(sap, laddr);
+	struct hlist_nulls_head *laddr_hb = &sap->sk_laddr_hash[slot];
 
-	read_lock_bh(&sap->sk_list.lock);
-	sk_for_each(rc, node, &sap->sk_list.list) {
-		struct llc_opt *llc = llc_sk(rc);
-
-		if (rc->sk_type == SOCK_DGRAM &&
-		    llc->laddr.lsap == laddr->lsap &&
-		    llc_mac_match(llc->laddr.mac, laddr->mac)) {
-			sock_hold(rc);
+	rcu_read_lock_bh();
+again:
+	sk_nulls_for_each_rcu(rc, node, laddr_hb) {
+		if (llc_dgram_match(sap, laddr, rc)) {
+			/* Extra checks required by SLAB_TYPESAFE_BY_RCU */
+			if (unlikely(!refcount_inc_not_zero(&rc->sk_refcnt)))
+				goto again;
+			if (unlikely(llc_sk(rc)->sap != sap ||
+				     !llc_dgram_match(sap, laddr, rc))) {
+				sock_put(rc);
+				continue;
+			}
 			goto found;
 		}
 	}
 	rc = NULL;
+	/*
+	 * if the nulls value we got at the end of this lookup is
+	 * not the expected one, we must restart lookup.
+	 * We probably met an item that was moved to another chain.
+	 */
+	if (unlikely(get_nulls_value(node) != slot))
+		goto again;
 found:
-	read_unlock_bh(&sap->sk_list.lock);
+	rcu_read_unlock_bh();
 	return rc;
 }
+
+static inline bool llc_mcast_match(const struct llc_sap *sap,
+				   const struct llc_addr *laddr,
+				   const struct sk_buff *skb,
+				   const struct sock *sk)
+{
+     struct llc_sock *llc = llc_sk(sk);
+
+     return sk->sk_type == SOCK_DGRAM &&
+	  llc->laddr.lsap == laddr->lsap &&
+	  llc->dev == skb->dev;
+}
+
+static void llc_do_mcast(struct llc_sap *sap, struct sk_buff *skb,
+			 struct sock **stack, int count)
+{
+	struct sk_buff *skb1;
+	int i;
+
+	for (i = 0; i < count; i++) {
+		skb1 = skb_clone(skb, GFP_ATOMIC);
+		if (!skb1) {
+			sock_put(stack[i]);
+			continue;
+		}
+
+		llc_sap_rcv(sap, skb1, stack[i]);
+		sock_put(stack[i]);
+	}
+}
+
+/**
+ * 	llc_sap_mcast - Deliver multicast PDU's to all matching datagram sockets.
+ *	@sap: SAP
+ *	@laddr: address of local LLC (MAC + SAP)
+ *
+ *	Search socket list of the SAP and finds connections with same sap.
+ *	Deliver clone to each.
+ */
+static void llc_sap_mcast(struct llc_sap *sap,
+			  const struct llc_addr *laddr,
+			  struct sk_buff *skb)
+{
+	int i = 0, count = 256 / sizeof(struct sock *);
+	struct sock *sk, *stack[count];
+	struct llc_sock *llc;
+	struct hlist_head *dev_hb = llc_sk_dev_hash(sap, skb->dev->ifindex);
+
+	spin_lock_bh(&sap->sk_lock);
+	hlist_for_each_entry(llc, dev_hb, dev_hash_node) {
+
+		sk = &llc->sk;
+
+		if (!llc_mcast_match(sap, laddr, skb, sk))
+			continue;
+
+		sock_hold(sk);
+		if (i < count)
+			stack[i++] = sk;
+		else {
+			llc_do_mcast(sap, skb, stack, i);
+			i = 0;
+		}
+	}
+	spin_unlock_bh(&sap->sk_lock);
+
+	llc_do_mcast(sap, skb, stack, i);
+}
+
 
 void llc_sap_handler(struct llc_sap *sap, struct sk_buff *skb)
 {
 	struct llc_addr laddr;
-	struct sock *sk;
 
 	llc_pdu_decode_da(skb, laddr.mac);
 	llc_pdu_decode_dsap(skb, &laddr.lsap);
 
-	sk = llc_lookup_dgram(sap, &laddr);
-	if (sk) {
-		skb->sk = sk;
-		llc_sap_rcv(sap, skb);
-		sock_put(sk);
-	} else
+	if (is_multicast_ether_addr(laddr.mac)) {
+		llc_sap_mcast(sap, &laddr, skb);
 		kfree_skb(skb);
+	} else {
+		struct sock *sk = llc_lookup_dgram(sap, &laddr);
+		if (sk) {
+			llc_sap_rcv(sap, skb, sk);
+			sock_put(sk);
+		} else
+			kfree_skb(skb);
+	}
 }

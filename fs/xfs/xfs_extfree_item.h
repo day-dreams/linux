@@ -1,73 +1,27 @@
 /*
- * Copyright (c) 2000 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000,2005 Silicon Graphics, Inc.
+ * All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * This program is distributed in the hope that it would be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * Further, this software is distributed without any warranty that it is
- * free of the rightful claim of any third person regarding infringement
- * or the like.  Any license provided herein, whether implied or
- * otherwise, applies only to this software file.  Patent licenses, if
- * any, provided herein do not apply to combinations of this program with
- * other software, or any other product whatsoever.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston MA 02111-1307, USA.
- *
- * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
- * Mountain View, CA  94043, or:
- *
- * http://www.sgi.com
- *
- * For further information regarding this notice, see:
- *
- * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write the Free Software Foundation,
+ * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #ifndef	__XFS_EXTFREE_ITEM_H__
 #define	__XFS_EXTFREE_ITEM_H__
 
+/* kernel only EFI/EFD definitions */
+
 struct xfs_mount;
 struct kmem_zone;
-
-typedef struct xfs_extent {
-	xfs_dfsbno_t	ext_start;
-	xfs_extlen_t	ext_len;
-} xfs_extent_t;
-
-/*
- * This is the structure used to lay out an efi log item in the
- * log.  The efi_extents field is a variable size array whose
- * size is given by efi_nextents.
- */
-typedef struct xfs_efi_log_format {
-	unsigned short		efi_type;	/* efi log item type */
-	unsigned short		efi_size;	/* size of this item */
-	uint			efi_nextents;	/* # extents to free */
-	__uint64_t		efi_id;		/* efi identifier */
-	xfs_extent_t		efi_extents[1];	/* array of extents to free */
-} xfs_efi_log_format_t;
-
-/*
- * This is the structure used to lay out an efd log item in the
- * log.  The efd_extents array is a variable size array whose
- * size is given by efd_nextents;
- */
-typedef struct xfs_efd_log_format {
-	unsigned short		efd_type;	/* efd log item type */
-	unsigned short		efd_size;	/* size of this item */
-	uint			efd_nextents;	/* # of extents freed */
-	__uint64_t		efd_efi_id;	/* id of corresponding efi */
-	xfs_extent_t		efd_extents[1];	/* array of extents freed */
-} xfs_efd_log_format_t;
-
-
-#ifdef __KERNEL__
 
 /*
  * Max number of extents in fast allocation path.
@@ -75,22 +29,44 @@ typedef struct xfs_efd_log_format {
 #define	XFS_EFI_MAX_FAST_EXTENTS	16
 
 /*
- * Define EFI flags.
+ * Define EFI flag bits. Manipulated by set/clear/test_bit operators.
  */
-#define	XFS_EFI_RECOVERED	0x1
-#define	XFS_EFI_COMMITTED	0x2
-#define	XFS_EFI_CANCELED	0x4
+#define	XFS_EFI_RECOVERED	1
 
 /*
- * This is the "extent free intention" log item.  It is used
- * to log the fact that some extents need to be free.  It is
- * used in conjunction with the "extent free done" log item
- * described below.
+ * This is the "extent free intention" log item.  It is used to log the fact
+ * that some extents need to be free.  It is used in conjunction with the
+ * "extent free done" log item described below.
+ *
+ * The EFI is reference counted so that it is not freed prior to both the EFI
+ * and EFD being committed and unpinned. This ensures the EFI is inserted into
+ * the AIL even in the event of out of order EFI/EFD processing. In other words,
+ * an EFI is born with two references:
+ *
+ * 	1.) an EFI held reference to track EFI AIL insertion
+ * 	2.) an EFD held reference to track EFD commit
+ *
+ * On allocation, both references are the responsibility of the caller. Once the
+ * EFI is added to and dirtied in a transaction, ownership of reference one
+ * transfers to the transaction. The reference is dropped once the EFI is
+ * inserted to the AIL or in the event of failure along the way (e.g., commit
+ * failure, log I/O error, etc.). Note that the caller remains responsible for
+ * the EFD reference under all circumstances to this point. The caller has no
+ * means to detect failure once the transaction is committed, however.
+ * Therefore, an EFD is required after this point, even in the event of
+ * unrelated failure.
+ *
+ * Once an EFD is allocated and dirtied in a transaction, reference two
+ * transfers to the transaction. The EFD reference is dropped once it reaches
+ * the unpin handler. Similar to the EFI, the reference also drops in the event
+ * of commit failure or log I/O errors. Note that the EFD is not inserted in the
+ * AIL, so at this point both the EFI and EFD are freed.
  */
 typedef struct xfs_efi_log_item {
 	xfs_log_item_t		efi_item;
-	uint			efi_flags;	/* misc flags */
-	uint			efi_next_extent;
+	atomic_t		efi_refcount;
+	atomic_t		efi_next_extent;
+	unsigned long		efi_flags;	/* misc flags */
 	xfs_efi_log_format_t	efi_format;
 } xfs_efi_log_item_t;
 
@@ -117,7 +93,12 @@ extern struct kmem_zone	*xfs_efd_zone;
 xfs_efi_log_item_t	*xfs_efi_init(struct xfs_mount *, uint);
 xfs_efd_log_item_t	*xfs_efd_init(struct xfs_mount *, xfs_efi_log_item_t *,
 				      uint);
+int			xfs_efi_copy_format(xfs_log_iovec_t *buf,
+					    xfs_efi_log_format_t *dst_efi_fmt);
+void			xfs_efi_item_free(xfs_efi_log_item_t *);
+void			xfs_efi_release(struct xfs_efi_log_item *);
 
-#endif	/* __KERNEL__ */
+int			xfs_efi_recover(struct xfs_mount *mp,
+					struct xfs_efi_log_item *efip);
 
 #endif	/* __XFS_EXTFREE_ITEM_H__ */

@@ -1,5 +1,5 @@
 /*
- * linux/arch/arm/drivers/scsi/arxescsi.c
+ * linux/drivers/scsi/arm/arxescsi.c
  *
  * Copyright (C) 1997-2000 Russell King, Stefan Hanske
  *
@@ -23,7 +23,6 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
-#include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/unistd.h>
 #include <linux/stat.h>
@@ -33,7 +32,6 @@
 
 #include <asm/dma.h>
 #include <asm/io.h>
-#include <asm/irq.h>
 #include <asm/ecard.h>
 
 #include "../scsi.h"
@@ -43,6 +41,7 @@
 struct arxescsi_info {
 	FAS216_Info		info;
 	struct expansion_card	*ec;
+	void __iomem		*base;
 };
 
 #define DMADATA_OFFSET	(0x200)
@@ -64,7 +63,7 @@ struct arxescsi_info {
  * Returns : 0 if we should not set CMD_WITHDMA for transfer info command
  */
 static fasdmatype_t
-arxescsi_dma_setup(struct Scsi_Host *host, Scsi_Pointer *SCp,
+arxescsi_dma_setup(struct Scsi_Host *host, struct scsi_pointer *SCp,
 		       fasdmadir_t direction, fasdmatype_t min_type)
 {
 	/*
@@ -73,7 +72,7 @@ arxescsi_dma_setup(struct Scsi_Host *host, Scsi_Pointer *SCp,
 	return fasdma_pseudo;
 }
 
-static void arxescsi_pseudo_dma_write(unsigned char *addr, unsigned char *base)
+static void arxescsi_pseudo_dma_write(unsigned char *addr, void __iomem *base)
 {
        __asm__ __volatile__(
        "               stmdb   sp!, {r0-r12}\n"
@@ -110,12 +109,12 @@ static void arxescsi_pseudo_dma_write(unsigned char *addr, unsigned char *base)
  *	     transfer  - minimum number of bytes we expect to transfer
  */
 static void
-arxescsi_dma_pseudo(struct Scsi_Host *host, Scsi_Pointer *SCp,
+arxescsi_dma_pseudo(struct Scsi_Host *host, struct scsi_pointer *SCp,
 		    fasdmadir_t direction, int transfer)
 {
 	struct arxescsi_info *info = (struct arxescsi_info *)host->hostdata;
 	unsigned int length, error = 0;
-	unsigned char *base = info->info.scsi.io_base;
+	void __iomem *base = info->info.scsi.io_base;
 	unsigned char *addr;
 
 	length = SCp->this_residual;
@@ -196,7 +195,7 @@ arxescsi_dma_pseudo(struct Scsi_Host *host, Scsi_Pointer *SCp,
  * Params  : host  - host
  *	     SCpnt - command
  */
-static void arxescsi_dma_stop(struct Scsi_Host *host, Scsi_Pointer *SCp)
+static void arxescsi_dma_stop(struct Scsi_Host *host, struct scsi_pointer *SCp)
 {
 	/*
 	 * no DMA to stop
@@ -221,47 +220,21 @@ static const char *arxescsi_info(struct Scsi_Host *host)
 	return string;
 }
 
-/*
- * Function: int arxescsi_proc_info(char *buffer, char **start, off_t offset,
- *					 int length, int host_no, int inout)
- * Purpose : Return information about the driver to a user process accessing
- *	     the /proc filesystem.
- * Params  : buffer - a buffer to write information to
- *	     start  - a pointer into this buffer set by this routine to the start
- *		      of the required information.
- *	     offset - offset into information that we have read upto.
- *	     length - length of buffer
- *	     host_no - host number to return information for
- *	     inout  - 0 for reading, 1 for writing.
- * Returns : length of data written to buffer.
- */
 static int
-arxescsi_proc_info(struct Scsi_Host *host, char *buffer, char **start, off_t offset, int length,
-		   int inout)
+arxescsi_show_info(struct seq_file *m, struct Scsi_Host *host)
 {
 	struct arxescsi_info *info;
-	char *p = buffer;
-	int pos;
-
 	info = (struct arxescsi_info *)host->hostdata;
-	if (inout == 1)
-		return -EINVAL;
 
-	p += sprintf(p, "ARXE 16-bit SCSI driver v%s\n", VERSION);
-	p += fas216_print_host(&info->info, p);
-	p += fas216_print_stats(&info->info, p);
-	p += fas216_print_devices(&info->info, p);
-
-	*start = buffer + offset;
-	pos = p - buffer - offset;
-	if (pos > length)
-		pos = length;
-
-	return pos;
+	seq_printf(m, "ARXE 16-bit SCSI driver v%s\n", VERSION);
+	fas216_print_host(&info->info, m);
+	fas216_print_stats(&info->info, m);
+	fas216_print_devices(&info->info, m);
+	return 0;
 }
 
-static Scsi_Host_Template arxescsi_template = {
-	.proc_info			= arxescsi_proc_info,
+static struct scsi_host_template arxescsi_template = {
+	.show_info			= arxescsi_show_info,
 	.name				= "ARXE SCSI card",
 	.info				= arxescsi_info,
 	.queuecommand			= fas216_noqueue_command,
@@ -272,27 +245,22 @@ static Scsi_Host_Template arxescsi_template = {
 	.can_queue			= 0,
 	.this_id			= 7,
 	.sg_tablesize			= SG_ALL,
-	.cmd_per_lun			= 1,
 	.use_clustering			= DISABLE_CLUSTERING,
 	.proc_name			= "arxescsi",
 };
 
-static int __devinit
-arxescsi_probe(struct expansion_card *ec, const struct ecard_id *id)
+static int arxescsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 {
 	struct Scsi_Host *host;
 	struct arxescsi_info *info;
-	unsigned long resbase, reslen;
-	unsigned char *base;
+	void __iomem *base;
 	int ret;
 
 	ret = ecard_request_resources(ec);
 	if (ret)
 		goto out;
 
-	resbase = ecard_resource_start(ec, ECARD_RES_MEMC);
-	reslen = ecard_resource_len(ec, ECARD_RES_MEMC);
-	base = ioremap(resbase, reslen);
+	base = ecardm_iomap(ec, ECARD_RES_MEMC, 0, 0);
 	if (!base) {
 		ret = -ENOMEM;
 		goto out_region;
@@ -301,18 +269,16 @@ arxescsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 	host = scsi_host_alloc(&arxescsi_template, sizeof(struct arxescsi_info));
 	if (!host) {
 		ret = -ENOMEM;
-		goto out_unmap;
+		goto out_region;
 	}
-
-	host->base = (unsigned long)base;
-	host->irq = NO_IRQ;
-	host->dma_channel = NO_DMA;
 
 	info = (struct arxescsi_info *)host->hostdata;
 	info->ec = ec;
+	info->base = base;
 
 	info->info.scsi.io_base		= base + 0x2000;
-	info->info.scsi.irq		= host->irq;
+	info->info.scsi.irq		= 0;
+	info->info.scsi.dma		= NO_DMA;
 	info->info.scsi.io_shift	= 5;
 	info->info.ifcfg.clockrate	= 24; /* MHz */
 	info->info.ifcfg.select_timeout = 255;
@@ -340,22 +306,18 @@ arxescsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 	fas216_release(host);
  out_unregister:
 	scsi_host_put(host);
- out_unmap:
-	iounmap(base);
  out_region:
 	ecard_release_resources(ec);
  out:
 	return ret;
 }
 
-static void __devexit arxescsi_remove(struct expansion_card *ec)
+static void arxescsi_remove(struct expansion_card *ec)
 {
 	struct Scsi_Host *host = ecard_get_drvdata(ec);
 
 	ecard_set_drvdata(ec, NULL);
 	fas216_remove(host);
-
-	iounmap((void *)host->base);
 
 	fas216_release(host);
 	scsi_host_put(host);
@@ -369,7 +331,7 @@ static const struct ecard_id arxescsi_cids[] = {
 
 static struct ecard_driver arxescsi_driver = {
 	.probe		= arxescsi_probe,
-	.remove		= __devexit_p(arxescsi_remove),
+	.remove		= arxescsi_remove,
 	.id_table	= arxescsi_cids,
 	.drv = {
 		.name		= "arxescsi",

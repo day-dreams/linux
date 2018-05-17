@@ -1,12 +1,27 @@
-#
-# For a description of the syntax of this configuration file,
-# see Documentation/kbuild/kconfig-language.txt.
-#
+# SPDX-License-Identifier: GPL-2.0
 config FRV
 	bool
 	default y
+	select HAVE_IDE
+	select HAVE_ARCH_TRACEHOOK
+	select HAVE_PERF_EVENTS
+	select HAVE_UID16
+	select VIRT_TO_BUS
+	select GENERIC_IRQ_SHOW
+	select HAVE_DEBUG_BUGVERBOSE
+	select ARCH_HAVE_NMI_SAFE_CMPXCHG
+	select GENERIC_CPU_DEVICES
+	select ARCH_HAS_DEVMEM_IS_ALLOWED
+	select ARCH_WANT_IPC_PARSE_VERSION
+	select OLD_SIGSUSPEND3
+	select OLD_SIGACTION
+	select HAVE_DEBUG_STACKOVERFLOW
+	select ARCH_NO_COHERENT_DMA_MMAP
 
-config UID16
+config CPU_BIG_ENDIAN
+	def_bool y
+
+config ZONE_DMA
 	bool
 	default y
 
@@ -17,7 +32,7 @@ config RWSEM_GENERIC_SPINLOCK
 config RWSEM_XCHGADD_ALGORITHM
 	bool
 
-config GENERIC_FIND_NEXT_BIT
+config GENERIC_HWEIGHT
 	bool
 	default y
 
@@ -25,13 +40,29 @@ config GENERIC_CALIBRATE_DELAY
 	bool
 	default n
 
-config GENERIC_HARDIRQS
+config TIME_LOW_RES
 	bool
-	default n
+	default y
 
-mainmenu "Fujitsu FR-V Kernel Configuration"
+config QUICKLIST
+	bool
+	default y
+
+config ARCH_HAS_ILOG2_U32
+	bool
+	default y
+
+config ARCH_HAS_ILOG2_U64
+	bool
+	default y
+
+config HZ
+	int
+	default 1000
 
 source "init/Kconfig"
+
+source "kernel/Kconfig.freezer"
 
 
 menu "Fujitsu FR-V system setup"
@@ -51,7 +82,7 @@ config FRV_OUTOFLINE_ATOMIC_OPS
 	  Setting this option causes the FR-V atomic operations to be mostly
 	  implemented out-of-line.
 
-	  See Documentation/fujitsu/frv/atomic-ops.txt for more information.
+	  See Documentation/frv/atomic-ops.txt for more information.
 
 config HIGHMEM
 	bool "High memory support"
@@ -73,6 +104,8 @@ config HIGHPTE
 	  The VM uses one page of memory for each page table.  For systems
 	  with a lot of RAM, this can be wasteful of precious low memory.
 	  Setting this option will put user-space page tables in high memory.
+
+source "mm/Kconfig"
 
 choice
 	prompt "uClinux kernel load address"
@@ -107,6 +140,15 @@ config UCPAGE_OFFSET_C0000000
        bool "0xC0000000 (Recommended)"
 
 endchoice
+
+config PAGE_OFFSET
+	hex
+	default 0x20000000 if UCPAGE_OFFSET_20000000
+	default 0x40000000 if UCPAGE_OFFSET_40000000
+	default 0x60000000 if UCPAGE_OFFSET_60000000
+	default 0x80000000 if UCPAGE_OFFSET_80000000
+	default 0xA0000000 if UCPAGE_OFFSET_A0000000
+	default 0xC0000000
 
 config PROTECT_KERNEL
 	bool "Protect core kernel against userspace"
@@ -241,6 +283,12 @@ config MB93091_NO_MB
 endchoice
 endif
 
+config FUJITSU_MB93493
+	bool "MB93493 Multimedia chip"
+	help
+	  Select this option if the MB93493 multimedia chip is going to be
+	  used.
+
 choice
 	prompt "GP-Relative data support"
 	default GPREL_DATA_8
@@ -272,19 +320,20 @@ config GPREL_DATA_NONE
 
 endchoice
 
+config FRV_ONCPU_SERIAL
+	bool "Use on-CPU serial ports"
+	select SERIAL_8250
+	default y
+
 config PCI
 	bool "Use PCI"
 	depends on MB93090_MB00
 	default y
+	select GENERIC_PCI_IOMAP
 	help
 	  Some FR-V systems (such as the MB93090-MB00 VDK) have PCI
 	  onboard. If you have one of these boards and you wish to use the PCI
 	  facilities, say Y here.
-
-	  The PCI-HOWTO, available from
-	  <http://www.tldp.org/docs.html#howto>, contains valuable
-	  information about which PCI hardware does work under Linux and which
-	  doesn't.
 
 config RESERVE_DMA_COHERENT
 	bool "Reserve DMA coherent memory"
@@ -303,35 +352,13 @@ config RESERVE_DMA_COHERENT
 
 source "drivers/pci/Kconfig"
 
-config PCMCIA
-	tristate "Use PCMCIA"
-	help
-	  Say Y here if you want to attach PCMCIA- or PC-cards to your FR-V
-	  board.  These are credit-card size devices such as network cards,
-	  modems or hard drives often used with laptops computers.  There are
-	  actually two varieties of these cards: the older 16 bit PCMCIA cards
-	  and the newer 32 bit CardBus cards.  If you want to use CardBus
-	  cards, you need to say Y here and also to "CardBus support" below.
-
-	  To use your PC-cards, you will need supporting software from David
-	  Hinds pcmcia-cs package (see the file <file:Documentation/Changes>
-	  for location).  Please also read the PCMCIA-HOWTO, available from
-	  <http://www.tldp.org/docs.html#howto>.
-
-	  To compile this driver as modules, choose M here: the
-	  modules will be called pcmcia_core and ds.
-
-#config MATH_EMULATION
-#	bool "Math emulation support (EXPERIMENTAL)"
-#	depends on EXPERIMENTAL
-#	help
-#	  At some point in the future, this will cause floating-point math
-#	  instructions to be emulated by the kernel on machines that lack a
-#	  floating-point math coprocessor.  Thrill-seekers and chronically
-#	  sleep-deprived psychotic hacker types can say Y now, everyone else
-#	  should probably wait a while.
+source "drivers/pcmcia/Kconfig"
 
 menu "Power management options"
+
+config ARCH_SUSPEND_POSSIBLE
+	def_bool y
+
 source kernel/power/Kconfig
 endmenu
 
@@ -344,155 +371,13 @@ source "fs/Kconfig.binfmt"
 
 endmenu
 
+source "net/Kconfig"
+
 source "drivers/Kconfig"
 
 source "fs/Kconfig"
 
-menu "Kernel hacking"
-
-config DEBUG_KERNEL
-	bool "Kernel debugging"
-	help
-	  Say Y here if you are developing drivers or trying to debug and
-	  identify kernel problems.
-
-config EARLY_PRINTK
-	bool "Early printk"
-	depends on EMBEDDED && DEBUG_KERNEL
-	default n
-	help
-	  Write kernel log output directly into the VGA buffer or to a serial
-	  port.
-
-	  This is useful for kernel debugging when your machine crashes very
-	  early before the console code is initialized. For normal operation
-	  it is not recommended because it looks ugly and doesn't cooperate
-	  with klogd/syslogd or the X server. You should normally N here,
-	  unless you want to debug such a crash.
-
-config DEBUG_STACKOVERFLOW
-	bool "Check for stack overflows"
-	depends on DEBUG_KERNEL
-
-config DEBUG_SLAB
-	bool "Debug memory allocations"
-	depends on DEBUG_KERNEL
-	help
-	  Say Y here to have the kernel do limited verification on memory
-	  allocation as well as poisoning memory on free to catch use of freed
-	  memory.
-
-config MAGIC_SYSRQ
-	bool "Magic SysRq key"
-	depends on DEBUG_KERNEL
-	help
-	  If you say Y here, you will have some control over the system even
-	  if the system crashes for example during kernel debugging (e.g., you
-	  will be able to flush the buffer cache to disk, reboot the system
-	  immediately or dump some status information). This is accomplished
-	  by pressing various keys while holding SysRq (Alt+PrintScreen). It
-	  also works on a serial console (on PC hardware at least), if you
-	  send a BREAK and then within 5 seconds a command keypress. The
-	  keys are documented in <file:Documentation/sysrq.txt>. Don't say Y
-	  unless you really know what this hack does.
-
-config DEBUG_SPINLOCK
-	bool "Spinlock debugging"
-	depends on DEBUG_KERNEL
-	help
-	  Say Y here and build SMP to catch missing spinlock initialization
-	  and certain other kinds of spinlock errors commonly made.  This is
-	  best used in conjunction with the NMI watchdog so that spinlock
-	  deadlocks are also debuggable.
-
-config DEBUG_SPINLOCK_SLEEP
-	bool "Sleep-inside-spinlock checking"
-	depends on DEBUG_KERNEL
-	help
-	  If you say Y here, various routines which may sleep will become very
-	  noisy if they are called with a spinlock held.
-
-config DEBUG_PAGEALLOC
-	bool "Page alloc debugging"
-	depends on DEBUG_KERNEL
-	help
-	  Unmap pages from the kernel linear mapping after free_pages().
-	  This results in a large slowdown, but helps to find certain types
-	  of memory corruptions.
-
-config DEBUG_HIGHMEM
-	bool "Highmem debugging"
-	depends on DEBUG_KERNEL && HIGHMEM
-	help
-	  This options enables addition error checking for high memory systems.
-	  Disable for production systems.
-
-config DEBUG_INFO
-	bool "Compile the kernel with debug info"
-	depends on DEBUG_KERNEL
-	help
-          If you say Y here the resulting kernel image will include
-	  debugging info resulting in a larger kernel image.
-	  Say Y here only if you plan to use gdb to debug the kernel.
-	  If you don't debug the kernel, you can say N.
-
-config DEBUG_BUGVERBOSE
-	bool "Verbose BUG() reporting"
-	depends on DEBUG_KERNEL
-
-config FRAME_POINTER
-	bool "Compile the kernel with frame pointers"
-	depends on DEBUG_KERNEL
-	help
-	  If you say Y here the resulting kernel image will be slightly larger
-	  and slower, but it will give very useful debugging information.
-	  If you don't debug the kernel, you can say N, but we may not be able
-	  to solve problems without frame pointers.
-
-config GDBSTUB
-	bool "Remote GDB kernel debugging"
-	depends on DEBUG_KERNEL
-	select DEBUG_INFO
-	select FRAME_POINTER
-	help
-	  If you say Y here, it will be possible to remotely debug the kernel
-	  using gdb. This enlarges your kernel ELF image disk size by several
-	  megabytes and requires a machine with more than 16 MB, better 32 MB
-	  RAM to avoid excessive linking time. This is only useful for kernel
-	  hackers. If unsure, say N.
-
-choice
-	prompt "GDB stub port"
-	default GDBSTUB_UART1
-	depends on GDBSTUB
-	help
-	  Select the on-CPU port used for GDB-stub
-
-config GDBSTUB_UART0
-	bool "/dev/ttyS0"
-
-config GDBSTUB_UART1
-	bool "/dev/ttyS1"
-
-endchoice
-
-config GDBSTUB_IMMEDIATE
-	bool "Break into GDB stub immediately"
-	depends on GDBSTUB
-	help
-	  If you say Y here, GDB stub will break into the program as soon as
-	  possible, leaving the program counter at the beginning of
-	  start_kernel() in init/main.c.
-
-config GDB_CONSOLE
-	bool "Console output to GDB"
-	depends on KGDB
-	help
-	  If you are using GDB for remote debugging over a serial port and
-	  would like kernel messages to be formatted into GDB $O packets so
-	  that GDB prints them as program output, say 'Y'.
-
-endmenu
+source "arch/frv/Kconfig.debug"
 
 source "security/Kconfig"
 

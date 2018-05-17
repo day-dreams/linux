@@ -11,19 +11,18 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
 #include <linux/net.h>
+#include <linux/slab.h>
 #include <net/ax25.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <net/tcp.h>
-#include <asm/uaccess.h>
-#include <asm/system.h>
+#include <net/tcp_states.h>
+#include <linux/uaccess.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -34,7 +33,7 @@
  */
 void nr_clear_queues(struct sock *sk)
 {
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 
 	skb_queue_purge(&sk->sk_write_queue);
 	skb_queue_purge(&nr->ack_queue);
@@ -49,7 +48,7 @@ void nr_clear_queues(struct sock *sk)
  */
 void nr_frames_acked(struct sock *sk, unsigned short nr)
 {
-	nr_cb *nrom = nr_sk(sk);
+	struct nr_sock *nrom = nr_sk(sk);
 	struct sk_buff *skb;
 
 	/*
@@ -57,7 +56,7 @@ void nr_frames_acked(struct sock *sk, unsigned short nr)
 	 */
 	if (nrom->va != nr) {
 		while (skb_peek(&nrom->ack_queue) != NULL && nrom->va != nr) {
-		        skb = skb_dequeue(&nrom->ack_queue);
+			skb = skb_dequeue(&nrom->ack_queue);
 			kfree_skb(skb);
 			nrom->va = (nrom->va + 1) % NR_MODULUS;
 		}
@@ -77,7 +76,7 @@ void nr_requeue_frames(struct sock *sk)
 		if (skb_prev == NULL)
 			skb_queue_head(&sk->sk_write_queue, skb);
 		else
-			skb_append(skb_prev, skb);
+			skb_append(skb_prev, skb, &sk->sk_write_queue);
 		skb_prev = skb;
 	}
 }
@@ -88,7 +87,7 @@ void nr_requeue_frames(struct sock *sk)
  */
 int nr_validate_nr(struct sock *sk, unsigned short nr)
 {
-	nr_cb *nrom = nr_sk(sk);
+	struct nr_sock *nrom = nr_sk(sk);
 	unsigned short vc = nrom->va;
 
 	while (vc != nrom->vs) {
@@ -104,7 +103,7 @@ int nr_validate_nr(struct sock *sk, unsigned short nr)
  */
 int nr_in_rx_window(struct sock *sk, unsigned short ns)
 {
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 	unsigned short vc = nr->vr;
 	unsigned short vt = (nr->vl + nr->window) % NR_MODULUS;
 
@@ -122,7 +121,7 @@ int nr_in_rx_window(struct sock *sk, unsigned short ns)
  */
 void nr_write_internal(struct sock *sk, int frametype)
 {
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 	struct sk_buff *skb;
 	unsigned char  *dptr;
 	int len, timeout;
@@ -210,10 +209,9 @@ void nr_write_internal(struct sock *sk, int frametype)
 }
 
 /*
- * This routine is called when a Connect Acknowledge with the Choke Flag
- * set is needed to refuse a connection.
+ * This routine is called to send an error reply.
  */
-void nr_transmit_refusal(struct sk_buff *skb, int mine)
+void __nr_transmit_reply(struct sk_buff *skb, int mine, unsigned char cmdflags)
 {
 	struct sk_buff *skbn;
 	unsigned char *dptr;
@@ -228,13 +226,13 @@ void nr_transmit_refusal(struct sk_buff *skb, int mine)
 
 	dptr = skb_put(skbn, NR_NETWORK_LEN + NR_TRANSPORT_LEN);
 
-	memcpy(dptr, skb->data + 7, AX25_ADDR_LEN);
+	skb_copy_from_linear_data_offset(skb, 7, dptr, AX25_ADDR_LEN);
 	dptr[6] &= ~AX25_CBIT;
 	dptr[6] &= ~AX25_EBIT;
 	dptr[6] |= AX25_SSSID_SPARE;
 	dptr += AX25_ADDR_LEN;
 
-	memcpy(dptr, skb->data + 0, AX25_ADDR_LEN);
+	skb_copy_from_linear_data(skb, dptr, AX25_ADDR_LEN);
 	dptr[6] &= ~AX25_CBIT;
 	dptr[6] |= AX25_EBIT;
 	dptr[6] |= AX25_SSSID_SPARE;
@@ -254,7 +252,7 @@ void nr_transmit_refusal(struct sk_buff *skb, int mine)
 		*dptr++ = 0;
 	}
 
-	*dptr++ = NR_CONNACK | NR_CHOKE_FLAG;
+	*dptr++ = cmdflags;
 	*dptr++ = 0;
 
 	if (!nr_route_frame(skbn, NULL))

@@ -1,139 +1,222 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * driver.c - centralized device driver management
  *
  * Copyright (c) 2002-3 Patrick Mochel
  * Copyright (c) 2002-3 Open Source Development Labs
- *
- * This file is released under the GPLv2
- *
+ * Copyright (c) 2007 Greg Kroah-Hartman <gregkh@suse.de>
+ * Copyright (c) 2007 Novell Inc.
  */
 
-#include <linux/config.h>
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/errno.h>
+#include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/sysfs.h>
 #include "base.h"
 
-#define to_dev(node) container_of(node, struct device, driver_list)
-#define to_drv(obj) container_of(obj, struct device_driver, kobj)
+static struct device *next_device(struct klist_iter *i)
+{
+	struct klist_node *n = klist_next(i);
+	struct device *dev = NULL;
+	struct device_private *dev_prv;
+
+	if (n) {
+		dev_prv = to_device_private_driver(n);
+		dev = dev_prv->device;
+	}
+	return dev;
+}
 
 /**
- *	driver_create_file - create sysfs file for driver.
- *	@drv:	driver.
- *	@attr:	driver attribute descriptor.
+ * driver_for_each_device - Iterator for devices bound to a driver.
+ * @drv: Driver we're iterating.
+ * @start: Device to begin with
+ * @data: Data to pass to the callback.
+ * @fn: Function to call for each device.
+ *
+ * Iterate over the @drv's list of devices calling @fn for each one.
  */
+int driver_for_each_device(struct device_driver *drv, struct device *start,
+			   void *data, int (*fn)(struct device *, void *))
+{
+	struct klist_iter i;
+	struct device *dev;
+	int error = 0;
 
-int driver_create_file(struct device_driver * drv, struct driver_attribute * attr)
+	if (!drv)
+		return -EINVAL;
+
+	klist_iter_init_node(&drv->p->klist_devices, &i,
+			     start ? &start->p->knode_driver : NULL);
+	while (!error && (dev = next_device(&i)))
+		error = fn(dev, data);
+	klist_iter_exit(&i);
+	return error;
+}
+EXPORT_SYMBOL_GPL(driver_for_each_device);
+
+/**
+ * driver_find_device - device iterator for locating a particular device.
+ * @drv: The device's driver
+ * @start: Device to begin with
+ * @data: Data to pass to match function
+ * @match: Callback function to check device
+ *
+ * This is similar to the driver_for_each_device() function above, but
+ * it returns a reference to a device that is 'found' for later use, as
+ * determined by the @match callback.
+ *
+ * The callback should return 0 if the device doesn't match and non-zero
+ * if it does.  If the callback returns non-zero, this function will
+ * return to the caller and not iterate over any more devices.
+ */
+struct device *driver_find_device(struct device_driver *drv,
+				  struct device *start, void *data,
+				  int (*match)(struct device *dev, void *data))
+{
+	struct klist_iter i;
+	struct device *dev;
+
+	if (!drv || !drv->p)
+		return NULL;
+
+	klist_iter_init_node(&drv->p->klist_devices, &i,
+			     (start ? &start->p->knode_driver : NULL));
+	while ((dev = next_device(&i)))
+		if (match(dev, data) && get_device(dev))
+			break;
+	klist_iter_exit(&i);
+	return dev;
+}
+EXPORT_SYMBOL_GPL(driver_find_device);
+
+/**
+ * driver_create_file - create sysfs file for driver.
+ * @drv: driver.
+ * @attr: driver attribute descriptor.
+ */
+int driver_create_file(struct device_driver *drv,
+		       const struct driver_attribute *attr)
 {
 	int error;
-	if (get_driver(drv)) {
-		error = sysfs_create_file(&drv->kobj, &attr->attr);
-		put_driver(drv);
-	} else
+
+	if (drv)
+		error = sysfs_create_file(&drv->p->kobj, &attr->attr);
+	else
 		error = -EINVAL;
 	return error;
 }
-
+EXPORT_SYMBOL_GPL(driver_create_file);
 
 /**
- *	driver_remove_file - remove sysfs file for driver.
- *	@drv:	driver.
- *	@attr:	driver attribute descriptor.
+ * driver_remove_file - remove sysfs file for driver.
+ * @drv: driver.
+ * @attr: driver attribute descriptor.
  */
-
-void driver_remove_file(struct device_driver * drv, struct driver_attribute * attr)
+void driver_remove_file(struct device_driver *drv,
+			const struct driver_attribute *attr)
 {
-	if (get_driver(drv)) {
-		sysfs_remove_file(&drv->kobj, &attr->attr);
-		put_driver(drv);
+	if (drv)
+		sysfs_remove_file(&drv->p->kobj, &attr->attr);
+}
+EXPORT_SYMBOL_GPL(driver_remove_file);
+
+int driver_add_groups(struct device_driver *drv,
+		      const struct attribute_group **groups)
+{
+	return sysfs_create_groups(&drv->p->kobj, groups);
+}
+
+void driver_remove_groups(struct device_driver *drv,
+			  const struct attribute_group **groups)
+{
+	sysfs_remove_groups(&drv->p->kobj, groups);
+}
+
+/**
+ * driver_register - register driver with bus
+ * @drv: driver to register
+ *
+ * We pass off most of the work to the bus_add_driver() call,
+ * since most of the things we have to do deal with the bus
+ * structures.
+ */
+int driver_register(struct device_driver *drv)
+{
+	int ret;
+	struct device_driver *other;
+
+	BUG_ON(!drv->bus->p);
+
+	if ((drv->bus->probe && drv->probe) ||
+	    (drv->bus->remove && drv->remove) ||
+	    (drv->bus->shutdown && drv->shutdown))
+		printk(KERN_WARNING "Driver '%s' needs updating - please use "
+			"bus_type methods\n", drv->name);
+
+	other = driver_find(drv->name, drv->bus);
+	if (other) {
+		printk(KERN_ERR "Error: Driver '%s' is already registered, "
+			"aborting...\n", drv->name);
+		return -EBUSY;
 	}
-}
 
+	ret = bus_add_driver(drv);
+	if (ret)
+		return ret;
+	ret = driver_add_groups(drv, drv->groups);
+	if (ret) {
+		bus_remove_driver(drv);
+		return ret;
+	}
+	kobject_uevent(&drv->p->kobj, KOBJ_ADD);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(driver_register);
 
 /**
- *	get_driver - increment driver reference count.
- *	@drv:	driver.
- */
-struct device_driver * get_driver(struct device_driver * drv)
-{
-	return drv ? to_drv(kobject_get(&drv->kobj)) : NULL;
-}
-
-
-/**
- *	put_driver - decrement driver's refcount.
- *	@drv:	driver.
- */
-void put_driver(struct device_driver * drv)
-{
-	kobject_put(&drv->kobj);
-}
-
-
-/**
- *	driver_register - register driver with bus
- *	@drv:	driver to register
+ * driver_unregister - remove driver from system.
+ * @drv: driver.
  *
- *	We pass off most of the work to the bus_add_driver() call,
- *	since most of the things we have to do deal with the bus
- *	structures.
- *
- *	The one interesting aspect is that we initialize @drv->unload_sem
- *	to a locked state here. It will be unlocked when the driver
- *	reference count reaches 0.
+ * Again, we pass off most of the work to the bus-level call.
  */
-int driver_register(struct device_driver * drv)
+void driver_unregister(struct device_driver *drv)
 {
-	INIT_LIST_HEAD(&drv->devices);
-	init_MUTEX_LOCKED(&drv->unload_sem);
-	return bus_add_driver(drv);
-}
-
-
-/**
- *	driver_unregister - remove driver from system.
- *	@drv:	driver.
- *
- *	Again, we pass off most of the work to the bus-level call.
- *
- *	Though, once that is done, we attempt to take @drv->unload_sem.
- *	This will block until the driver refcount reaches 0, and it is
- *	released. Only modular drivers will call this function, and we
- *	have to guarantee that it won't complete, letting the driver
- *	unload until all references are gone.
- */
-
-void driver_unregister(struct device_driver * drv)
-{
+	if (!drv || !drv->p) {
+		WARN(1, "Unexpected driver unregister!\n");
+		return;
+	}
+	driver_remove_groups(drv, drv->groups);
 	bus_remove_driver(drv);
-	down(&drv->unload_sem);
-	up(&drv->unload_sem);
 }
+EXPORT_SYMBOL_GPL(driver_unregister);
 
 /**
- *	driver_find - locate driver on a bus by its name.
- *	@name:	name of the driver.
- *	@bus:	bus to scan for the driver.
+ * driver_find - locate driver on a bus by its name.
+ * @name: name of the driver.
+ * @bus: bus to scan for the driver.
  *
- *	Call kset_find_obj() to iterate over list of drivers on
- *	a bus to find driver by name. Return driver if found.
+ * Call kset_find_obj() to iterate over list of drivers on
+ * a bus to find driver by name. Return driver if found.
  *
- *	Note that kset_find_obj increments driver's reference count.
+ * This routine provides no locking to prevent the driver it returns
+ * from being unregistered or unloaded while the caller is using it.
+ * The caller is responsible for preventing this.
  */
 struct device_driver *driver_find(const char *name, struct bus_type *bus)
 {
-	struct kobject *k = kset_find_obj(&bus->drivers, name);
-	if (k)
-		return to_drv(k);
+	struct kobject *k = kset_find_obj(bus->p->drivers_kset, name);
+	struct driver_private *priv;
+
+	if (k) {
+		/* Drop reference added by kset_find_obj() */
+		kobject_put(k);
+		priv = to_driver(k);
+		return priv->driver;
+	}
 	return NULL;
 }
-
-EXPORT_SYMBOL_GPL(driver_register);
-EXPORT_SYMBOL_GPL(driver_unregister);
-EXPORT_SYMBOL_GPL(get_driver);
-EXPORT_SYMBOL_GPL(put_driver);
 EXPORT_SYMBOL_GPL(driver_find);
-
-EXPORT_SYMBOL_GPL(driver_create_file);
-EXPORT_SYMBOL_GPL(driver_remove_file);

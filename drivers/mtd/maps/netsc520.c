@@ -3,8 +3,6 @@
  * Copyright (C) 2001 Mark Langsdorf (mark.langsdorf@amd.com)
  *	based on sc520cdp.c by Sysgo Real-Time Solutions GmbH
  *
- * $Id: netsc520.c,v 1.13 2004/11/28 09:40:40 dwmw2 Exp $
- *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
@@ -38,7 +36,7 @@
 ** The single, 16 megabyte flash bank is divided into four virtual
 ** partitions.  The first partition is 768 KiB and is intended to
 ** store the kernel image loaded by the bootstrap loader.  The second
-** partition is 256 KiB and holds the BIOS image.  The third 
+** partition is 256 KiB and holds the BIOS image.  The third
 ** partition is 14.5 MiB and is intended for the flash file system
 ** image.  The last partition is 512 KiB and contains another copy
 ** of the BIOS image and the reset vector.
@@ -51,32 +49,32 @@
 ** recoverable afterwards.
 */
 
-/* partition_info gives details on the logical partitions that the split the 
+/* partition_info gives details on the logical partitions that the split the
  * single flash device into. If the size if zero we use up to the end of the
  * device. */
-static struct mtd_partition partition_info[]={
-    { 
-	    .name = "NetSc520 boot kernel", 
-	    .offset = 0, 
+static const struct mtd_partition partition_info[] = {
+    {
+	    .name = "NetSc520 boot kernel",
+	    .offset = 0,
 	    .size = 0xc0000
     },
-    { 
-	    .name = "NetSc520 Low BIOS", 
-	    .offset = 0xc0000, 
+    {
+	    .name = "NetSc520 Low BIOS",
+	    .offset = 0xc0000,
 	    .size = 0x40000
     },
-    { 
-	    .name = "NetSc520 file system", 
-	    .offset = 0x100000, 
+    {
+	    .name = "NetSc520 file system",
+	    .offset = 0x100000,
 	    .size = 0xe80000
     },
-    { 
-	    .name = "NetSc520 High BIOS", 
-	    .offset = 0xf80000, 
+    {
+	    .name = "NetSc520 High BIOS",
+	    .offset = 0xf80000,
 	    .size = 0x80000
     },
 };
-#define NUM_PARTITIONS (sizeof(partition_info)/sizeof(partition_info[0]))
+#define NUM_PARTITIONS ARRAY_SIZE(partition_info)
 
 #define WINDOW_SIZE	0x00100000
 #define WINDOW_ADDR	0x00200000
@@ -88,13 +86,15 @@ static struct map_info netsc520_map = {
 	.phys = WINDOW_ADDR,
 };
 
-#define NUM_FLASH_BANKS	(sizeof(netsc520_map)/sizeof(struct map_info))
+#define NUM_FLASH_BANKS	ARRAY_SIZE(netsc520_map)
 
 static struct mtd_info *mymtd;
 
 static int __init init_netsc520(void)
 {
-	printk(KERN_NOTICE "NetSc520 flash device: 0x%lx at 0x%lx\n", netsc520_map.size, netsc520_map.phys);
+	printk(KERN_NOTICE "NetSc520 flash device: 0x%Lx at 0x%Lx\n",
+			(unsigned long long)netsc520_map.size,
+			(unsigned long long)netsc520_map.phys);
 	netsc520_map.virt = ioremap_nocache(netsc520_map.phys, netsc520_map.size);
 
 	if (!netsc520_map.virt) {
@@ -114,16 +114,16 @@ static int __init init_netsc520(void)
 		iounmap(netsc520_map.virt);
 		return -ENXIO;
 	}
-		
+
 	mymtd->owner = THIS_MODULE;
-	add_mtd_partitions( mymtd, partition_info, NUM_PARTITIONS );
+	mtd_device_register(mymtd, partition_info, NUM_PARTITIONS);
 	return 0;
 }
 
 static void __exit cleanup_netsc520(void)
 {
 	if (mymtd) {
-		del_mtd_partitions(mymtd);
+		mtd_device_unregister(mymtd);
 		map_destroy(mymtd);
 	}
 	if (netsc520_map.virt) {

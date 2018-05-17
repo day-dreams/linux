@@ -18,13 +18,14 @@
  *
  * Copyright (C) IBM Corporation, 2004
  *
- * Author: Max Asböck <amax@us.ibm.com> 
+ * Author: Max AsbÃ¶ck <amax@us.ibm.com>
  *
  */
 
 #include <linux/notifier.h>
 #include "ibmasm.h"
 #include "dot_command.h"
+#include "lowlevel.h"
 
 static int suspend_heartbeats = 0;
 
@@ -51,18 +52,19 @@ static struct notifier_block panic_notifier = { panic_happened, NULL, 1 };
 
 void ibmasm_register_panic_notifier(void)
 {
-	notifier_chain_register(&panic_notifier_list, &panic_notifier);
+	atomic_notifier_chain_register(&panic_notifier_list, &panic_notifier);
 }
 
 void ibmasm_unregister_panic_notifier(void)
 {
-	notifier_chain_unregister(&panic_notifier_list, &panic_notifier);
+	atomic_notifier_chain_unregister(&panic_notifier_list,
+			&panic_notifier);
 }
 
 
 int ibmasm_heartbeat_init(struct service_processor *sp)
 {
-	sp->heartbeat = ibmasm_new_command(HEARTBEAT_BUFFER_SIZE);
+	sp->heartbeat = ibmasm_new_command(sp, HEARTBEAT_BUFFER_SIZE);
 	if (sp->heartbeat == NULL)
 		return -ENOMEM;
 
@@ -71,6 +73,12 @@ int ibmasm_heartbeat_init(struct service_processor *sp)
 
 void ibmasm_heartbeat_exit(struct service_processor *sp)
 {
+	char tsbuf[32];
+
+	dbg("%s:%d at %s\n", __func__, __LINE__, get_timestamp(tsbuf));
+	ibmasm_wait_for_response(sp->heartbeat, IBMASM_CMD_TIMEOUT_NORMAL);
+	dbg("%s:%d at %s\n", __func__, __LINE__, get_timestamp(tsbuf));
+	suspend_heartbeats = 1;
 	command_put(sp->heartbeat);
 }
 
@@ -78,14 +86,16 @@ void ibmasm_receive_heartbeat(struct service_processor *sp,  void *message, size
 {
 	struct command *cmd = sp->heartbeat;
 	struct dot_command_header *header = (struct dot_command_header *)cmd->buffer;
+	char tsbuf[32];
 
+	dbg("%s:%d at %s\n", __func__, __LINE__, get_timestamp(tsbuf));
 	if (suspend_heartbeats)
 		return;
 
 	/* return the received dot command to sender */
 	cmd->status = IBMASM_CMD_PENDING;
 	size = min(size, cmd->buffer_size);
-	memcpy(cmd->buffer, message, size);
+	memcpy_fromio(cmd->buffer, message, size);
 	header->type = sp_write;
 	ibmasm_exec_command(sp, cmd);
 }

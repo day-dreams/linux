@@ -1,6 +1,4 @@
 /*
- * $Id: ct82c710.c,v 1.11 2001/09/25 10:12:07 vojtech Exp $
- *
  *  Copyright (c) 1999-2001 Vojtech Pavlik
  */
 
@@ -31,12 +29,13 @@
 #include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/ioport.h>
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/serio.h>
 #include <linux/errno.h>
 #include <linux/err.h>
+#include <linux/platform_device.h>
+#include <linux/slab.h>
 
 #include <asm/io.h>
 
@@ -71,9 +70,9 @@ static struct resource ct82c710_iores;
  * is waiting in the 82C710.
  */
 
-static irqreturn_t ct82c710_interrupt(int cpl, void *dev_id, struct pt_regs * regs)
+static irqreturn_t ct82c710_interrupt(int cpl, void *dev_id)
 {
-	return serio_interrupt(ct82c710_port, inb(CT82C710_DATA), 0, regs);
+	return serio_interrupt(ct82c710_port, inb(CT82C710_DATA), 0);
 }
 
 /*
@@ -112,9 +111,11 @@ static void ct82c710_close(struct serio *serio)
 static int ct82c710_open(struct serio *serio)
 {
 	unsigned char status;
+	int err;
 
-	if (request_irq(CT82C710_IRQ, ct82c710_interrupt, 0, "ct82c710", NULL))
-		return -1;
+	err = request_irq(CT82C710_IRQ, ct82c710_interrupt, 0, "ct82c710", NULL);
+	if (err)
+		return err;
 
 	status = inb_p(CT82C710_STATUS);
 
@@ -132,7 +133,7 @@ static int ct82c710_open(struct serio *serio)
 		status &= ~(CT82C710_ENABLE | CT82C710_INTS_ON);
 		outb_p(status, CT82C710_STATUS);
 		free_irq(CT82C710_IRQ, NULL);
-		return -1;
+		return -EBUSY;
 	}
 
 	return 0;
@@ -153,7 +154,7 @@ static int ct82c710_write(struct serio *port, unsigned char c)
  * See if we can find a 82C710 device. Read mouse address.
  */
 
-static int __init ct82c710_probe(void)
+static int __init ct82c710_detect(void)
 {
 	outb_p(0x55, 0x2fa);				/* Any value except 9, ff or 36 */
 	outb_p(0xaa, 0x3fa);				/* Inverse of 55 */
@@ -162,7 +163,7 @@ static int __init ct82c710_probe(void)
 	outb_p(0x1b, 0x2fa);				/* Inverse of e4 */
 	outb_p(0x0f, 0x390);				/* Write index */
 	if (inb_p(0x391) != 0xe4)			/* Config address found? */
-		return -1;				/* No: no 82C710 here */
+		return -ENODEV;				/* No: no 82C710 here */
 
 	outb_p(0x0d, 0x390);				/* Write index */
 	ct82c710_iores.start = inb_p(0x391) << 2;	/* Get mouse I/O address */
@@ -174,51 +175,85 @@ static int __init ct82c710_probe(void)
 	return 0;
 }
 
-static struct serio * __init ct82c710_allocate_port(void)
+static int ct82c710_probe(struct platform_device *dev)
 {
-	struct serio *serio;
-
-	serio = kmalloc(sizeof(struct serio), GFP_KERNEL);
-	if (serio) {
-		memset(serio, 0, sizeof(struct serio));
-		serio->type = SERIO_8042;
-		serio->open = ct82c710_open;
-		serio->close = ct82c710_close;
-		serio->write = ct82c710_write;
-		serio->dev.parent = &ct82c710_device->dev;
-		strlcpy(serio->name, "C&T 82c710 mouse port", sizeof(serio->name));
-		snprintf(serio->phys, sizeof(serio->phys), "isa%04lx/serio0", CT82C710_DATA);
-	}
-
-	return serio;
-}
-
-int __init ct82c710_init(void)
-{
-	if (ct82c710_probe())
-		return -ENODEV;
-
-	ct82c710_device = platform_device_register_simple("ct82c710", -1, &ct82c710_iores, 1);
-	if (IS_ERR(ct82c710_device))
-		return PTR_ERR(ct82c710_device);
-
-	if (!(ct82c710_port = ct82c710_allocate_port())) {
-		platform_device_unregister(ct82c710_device);
+	ct82c710_port = kzalloc(sizeof(struct serio), GFP_KERNEL);
+	if (!ct82c710_port)
 		return -ENOMEM;
-	}
+
+	ct82c710_port->id.type = SERIO_8042;
+	ct82c710_port->dev.parent = &dev->dev;
+	ct82c710_port->open = ct82c710_open;
+	ct82c710_port->close = ct82c710_close;
+	ct82c710_port->write = ct82c710_write;
+	strlcpy(ct82c710_port->name, "C&T 82c710 mouse port",
+		sizeof(ct82c710_port->name));
+	snprintf(ct82c710_port->phys, sizeof(ct82c710_port->phys),
+		 "isa%16llx/serio0", (unsigned long long)CT82C710_DATA);
 
 	serio_register_port(ct82c710_port);
 
-	printk(KERN_INFO "serio: C&T 82c710 mouse port at %#lx irq %d\n",
-		CT82C710_DATA, CT82C710_IRQ);
+	printk(KERN_INFO "serio: C&T 82c710 mouse port at %#llx irq %d\n",
+		(unsigned long long)CT82C710_DATA, CT82C710_IRQ);
 
 	return 0;
 }
 
-void __exit ct82c710_exit(void)
+static int ct82c710_remove(struct platform_device *dev)
 {
 	serio_unregister_port(ct82c710_port);
+
+	return 0;
+}
+
+static struct platform_driver ct82c710_driver = {
+	.driver		= {
+		.name	= "ct82c710",
+	},
+	.probe		= ct82c710_probe,
+	.remove		= ct82c710_remove,
+};
+
+
+static int __init ct82c710_init(void)
+{
+	int error;
+
+	error = ct82c710_detect();
+	if (error)
+		return error;
+
+	error = platform_driver_register(&ct82c710_driver);
+	if (error)
+		return error;
+
+	ct82c710_device = platform_device_alloc("ct82c710", -1);
+	if (!ct82c710_device) {
+		error = -ENOMEM;
+		goto err_unregister_driver;
+	}
+
+	error = platform_device_add_resources(ct82c710_device, &ct82c710_iores, 1);
+	if (error)
+		goto err_free_device;
+
+	error = platform_device_add(ct82c710_device);
+	if (error)
+		goto err_free_device;
+
+	return 0;
+
+ err_free_device:
+	platform_device_put(ct82c710_device);
+ err_unregister_driver:
+	platform_driver_unregister(&ct82c710_driver);
+	return error;
+}
+
+static void __exit ct82c710_exit(void)
+{
 	platform_device_unregister(ct82c710_device);
+	platform_driver_unregister(&ct82c710_driver);
 }
 
 module_init(ct82c710_init);

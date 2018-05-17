@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/arch/ia64/sn/kernel/sn2/timer.c
  *
@@ -11,9 +12,10 @@
 #include <linux/sched.h>
 #include <linux/time.h>
 #include <linux/interrupt.h>
+#include <linux/clocksource.h>
 
 #include <asm/hw_irq.h>
-#include <asm/system.h>
+#include <asm/timex.h>
 
 #include <asm/sn/leds.h>
 #include <asm/sn/shub_mmr.h>
@@ -21,16 +23,39 @@
 
 extern unsigned long sn_rtc_cycles_per_second;
 
-static struct time_interpolator sn2_interpolator = {
-	.drift = -1,
-	.shift = 10,
-	.mask = (1LL << 55) - 1,
-	.source = TIME_SOURCE_MMIO64
+static u64 read_sn2(struct clocksource *cs)
+{
+	return (u64)readq(RTC_COUNTER_ADDR);
+}
+
+static struct clocksource clocksource_sn2 = {
+        .name           = "sn2_rtc",
+        .rating         = 450,
+        .read           = read_sn2,
+        .mask           = (1LL << 55) - 1,
+        .flags          = CLOCK_SOURCE_IS_CONTINUOUS,
 };
+
+/*
+ * sn udelay uses the RTC instead of the ITC because the ITC is not
+ * synchronized across all CPUs, and the thread may migrate to another CPU
+ * if preemption is enabled.
+ */
+static void
+ia64_sn_udelay (unsigned long usecs)
+{
+	unsigned long start = rtc_time();
+	unsigned long end = start +
+			usecs * sn_rtc_cycles_per_second / 1000000;
+
+	while (time_before((unsigned long)rtc_time(), end))
+		cpu_relax();
+}
 
 void __init sn_timer_init(void)
 {
-	sn2_interpolator.frequency = sn_rtc_cycles_per_second;
-	sn2_interpolator.addr = RTC_COUNTER_ADDR;
-	register_time_interpolator(&sn2_interpolator);
+	clocksource_sn2.archdata.fsys_mmio = RTC_COUNTER_ADDR;
+	clocksource_register_hz(&clocksource_sn2, sn_rtc_cycles_per_second);
+
+	ia64_udelay = &ia64_sn_udelay;
 }

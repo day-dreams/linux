@@ -1,10 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * PAL & SAL emulation.
  *
  * Copyright (C) 1998-2001 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
-#include <linux/config.h>
 
 #ifdef CONFIG_PCI
 # include <linux/pci.h>
@@ -14,6 +14,7 @@
 #include <asm/io.h>
 #include <asm/pal.h>
 #include <asm/sal.h>
+#include <asm/setup.h>
 
 #include "ssc.h"
 
@@ -161,28 +162,19 @@ sal_emulator (long index, unsigned long in1, unsigned long in2,
 	 */
 	status = 0;
 	if (index == SAL_FREQ_BASE) {
-		switch (in1) {
-		      case SAL_FREQ_BASE_PLATFORM:
+		if (in1 == SAL_FREQ_BASE_PLATFORM)
 			r9 = 200000000;
-			break;
-
-		      case SAL_FREQ_BASE_INTERVAL_TIMER:
+		else if (in1 == SAL_FREQ_BASE_INTERVAL_TIMER) {
 			/*
 			 * Is this supposed to be the cr.itc frequency
 			 * or something platform specific?  The SAL
 			 * doc ain't exactly clear on this...
 			 */
 			r9 = 700000000;
-			break;
-
-		      case SAL_FREQ_BASE_REALTIME_CLOCK:
+		} else if (in1 == SAL_FREQ_BASE_REALTIME_CLOCK)
 			r9 = 1;
-			break;
-
-		      default:
+		else
 			status = -1;
-			break;
-		}
 	} else if (index == SAL_SET_VECTORS) {
 		;
 	} else if (index == SAL_GET_STATE_INFO) {
@@ -237,17 +229,6 @@ sal_emulator (long index, unsigned long in1, unsigned long in2,
 	return ((struct sal_ret_values) {status, r9, r10, r11});
 }
 
-
-/*
- * This is here to work around a bug in egcs-1.1.1b that causes the
- * compiler to crash (seems like a bug in the new alias analysis code.
- */
-void *
-id (long addr)
-{
-	return (void *) addr;
-}
-
 struct ia64_boot_param *
 sys_fw_init (const char *args, int arglen)
 {
@@ -297,9 +278,9 @@ sys_fw_init (const char *args, int arglen)
 	}
 	cmd_line[arglen] = '\0';
 
-	memset(efi_systab, 0, sizeof(efi_systab));
+	memset(efi_systab, 0, sizeof(*efi_systab));
 	efi_systab->hdr.signature = EFI_SYSTEM_TABLE_SIGNATURE;
-	efi_systab->hdr.revision  = EFI_SYSTEM_TABLE_REVISION;
+	efi_systab->hdr.revision  = ((1 << 16) | 00);
 	efi_systab->hdr.headersize = sizeof(efi_systab->hdr);
 	efi_systab->fw_vendor = __pa("H\0e\0w\0l\0e\0t\0t\0-\0P\0a\0c\0k\0a\0r\0d\0\0");
 	efi_systab->fw_revision = 1;
@@ -310,16 +291,16 @@ sys_fw_init (const char *args, int arglen)
 	efi_runtime->hdr.signature = EFI_RUNTIME_SERVICES_SIGNATURE;
 	efi_runtime->hdr.revision = EFI_RUNTIME_SERVICES_REVISION;
 	efi_runtime->hdr.headersize = sizeof(efi_runtime->hdr);
-	efi_runtime->get_time = __pa(&fw_efi_get_time);
-	efi_runtime->set_time = __pa(&efi_unimplemented);
-	efi_runtime->get_wakeup_time = __pa(&efi_unimplemented);
-	efi_runtime->set_wakeup_time = __pa(&efi_unimplemented);
-	efi_runtime->set_virtual_address_map = __pa(&efi_unimplemented);
-	efi_runtime->get_variable = __pa(&efi_unimplemented);
-	efi_runtime->get_next_variable = __pa(&efi_unimplemented);
-	efi_runtime->set_variable = __pa(&efi_unimplemented);
-	efi_runtime->get_next_high_mono_count = __pa(&efi_unimplemented);
-	efi_runtime->reset_system = __pa(&efi_reset_system);
+	efi_runtime->get_time = (void *)__pa(&fw_efi_get_time);
+	efi_runtime->set_time = (void *)__pa(&efi_unimplemented);
+	efi_runtime->get_wakeup_time = (void *)__pa(&efi_unimplemented);
+	efi_runtime->set_wakeup_time = (void *)__pa(&efi_unimplemented);
+	efi_runtime->set_virtual_address_map = (void *)__pa(&efi_unimplemented);
+	efi_runtime->get_variable = (void *)__pa(&efi_unimplemented);
+	efi_runtime->get_next_variable = (void *)__pa(&efi_unimplemented);
+	efi_runtime->set_variable = (void *)__pa(&efi_unimplemented);
+	efi_runtime->get_next_high_mono_count = (void *)__pa(&efi_unimplemented);
+	efi_runtime->reset_system = (void *)__pa(&efi_reset_system);
 
 	efi_tables->guid = SAL_SYSTEM_TABLE_GUID;
 	efi_tables->table = __pa(sal_systab);
@@ -339,11 +320,6 @@ sys_fw_init (const char *args, int arglen)
 #ifdef CONFIG_IA64_HP_SIM
 	strcpy(sal_systab->oem_id, "Hewlett-Packard");
 	strcpy(sal_systab->product_id, "HP-simulator");
-#endif
-
-#ifdef CONFIG_IA64_SDV
-	strcpy(sal_systab->oem_id, "Intel");
-	strcpy(sal_systab->product_id, "SDV");
 #endif
 
 	/* fill in an entry point: */

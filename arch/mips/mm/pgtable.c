@@ -1,36 +1,25 @@
-#include <linux/config.h>
-#include <linux/kernel.h>
+/*
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
+ */
+#include <linux/export.h>
 #include <linux/mm.h>
-#include <linux/swap.h>
+#include <linux/string.h>
+#include <asm/pgalloc.h>
 
-void show_mem(void)
+pgd_t *pgd_alloc(struct mm_struct *mm)
 {
-#ifndef CONFIG_DISCONTIGMEM  /* XXX(hch): later.. */
-	int pfn, total = 0, reserved = 0;
-	int shared = 0, cached = 0;
-	int highmem = 0;
-	struct page *page;
+	pgd_t *ret, *init;
 
-	printk("Mem-info:\n");
-	show_free_areas();
-	printk("Free swap:       %6ldkB\n", nr_swap_pages<<(PAGE_SHIFT-10));
-	pfn = max_mapnr;
-	while (pfn-- > 0) {
-		page = pfn_to_page(pfn);
-		total++;
-		if (PageHighMem(page))
-			highmem++;
-		if (PageReserved(page))
-			reserved++;
-		else if (PageSwapCache(page))
-			cached++;
-		else if (page_count(page))
-			shared += page_count(page) - 1;
+	ret = (pgd_t *) __get_free_pages(GFP_KERNEL, PGD_ORDER);
+	if (ret) {
+		init = pgd_offset(&init_mm, 0UL);
+		pgd_init((unsigned long)ret);
+		memcpy(ret + USER_PTRS_PER_PGD, init + USER_PTRS_PER_PGD,
+		       (PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
 	}
-	printk("%d pages of RAM\n", total);
-	printk("%d pages of HIGHMEM\n",highmem);
-	printk("%d reserved pages\n",reserved);
-	printk("%d pages shared\n",shared);
-	printk("%d pages swap cached\n",cached);
-#endif
+
+	return ret;
 }
+EXPORT_SYMBOL_GPL(pgd_alloc);

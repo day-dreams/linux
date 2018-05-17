@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *  Routines for control of 16-bit SoundBlaster cards and clones
  *  Note: This is very ugly hardware which uses one 8-bit DMA channel and
  *        second 16-bit DMA channel. Unfortunately 8-bit DMA channel can't
@@ -33,11 +33,11 @@
  *
  */
 
-#include <sound/driver.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include <asm/dma.h>
 #include <linux/init.h>
 #include <linux/time.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/sb.h>
 #include <sound/sb16_csp.h>
@@ -45,15 +45,15 @@
 #include <sound/control.h>
 #include <sound/info.h>
 
-MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>");
+MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_DESCRIPTION("Routines for control of 16-bit SoundBlaster cards and clones");
 MODULE_LICENSE("GPL");
 
 #ifdef CONFIG_SND_SB16_CSP
-static void snd_sb16_csp_playback_prepare(sb_t *chip, snd_pcm_runtime_t *runtime)
+static void snd_sb16_csp_playback_prepare(struct snd_sb *chip, struct snd_pcm_runtime *runtime)
 {
 	if (chip->hardware == SB_HW_16CSP) {
-		snd_sb_csp_t *csp = chip->csp;
+		struct snd_sb_csp *csp = chip->csp;
 
 		if (csp->running & SNDRV_SB_CSP_ST_LOADED) {
 			/* manually loaded codec */
@@ -98,10 +98,10 @@ static void snd_sb16_csp_playback_prepare(sb_t *chip, snd_pcm_runtime_t *runtime
 	}
 }
 
-static void snd_sb16_csp_capture_prepare(sb_t *chip, snd_pcm_runtime_t *runtime)
+static void snd_sb16_csp_capture_prepare(struct snd_sb *chip, struct snd_pcm_runtime *runtime)
 {
 	if (chip->hardware == SB_HW_16CSP) {
-		snd_sb_csp_t *csp = chip->csp;
+		struct snd_sb_csp *csp = chip->csp;
 
 		if (csp->running & SNDRV_SB_CSP_ST_LOADED) {
 			/* manually loaded codec */
@@ -136,10 +136,10 @@ static void snd_sb16_csp_capture_prepare(sb_t *chip, snd_pcm_runtime_t *runtime)
 	}
 }
 
-static void snd_sb16_csp_update(sb_t *chip)
+static void snd_sb16_csp_update(struct snd_sb *chip)
 {
 	if (chip->hardware == SB_HW_16CSP) {
-		snd_sb_csp_t *csp = chip->csp;
+		struct snd_sb_csp *csp = chip->csp;
 
 		if (csp->qpos_changed) {
 			spin_lock(&chip->reg_lock);
@@ -149,11 +149,11 @@ static void snd_sb16_csp_update(sb_t *chip)
 	}
 }
 
-static void snd_sb16_csp_playback_open(sb_t *chip, snd_pcm_runtime_t *runtime)
+static void snd_sb16_csp_playback_open(struct snd_sb *chip, struct snd_pcm_runtime *runtime)
 {
 	/* CSP decoders (QSound excluded) support only 16bit transfers */
 	if (chip->hardware == SB_HW_16CSP) {
-		snd_sb_csp_t *csp = chip->csp;
+		struct snd_sb_csp *csp = chip->csp;
 
 		if (csp->running & SNDRV_SB_CSP_ST_LOADED) {
 			/* manually loaded codec */
@@ -168,10 +168,10 @@ static void snd_sb16_csp_playback_open(sb_t *chip, snd_pcm_runtime_t *runtime)
 	}
 }
 
-static void snd_sb16_csp_playback_close(sb_t *chip)
+static void snd_sb16_csp_playback_close(struct snd_sb *chip)
 {
 	if ((chip->hardware == SB_HW_16CSP) && (chip->open == SNDRV_SB_CSP_MODE_DSP_WRITE)) {
-		snd_sb_csp_t *csp = chip->csp;
+		struct snd_sb_csp *csp = chip->csp;
 
 		if (csp->ops.csp_stop(csp) == 0) {
 			csp->ops.csp_unuse(csp);
@@ -180,11 +180,11 @@ static void snd_sb16_csp_playback_close(sb_t *chip)
 	}
 }
 
-static void snd_sb16_csp_capture_open(sb_t *chip, snd_pcm_runtime_t *runtime)
+static void snd_sb16_csp_capture_open(struct snd_sb *chip, struct snd_pcm_runtime *runtime)
 {
 	/* CSP coders support only 16bit transfers */
 	if (chip->hardware == SB_HW_16CSP) {
-		snd_sb_csp_t *csp = chip->csp;
+		struct snd_sb_csp *csp = chip->csp;
 
 		if (csp->running & SNDRV_SB_CSP_ST_LOADED) {
 			/* manually loaded codec */
@@ -199,10 +199,10 @@ static void snd_sb16_csp_capture_open(sb_t *chip, snd_pcm_runtime_t *runtime)
 	}
 }
 
-static void snd_sb16_csp_capture_close(sb_t *chip)
+static void snd_sb16_csp_capture_close(struct snd_sb *chip)
 {
 	if ((chip->hardware == SB_HW_16CSP) && (chip->open == SNDRV_SB_CSP_MODE_DSP_READ)) {
-		snd_sb_csp_t *csp = chip->csp;
+		struct snd_sb_csp *csp = chip->csp;
 
 		if (csp->ops.csp_stop(csp) == 0) {
 			csp->ops.csp_unuse(csp);
@@ -221,7 +221,7 @@ static void snd_sb16_csp_capture_close(sb_t *chip)
 #endif
 
 
-static void snd_sb16_setup_rate(sb_t *chip,
+static void snd_sb16_setup_rate(struct snd_sb *chip,
 				unsigned short rate,
 				int channel)
 {
@@ -244,23 +244,23 @@ static void snd_sb16_setup_rate(sb_t *chip,
 	spin_unlock_irqrestore(&chip->reg_lock, flags);
 }
 
-static int snd_sb16_hw_params(snd_pcm_substream_t * substream,
-			      snd_pcm_hw_params_t * hw_params)
+static int snd_sb16_hw_params(struct snd_pcm_substream *substream,
+			      struct snd_pcm_hw_params *hw_params)
 {
 	return snd_pcm_lib_malloc_pages(substream, params_buffer_bytes(hw_params));
 }
 
-static int snd_sb16_hw_free(snd_pcm_substream_t * substream)
+static int snd_sb16_hw_free(struct snd_pcm_substream *substream)
 {
 	snd_pcm_lib_free_pages(substream);
 	return 0;
 }
 
-static int snd_sb16_playback_prepare(snd_pcm_substream_t * substream)
+static int snd_sb16_playback_prepare(struct snd_pcm_substream *substream)
 {
 	unsigned long flags;
-	sb_t *chip = snd_pcm_substream_chip(substream);
-	snd_pcm_runtime_t *runtime = substream->runtime;
+	struct snd_sb *chip = snd_pcm_substream_chip(substream);
+	struct snd_pcm_runtime *runtime = substream->runtime;
 	unsigned char format;
 	unsigned int size, count, dma;
 
@@ -298,19 +298,21 @@ static int snd_sb16_playback_prepare(snd_pcm_substream_t * substream)
 	return 0;
 }
 
-static int snd_sb16_playback_trigger(snd_pcm_substream_t * substream,
+static int snd_sb16_playback_trigger(struct snd_pcm_substream *substream,
 				     int cmd)
 {
-	sb_t *chip = snd_pcm_substream_chip(substream);
+	struct snd_sb *chip = snd_pcm_substream_chip(substream);
 	int result = 0;
 
 	spin_lock(&chip->reg_lock);
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
+	case SNDRV_PCM_TRIGGER_RESUME:
 		chip->mode |= SB_RATE_LOCK_PLAYBACK;
 		snd_sbdsp_command(chip, chip->mode & SB_MODE_PLAYBACK_16 ? SB_DSP_DMA16_ON : SB_DSP_DMA8_ON);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
+	case SNDRV_PCM_TRIGGER_SUSPEND:
 		snd_sbdsp_command(chip, chip->mode & SB_MODE_PLAYBACK_16 ? SB_DSP_DMA16_OFF : SB_DSP_DMA8_OFF);
 		/* next two lines are needed for some types of DSP4 (SB AWE 32 - 4.13) */
 		if (chip->mode & SB_RATE_LOCK_CAPTURE)
@@ -324,11 +326,11 @@ static int snd_sb16_playback_trigger(snd_pcm_substream_t * substream,
 	return result;
 }
 
-static int snd_sb16_capture_prepare(snd_pcm_substream_t * substream)
+static int snd_sb16_capture_prepare(struct snd_pcm_substream *substream)
 {
 	unsigned long flags;
-	sb_t *chip = snd_pcm_substream_chip(substream);
-	snd_pcm_runtime_t *runtime = substream->runtime;
+	struct snd_sb *chip = snd_pcm_substream_chip(substream);
+	struct snd_pcm_runtime *runtime = substream->runtime;
 	unsigned char format;
 	unsigned int size, count, dma;
 
@@ -365,19 +367,21 @@ static int snd_sb16_capture_prepare(snd_pcm_substream_t * substream)
 	return 0;
 }
 
-static int snd_sb16_capture_trigger(snd_pcm_substream_t * substream,
+static int snd_sb16_capture_trigger(struct snd_pcm_substream *substream,
 				    int cmd)
 {
-	sb_t *chip = snd_pcm_substream_chip(substream);
+	struct snd_sb *chip = snd_pcm_substream_chip(substream);
 	int result = 0;
 
 	spin_lock(&chip->reg_lock);
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
+	case SNDRV_PCM_TRIGGER_RESUME:
 		chip->mode |= SB_RATE_LOCK_CAPTURE;
 		snd_sbdsp_command(chip, chip->mode & SB_MODE_CAPTURE_16 ? SB_DSP_DMA16_ON : SB_DSP_DMA8_ON);
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
+	case SNDRV_PCM_TRIGGER_SUSPEND:
 		snd_sbdsp_command(chip, chip->mode & SB_MODE_CAPTURE_16 ? SB_DSP_DMA16_OFF : SB_DSP_DMA8_OFF);
 		/* next two lines are needed for some types of DSP4 (SB AWE 32 - 4.13) */
 		if (chip->mode & SB_RATE_LOCK_PLAYBACK)
@@ -391,9 +395,9 @@ static int snd_sb16_capture_trigger(snd_pcm_substream_t * substream,
 	return result;
 }
 
-irqreturn_t snd_sb16dsp_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t snd_sb16dsp_interrupt(int irq, void *dev_id)
 {
-	sb_t *chip = dev_id;
+	struct snd_sb *chip = dev_id;
 	unsigned char status;
 	int ok;
 
@@ -401,7 +405,7 @@ irqreturn_t snd_sb16dsp_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	status = snd_sbmixer_read(chip, SB_DSP4_IRQSTATUS);
 	spin_unlock(&chip->mixer_lock);
 	if ((status & SB_IRQTYPE_MPUIN) && chip->rmidi_callback)
-		chip->rmidi_callback(irq, chip->rmidi->private_data, regs);
+		chip->rmidi_callback(irq, chip->rmidi->private_data);
 	if (status & SB_IRQTYPE_8BIT) {
 		ok = 0;
 		if (chip->mode & SB_MODE_PLAYBACK_8) {
@@ -443,9 +447,9 @@ irqreturn_t snd_sb16dsp_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
  */
 
-static snd_pcm_uframes_t snd_sb16_playback_pointer(snd_pcm_substream_t * substream)
+static snd_pcm_uframes_t snd_sb16_playback_pointer(struct snd_pcm_substream *substream)
 {
-	sb_t *chip = snd_pcm_substream_chip(substream);
+	struct snd_sb *chip = snd_pcm_substream_chip(substream);
 	unsigned int dma;
 	size_t ptr;
 
@@ -454,9 +458,9 @@ static snd_pcm_uframes_t snd_sb16_playback_pointer(snd_pcm_substream_t * substre
 	return bytes_to_frames(substream->runtime, ptr);
 }
 
-static snd_pcm_uframes_t snd_sb16_capture_pointer(snd_pcm_substream_t * substream)
+static snd_pcm_uframes_t snd_sb16_capture_pointer(struct snd_pcm_substream *substream)
 {
-	sb_t *chip = snd_pcm_substream_chip(substream);
+	struct snd_sb *chip = snd_pcm_substream_chip(substream);
 	unsigned int dma;
 	size_t ptr;
 
@@ -469,7 +473,7 @@ static snd_pcm_uframes_t snd_sb16_capture_pointer(snd_pcm_substream_t * substrea
 
  */
 
-static snd_pcm_hardware_t snd_sb16_playback =
+static const struct snd_pcm_hardware snd_sb16_playback =
 {
 	.info =			(SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED |
 				 SNDRV_PCM_INFO_MMAP_VALID),
@@ -487,7 +491,7 @@ static snd_pcm_hardware_t snd_sb16_playback =
 	.fifo_size =		0,
 };
 
-static snd_pcm_hardware_t snd_sb16_capture =
+static const struct snd_pcm_hardware snd_sb16_capture =
 {
 	.info =			(SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED |
 				 SNDRV_PCM_INFO_MMAP_VALID),
@@ -509,11 +513,11 @@ static snd_pcm_hardware_t snd_sb16_capture =
  *  open/close
  */
 
-static int snd_sb16_playback_open(snd_pcm_substream_t * substream)
+static int snd_sb16_playback_open(struct snd_pcm_substream *substream)
 {
 	unsigned long flags;
-	sb_t *chip = snd_pcm_substream_chip(substream);
-	snd_pcm_runtime_t *runtime = substream->runtime;
+	struct snd_sb *chip = snd_pcm_substream_chip(substream);
+	struct snd_pcm_runtime *runtime = substream->runtime;
 
 	spin_lock_irqsave(&chip->open_lock, flags);
 	if (chip->mode & SB_MODE_PLAYBACK) {
@@ -559,6 +563,11 @@ static int snd_sb16_playback_open(snd_pcm_substream_t * substream)
       __open_ok:
 	if (chip->hardware == SB_HW_ALS100)
 		runtime->hw.rate_max = 48000;
+	if (chip->hardware == SB_HW_CS5530) {
+		runtime->hw.buffer_bytes_max = 32 * 1024;
+		runtime->hw.periods_min = 2;
+		runtime->hw.rate_min = 44100;
+	}
 	if (chip->mode & SB_RATE_LOCK)
 		runtime->hw.rate_min = runtime->hw.rate_max = chip->locked_rate;
 	chip->playback_substream = substream;
@@ -566,10 +575,10 @@ static int snd_sb16_playback_open(snd_pcm_substream_t * substream)
 	return 0;
 }
 
-static int snd_sb16_playback_close(snd_pcm_substream_t * substream)
+static int snd_sb16_playback_close(struct snd_pcm_substream *substream)
 {
 	unsigned long flags;
-	sb_t *chip = snd_pcm_substream_chip(substream);
+	struct snd_sb *chip = snd_pcm_substream_chip(substream);
 
 	snd_sb16_csp_playback_close(chip);
 	spin_lock_irqsave(&chip->open_lock, flags);
@@ -579,11 +588,11 @@ static int snd_sb16_playback_close(snd_pcm_substream_t * substream)
 	return 0;
 }
 
-static int snd_sb16_capture_open(snd_pcm_substream_t * substream)
+static int snd_sb16_capture_open(struct snd_pcm_substream *substream)
 {
 	unsigned long flags;
-	sb_t *chip = snd_pcm_substream_chip(substream);
-	snd_pcm_runtime_t *runtime = substream->runtime;
+	struct snd_sb *chip = snd_pcm_substream_chip(substream);
+	struct snd_pcm_runtime *runtime = substream->runtime;
 
 	spin_lock_irqsave(&chip->open_lock, flags);
 	if (chip->mode & SB_MODE_CAPTURE) {
@@ -629,6 +638,11 @@ static int snd_sb16_capture_open(snd_pcm_substream_t * substream)
       __open_ok:
 	if (chip->hardware == SB_HW_ALS100)
 		runtime->hw.rate_max = 48000;
+	if (chip->hardware == SB_HW_CS5530) {
+		runtime->hw.buffer_bytes_max = 32 * 1024;
+		runtime->hw.periods_min = 2;
+		runtime->hw.rate_min = 44100;
+	}
 	if (chip->mode & SB_RATE_LOCK)
 		runtime->hw.rate_min = runtime->hw.rate_max = chip->locked_rate;
 	chip->capture_substream = substream;
@@ -636,10 +650,10 @@ static int snd_sb16_capture_open(snd_pcm_substream_t * substream)
 	return 0;
 }
 
-static int snd_sb16_capture_close(snd_pcm_substream_t * substream)
+static int snd_sb16_capture_close(struct snd_pcm_substream *substream)
 {
 	unsigned long flags;
-	sb_t *chip = snd_pcm_substream_chip(substream);
+	struct snd_sb *chip = snd_pcm_substream_chip(substream);
 
 	snd_sb16_csp_capture_close(chip);
 	spin_lock_irqsave(&chip->open_lock, flags);
@@ -653,10 +667,11 @@ static int snd_sb16_capture_close(snd_pcm_substream_t * substream)
  *  DMA control interface
  */
 
-static int snd_sb16_set_dma_mode(sb_t *chip, int what)
+static int snd_sb16_set_dma_mode(struct snd_sb *chip, int what)
 {
 	if (chip->dma8 < 0 || chip->dma16 < 0) {
-		snd_assert(what == 0, return -EINVAL);
+		if (snd_BUG_ON(what))
+			return -EINVAL;
 		return 0;
 	}
 	if (what == 0) {
@@ -671,7 +686,7 @@ static int snd_sb16_set_dma_mode(sb_t *chip, int what)
 	return 0;
 }
 
-static int snd_sb16_get_dma_mode(sb_t *chip)
+static int snd_sb16_get_dma_mode(struct snd_sb *chip)
 {
 	if (chip->dma8 < 0 || chip->dma16 < 0)
 		return 0;
@@ -685,24 +700,18 @@ static int snd_sb16_get_dma_mode(sb_t *chip)
 	}
 }
 
-static int snd_sb16_dma_control_info(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t * uinfo)
+static int snd_sb16_dma_control_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo)
 {
-	static char *texts[3] = {
+	static const char * const texts[3] = {
 		"Auto", "Playback", "Capture"
 	};
 
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
-	uinfo->count = 1;
-	uinfo->value.enumerated.items = 3;
-	if (uinfo->value.enumerated.item > 2)
-		uinfo->value.enumerated.item = 2;
-	strcpy(uinfo->value.enumerated.name, texts[uinfo->value.enumerated.item]);
-	return 0;
+	return snd_ctl_enum_info(uinfo, 1, 3, texts);
 }
 
-static int snd_sb16_dma_control_get(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
+static int snd_sb16_dma_control_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	sb_t *chip = snd_kcontrol_chip(kcontrol);
+	struct snd_sb *chip = snd_kcontrol_chip(kcontrol);
 	unsigned long flags;
 	
 	spin_lock_irqsave(&chip->reg_lock, flags);
@@ -711,9 +720,9 @@ static int snd_sb16_dma_control_get(snd_kcontrol_t * kcontrol, snd_ctl_elem_valu
 	return 0;
 }
 
-static int snd_sb16_dma_control_put(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
+static int snd_sb16_dma_control_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	sb_t *chip = snd_kcontrol_chip(kcontrol);
+	struct snd_sb *chip = snd_kcontrol_chip(kcontrol);
 	unsigned long flags;
 	unsigned char nval, oval;
 	int change;
@@ -728,8 +737,8 @@ static int snd_sb16_dma_control_put(snd_kcontrol_t * kcontrol, snd_ctl_elem_valu
 	return change;
 }
 
-static snd_kcontrol_new_t snd_sb16_dma_control = {
-	.iface = SNDRV_CTL_ELEM_IFACE_PCM,
+static const struct snd_kcontrol_new snd_sb16_dma_control = {
+	.iface = SNDRV_CTL_ELEM_IFACE_CARD,
 	.name = "16-bit DMA Allocation",
 	.info = snd_sb16_dma_control_info,
 	.get = snd_sb16_dma_control_get,
@@ -740,14 +749,14 @@ static snd_kcontrol_new_t snd_sb16_dma_control = {
  *  Initialization part
  */
  
-int snd_sb16dsp_configure(sb_t * chip)
+int snd_sb16dsp_configure(struct snd_sb * chip)
 {
 	unsigned long flags;
 	unsigned char irqreg = 0, dmareg = 0, mpureg;
 	unsigned char realirq, realdma, realmpureg;
 	/* note: mpu register should be present only on SB16 Vibra soundcards */
 
-	// printk("codec->irq=%i, codec->dma8=%i, codec->dma16=%i\n", chip->irq, chip->dma8, chip->dma16);
+	// printk(KERN_DEBUG "codec->irq=%i, codec->dma8=%i, codec->dma16=%i\n", chip->irq, chip->dma8, chip->dma16);
 	spin_lock_irqsave(&chip->mixer_lock, flags);
 	mpureg = snd_sbmixer_read(chip, SB_DSP4_MPUSETUP) & ~0x06;
 	spin_unlock_irqrestore(&chip->mixer_lock, flags);
@@ -821,15 +830,15 @@ int snd_sb16dsp_configure(sb_t * chip)
 
 	spin_unlock_irqrestore(&chip->mixer_lock, flags);
 	if ((~realirq) & irqreg || (~realdma) & dmareg) {
-		snd_printk("SB16 [0x%lx]: unable to set DMA & IRQ (PnP device?)\n", chip->port);
-		snd_printk("SB16 [0x%lx]: wanted: irqreg=0x%x, dmareg=0x%x, mpureg = 0x%x\n", chip->port, realirq, realdma, realmpureg);
-		snd_printk("SB16 [0x%lx]:    got: irqreg=0x%x, dmareg=0x%x, mpureg = 0x%x\n", chip->port, irqreg, dmareg, mpureg);
+		snd_printk(KERN_ERR "SB16 [0x%lx]: unable to set DMA & IRQ (PnP device?)\n", chip->port);
+		snd_printk(KERN_ERR "SB16 [0x%lx]: wanted: irqreg=0x%x, dmareg=0x%x, mpureg = 0x%x\n", chip->port, realirq, realdma, realmpureg);
+		snd_printk(KERN_ERR "SB16 [0x%lx]:    got: irqreg=0x%x, dmareg=0x%x, mpureg = 0x%x\n", chip->port, irqreg, dmareg, mpureg);
 		return -ENODEV;
 	}
 	return 0;
 }
 
-static snd_pcm_ops_t snd_sb16_playback_ops = {
+static const struct snd_pcm_ops snd_sb16_playback_ops = {
 	.open =		snd_sb16_playback_open,
 	.close =	snd_sb16_playback_close,
 	.ioctl =	snd_pcm_lib_ioctl,
@@ -840,7 +849,7 @@ static snd_pcm_ops_t snd_sb16_playback_ops = {
 	.pointer =	snd_sb16_playback_pointer,
 };
 
-static snd_pcm_ops_t snd_sb16_capture_ops = {
+static const struct snd_pcm_ops snd_sb16_capture_ops = {
 	.open =		snd_sb16_capture_open,
 	.close =	snd_sb16_capture_close,
 	.ioctl =	snd_pcm_lib_ioctl,
@@ -851,25 +860,18 @@ static snd_pcm_ops_t snd_sb16_capture_ops = {
 	.pointer =	snd_sb16_capture_pointer,
 };
 
-static void snd_sb16dsp_pcm_free(snd_pcm_t *pcm)
+int snd_sb16dsp_pcm(struct snd_sb *chip, int device)
 {
-	snd_pcm_lib_preallocate_free_for_all(pcm);
-}
-
-int snd_sb16dsp_pcm(sb_t * chip, int device, snd_pcm_t ** rpcm)
-{
-	snd_card_t *card = chip->card;
-	snd_pcm_t *pcm;
+	struct snd_card *card = chip->card;
+	struct snd_pcm *pcm;
 	int err;
 
-	if (rpcm)
-		*rpcm = NULL;
 	if ((err = snd_pcm_new(card, "SB16 DSP", device, 1, 1, &pcm)) < 0)
 		return err;
 	sprintf(pcm->name, "DSP v%i.%i", chip->version >> 8, chip->version & 0xff);
 	pcm->info_flags = SNDRV_PCM_INFO_JOINT_DUPLEX;
 	pcm->private_data = chip;
-	pcm->private_free = snd_sb16dsp_pcm_free;
+	chip->pcm = pcm;
 
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_sb16_playback_ops);
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_sb16_capture_ops);
@@ -882,13 +884,10 @@ int snd_sb16dsp_pcm(sb_t * chip, int device, snd_pcm_t ** rpcm)
 	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
 					      snd_dma_isa_data(),
 					      64*1024, 128*1024);
-
-	if (rpcm)
-		*rpcm = pcm;
 	return 0;
 }
 
-const snd_pcm_ops_t *snd_sb16dsp_get_pcm_ops(int direction)
+const struct snd_pcm_ops *snd_sb16dsp_get_pcm_ops(int direction)
 {
 	return direction == SNDRV_PCM_STREAM_PLAYBACK ?
 		&snd_sb16_playback_ops : &snd_sb16_capture_ops;

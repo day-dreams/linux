@@ -10,52 +10,12 @@
  * of the GNU General Public License, incorporated herein by reference.
  *
  */
-
 #ifndef __ISDNIF_H__
 #define __ISDNIF_H__
 
 
-/*
- * Values for general protocol-selection
- */
-#define ISDN_PTYPE_UNKNOWN   0   /* Protocol undefined   */
-#define ISDN_PTYPE_1TR6      1   /* german 1TR6-protocol */
-#define ISDN_PTYPE_EURO      2   /* EDSS1-protocol       */
-#define ISDN_PTYPE_LEASED    3   /* for leased lines     */
-#define ISDN_PTYPE_NI1       4   /* US NI-1 protocol     */
-#define ISDN_PTYPE_MAX       7   /* Max. 8 Protocols     */
-
-/*
- * Values for Layer-2-protocol-selection
- */
-#define ISDN_PROTO_L2_X75I   0   /* X75/LAPB with I-Frames            */
-#define ISDN_PROTO_L2_X75UI  1   /* X75/LAPB with UI-Frames           */
-#define ISDN_PROTO_L2_X75BUI 2   /* X75/LAPB with UI-Frames           */
-#define ISDN_PROTO_L2_HDLC   3   /* HDLC                              */
-#define ISDN_PROTO_L2_TRANS  4   /* Transparent (Voice)               */
-#define ISDN_PROTO_L2_X25DTE 5   /* X25/LAPB DTE mode                 */
-#define ISDN_PROTO_L2_X25DCE 6   /* X25/LAPB DCE mode                 */
-#define ISDN_PROTO_L2_V11096 7   /* V.110 bitrate adaption 9600 Baud  */
-#define ISDN_PROTO_L2_V11019 8   /* V.110 bitrate adaption 19200 Baud */
-#define ISDN_PROTO_L2_V11038 9   /* V.110 bitrate adaption 38400 Baud */
-#define ISDN_PROTO_L2_MODEM  10  /* Analog Modem on Board */
-#define ISDN_PROTO_L2_FAX    11  /* Fax Group 2/3         */
-#define ISDN_PROTO_L2_HDLC_56K 12   /* HDLC 56k                          */
-#define ISDN_PROTO_L2_MAX    15  /* Max. 16 Protocols                 */
-
-/*
- * Values for Layer-3-protocol-selection
- */
-#define ISDN_PROTO_L3_TRANS	0	/* Transparent */
-#define ISDN_PROTO_L3_TRANSDSP	1	/* Transparent with DSP */
-#define ISDN_PROTO_L3_FCLASS2	2	/* Fax Group 2/3 CLASS 2 */
-#define ISDN_PROTO_L3_FCLASS1	3	/* Fax Group 2/3 CLASS 1 */
-#define ISDN_PROTO_L3_MAX	7	/* Max. 8 Protocols */
-
-#ifdef __KERNEL__
-
-#include <linux/config.h>
 #include <linux/skbuff.h>
+#include <uapi/linux/isdnif.h>
 
 /***************************************************************************/
 /* Extensions made by Werner Cornelius (werner@ikt.de)                     */
@@ -282,43 +242,43 @@ typedef struct setup_parm {
 
 typedef struct T30_s {
 	/* session parameters */
-	__u8 resolution		__attribute__ ((packed));
-	__u8 rate		__attribute__ ((packed));
-	__u8 width		__attribute__ ((packed));
-	__u8 length		__attribute__ ((packed));
-	__u8 compression	__attribute__ ((packed));
-	__u8 ecm		__attribute__ ((packed));
-	__u8 binary		__attribute__ ((packed));
-	__u8 scantime		__attribute__ ((packed));
-	__u8 id[FAXIDLEN]	__attribute__ ((packed));
+	__u8 resolution;
+	__u8 rate;
+	__u8 width;
+	__u8 length;
+	__u8 compression;
+	__u8 ecm;
+	__u8 binary;
+	__u8 scantime;
+	__u8 id[FAXIDLEN];
 	/* additional parameters */
-	__u8 phase		__attribute__ ((packed));
-	__u8 direction		__attribute__ ((packed));
-	__u8 code		__attribute__ ((packed));
-	__u8 badlin		__attribute__ ((packed));
-	__u8 badmul		__attribute__ ((packed));
-	__u8 bor		__attribute__ ((packed));
-	__u8 fet		__attribute__ ((packed));
-	__u8 pollid[FAXIDLEN]	__attribute__ ((packed));
-	__u8 cq			__attribute__ ((packed));
-	__u8 cr			__attribute__ ((packed));
-	__u8 ctcrty		__attribute__ ((packed));
-	__u8 minsp		__attribute__ ((packed));
-	__u8 phcto		__attribute__ ((packed));
-	__u8 rel		__attribute__ ((packed));
-	__u8 nbc		__attribute__ ((packed));
+	__u8 phase;
+	__u8 direction;
+	__u8 code;
+	__u8 badlin;
+	__u8 badmul;
+	__u8 bor;
+	__u8 fet;
+	__u8 pollid[FAXIDLEN];
+	__u8 cq;
+	__u8 cr;
+	__u8 ctcrty;
+	__u8 minsp;
+	__u8 phcto;
+	__u8 rel;
+	__u8 nbc;
 	/* remote station parameters */
-	__u8 r_resolution	__attribute__ ((packed));
-	__u8 r_rate		__attribute__ ((packed));
-	__u8 r_width		__attribute__ ((packed));
-	__u8 r_length		__attribute__ ((packed));
-	__u8 r_compression	__attribute__ ((packed));
-	__u8 r_ecm		__attribute__ ((packed));
-	__u8 r_binary		__attribute__ ((packed));
-	__u8 r_scantime		__attribute__ ((packed));
-	__u8 r_id[FAXIDLEN]	__attribute__ ((packed));
-	__u8 r_code		__attribute__ ((packed));
-} T30_s;
+	__u8 r_resolution;
+	__u8 r_rate;
+	__u8 r_width;
+	__u8 r_length;
+	__u8 r_compression;
+	__u8 r_ecm;
+	__u8 r_binary;
+	__u8 r_scantime;
+	__u8 r_id[FAXIDLEN];
+	__u8 r_code;
+} __packed T30_s;
 
 #define ISDN_TTY_FAX_CONN_IN	0
 #define ISDN_TTY_FAX_CONN_OUT	1
@@ -540,8 +500,6 @@ typedef struct {
  *
  */
 extern int register_isdn(isdn_if*);
-#include <asm/uaccess.h>
-
-#endif /* __KERNEL__ */
+#include <linux/uaccess.h>
 
 #endif /* __ISDNIF_H__ */

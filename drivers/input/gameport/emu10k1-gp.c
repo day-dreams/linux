@@ -1,6 +1,4 @@
 /*
- * $Id: emu10k1-gp.c,v 1.8 2002/01/22 20:40:46 vojtech Exp $
- *
  *  Copyright (c) 2001 Vojtech Pavlik
  */
 
@@ -32,8 +30,6 @@
 
 #include <linux/module.h>
 #include <linux/ioport.h>
-#include <linux/config.h>
-#include <linux/init.h>
 #include <linux/gameport.h>
 #include <linux/slab.h>
 #include <linux/pci.h>
@@ -44,13 +40,13 @@ MODULE_LICENSE("GPL");
 
 struct emu {
 	struct pci_dev *dev;
-	struct gameport gameport;
+	struct gameport *gameport;
+	int io;
 	int size;
-	char phys[32];
 };
 
-static struct pci_device_id emu_tbl[] = {
- 
+static const struct pci_device_id emu_tbl[] = {
+
 	{ 0x1102, 0x7002, PCI_ANY_ID, PCI_ANY_ID }, /* SB Live gameport */
 	{ 0x1102, 0x7003, PCI_ANY_ID, PCI_ANY_ID }, /* Audigy gameport */
 	{ 0x1102, 0x7004, PCI_ANY_ID, PCI_ANY_ID }, /* Dell SB Live */
@@ -60,73 +56,72 @@ static struct pci_device_id emu_tbl[] = {
 
 MODULE_DEVICE_TABLE(pci, emu_tbl);
 
-static int __devinit emu_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+static int emu_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
-	int ioport, iolen;
 	struct emu *emu;
+	struct gameport *port;
+	int error;
 
-	if (pci_enable_device(pdev))
-		return -EBUSY;
-
-	ioport = pci_resource_start(pdev, 0);
-	iolen = pci_resource_len(pdev, 0);
-
-	if (!request_region(ioport, iolen, "emu10k1-gp"))
-		return -EBUSY;
-
-	if (!(emu = kmalloc(sizeof(struct emu), GFP_KERNEL))) {
-		printk(KERN_ERR "emu10k1-gp: Memory allocation failed.\n");
-		release_region(ioport, iolen);
-		return -ENOMEM;
+	emu = kzalloc(sizeof(struct emu), GFP_KERNEL);
+	port = gameport_allocate_port();
+	if (!emu || !port) {
+		printk(KERN_ERR "emu10k1-gp: Memory allocation failed\n");
+		error = -ENOMEM;
+		goto err_out_free;
 	}
-	memset(emu, 0, sizeof(struct emu));
 
-	sprintf(emu->phys, "pci%s/gameport0", pci_name(pdev));
+	error = pci_enable_device(pdev);
+	if (error)
+		goto err_out_free;
 
-	emu->size = iolen;
+	emu->io = pci_resource_start(pdev, 0);
+	emu->size = pci_resource_len(pdev, 0);
+
 	emu->dev = pdev;
+	emu->gameport = port;
 
-	emu->gameport.io = ioport;
-	emu->gameport.name = pci_name(pdev);
-	emu->gameport.phys = emu->phys;
-	emu->gameport.id.bustype = BUS_PCI;
-	emu->gameport.id.vendor = pdev->vendor;
-	emu->gameport.id.product = pdev->device;
+	gameport_set_name(port, "EMU10K1");
+	gameport_set_phys(port, "pci%s/gameport0", pci_name(pdev));
+	port->dev.parent = &pdev->dev;
+	port->io = emu->io;
+
+	if (!request_region(emu->io, emu->size, "emu10k1-gp")) {
+		printk(KERN_ERR "emu10k1-gp: unable to grab region 0x%x-0x%x\n",
+			emu->io, emu->io + emu->size - 1);
+		error = -EBUSY;
+		goto err_out_disable_dev;
+	}
 
 	pci_set_drvdata(pdev, emu);
 
-	gameport_register_port(&emu->gameport);
-
-	printk(KERN_INFO "gameport: pci%s speed %d kHz\n",
-		pci_name(pdev), emu->gameport.speed);
+	gameport_register_port(port);
 
 	return 0;
+
+ err_out_disable_dev:
+	pci_disable_device(pdev);
+ err_out_free:
+	gameport_free_port(port);
+	kfree(emu);
+	return error;
 }
 
-static void __devexit emu_remove(struct pci_dev *pdev)
+static void emu_remove(struct pci_dev *pdev)
 {
 	struct emu *emu = pci_get_drvdata(pdev);
-	gameport_unregister_port(&emu->gameport);
-	release_region(emu->gameport.io, emu->size);
+
+	gameport_unregister_port(emu->gameport);
+	release_region(emu->io, emu->size);
 	kfree(emu);
+
+	pci_disable_device(pdev);
 }
 
 static struct pci_driver emu_driver = {
         .name =         "Emu10k1_gameport",
         .id_table =     emu_tbl,
         .probe =        emu_probe,
-        .remove =       __devexit_p(emu_remove),
+	.remove =	emu_remove,
 };
 
-int __init emu_init(void)
-{
-	return pci_module_init(&emu_driver);
-}
-
-void __exit emu_exit(void)
-{
-	pci_unregister_driver(&emu_driver);
-}
-
-module_init(emu_init);
-module_exit(emu_exit);
+module_pci_driver(emu_driver);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/m68k/mm/kmap.c
  *
@@ -7,7 +8,7 @@
  *	     used by other architectures		/Roman Zippel
  */
 
-#include <linux/config.h>
+#include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -20,7 +21,6 @@
 #include <asm/page.h>
 #include <asm/pgalloc.h>
 #include <asm/io.h>
-#include <asm/system.h>
 
 #undef DEBUG
 
@@ -28,9 +28,9 @@
 
 /*
  * For 040/060 we can use the virtual memory area like other architectures,
- * but for 020/030 we want to use early termination page descriptor and we
+ * but for 020/030 we want to use early termination page descriptors and we
  * can't mix this with normal page descriptors, so we have to copy that code
- * (mm/vmalloc.c) and return appriorate aligned addresses.
+ * (mm/vmalloc.c) and return appropriately aligned addresses.
  */
 
 #ifdef CPU_M68040_OR_M68060_ONLY
@@ -59,15 +59,17 @@ static struct vm_struct *get_io_area(unsigned long size)
 	unsigned long addr;
 	struct vm_struct **p, *tmp, *area;
 
-	area = (struct vm_struct *)kmalloc(sizeof(*area), GFP_KERNEL);
+	area = kmalloc(sizeof(*area), GFP_KERNEL);
 	if (!area)
 		return NULL;
 	addr = KMAP_START;
 	for (p = &iolist; (tmp = *p) ; p = &tmp->next) {
 		if (size + addr < (unsigned long)tmp->addr)
 			break;
-		if (addr > KMAP_END-size)
+		if (addr > KMAP_END-size) {
+			kfree(area);
 			return NULL;
+		}
 		addr = tmp->size + (unsigned long)tmp->addr;
 	}
 	area->addr = (void *)addr;
@@ -97,12 +99,11 @@ static inline void free_io_area(void *addr)
 #endif
 
 /*
- * Map some physical address range into the kernel address space. The
- * code is copied and adapted from map_chunk().
+ * Map some physical address range into the kernel address space.
  */
 /* Rewritten by Andreas Schwab to remove all races. */
 
-void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
+void __iomem *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 {
 	struct vm_struct *area;
 	unsigned long virtaddr, retaddr;
@@ -114,14 +115,14 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 	/*
 	 * Don't allow mappings that wrap..
 	 */
-	if (!size || size > physaddr + size)
+	if (!size || physaddr > (unsigned long)(-size))
 		return NULL;
 
 #ifdef CONFIG_AMIGA
 	if (MACH_IS_AMIGA) {
 		if ((physaddr >= 0x40000000) && (physaddr + size < 0x60000000)
 		    && (cacheflag == IOMAP_NOCACHE_SER))
-			return (void *)physaddr;
+			return (void __iomem *)physaddr;
 	}
 #endif
 
@@ -170,7 +171,8 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 			break;
 		}
 	} else {
-		physaddr |= (_PAGE_PRESENT | _PAGE_ACCESSED | _PAGE_DIRTY);
+		physaddr |= (_PAGE_PRESENT | _PAGE_ACCESSED |
+			     _PAGE_DIRTY | _PAGE_READWRITE);
 		switch (cacheflag) {
 		case IOMAP_NOCACHE_SER:
 		case IOMAP_NOCACHE_NONSER:
@@ -201,7 +203,7 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 			virtaddr += PTRTREESIZE;
 			size -= PTRTREESIZE;
 		} else {
-			pte_dir = pte_alloc_kernel(&init_mm, pmd_dir, virtaddr);
+			pte_dir = pte_alloc_kernel(pmd_dir, virtaddr);
 			if (!pte_dir) {
 				printk("ioremap: no mem for pte_dir\n");
 				return NULL;
@@ -218,28 +220,30 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 #endif
 	flush_tlb_all();
 
-	return (void *)retaddr;
+	return (void __iomem *)retaddr;
 }
+EXPORT_SYMBOL(__ioremap);
 
 /*
- * Unmap a ioremap()ed region again
+ * Unmap an ioremap()ed region again
  */
-void iounmap(void *addr)
+void iounmap(void __iomem *addr)
 {
 #ifdef CONFIG_AMIGA
 	if ((!MACH_IS_AMIGA) ||
 	    (((unsigned long)addr < 0x40000000) ||
 	     ((unsigned long)addr > 0x60000000)))
-			free_io_area(addr);
+			free_io_area((__force void *)addr);
 #else
-	free_io_area(addr);
+	free_io_area((__force void *)addr);
 #endif
 }
+EXPORT_SYMBOL(iounmap);
 
 /*
  * __iounmap unmaps nearly everything, so be careful
- * it doesn't free currently pointer/page tables anymore but it
- * wans't used anyway and might be added later.
+ * Currently it doesn't free pointer/page tables anymore but this
+ * wasn't used anyway and might be added later.
  */
 void __iounmap(void *addr, unsigned long size)
 {
@@ -259,13 +263,15 @@ void __iounmap(void *addr, unsigned long size)
 
 		if (CPU_IS_020_OR_030) {
 			int pmd_off = (virtaddr/PTRTREESIZE) & 15;
+			int pmd_type = pmd_dir->pmd[pmd_off] & _DESCTYPE_MASK;
 
-			if ((pmd_dir->pmd[pmd_off] & _DESCTYPE_MASK) == _PAGE_PRESENT) {
+			if (pmd_type == _PAGE_PRESENT) {
 				pmd_dir->pmd[pmd_off] = 0;
 				virtaddr += PTRTREESIZE;
 				size -= PTRTREESIZE;
 				continue;
-			}
+			} else if (pmd_type == 0)
+				continue;
 		}
 
 		if (pmd_bad(*pmd_dir)) {
@@ -359,3 +365,4 @@ void kernel_set_cachemode(void *addr, unsigned long size, int cmode)
 
 	flush_tlb_all();
 }
+EXPORT_SYMBOL(kernel_set_cachemode);

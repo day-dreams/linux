@@ -2,9 +2,12 @@
 # Old ISDN4Linux config
 #
 
+if ISDN_I4L
+
 config ISDN_PPP
 	bool "Support synchronous PPP"
 	depends on INET
+	select SLHC
 	help
 	  Over digital connections such as ISDN, there is no need to
 	  synchronize sender and recipient's clocks with start and stop bits
@@ -85,7 +88,6 @@ config ISDN_X25
 
 
 menu "ISDN feature submodules"
-	depends on ISDN
 
 config ISDN_DRV_LOOP
 	tristate "isdnloop support"
@@ -99,7 +101,6 @@ config ISDN_DRV_LOOP
 
 config ISDN_DIVERSION
 	tristate "Support isdn diversion services"
-	depends on ISDN && ISDN_I4L
 	help
 	  This option allows you to use some supplementary diversion
 	  services in conjunction with the HiSax driver on an EURO/DSS1
@@ -119,25 +120,9 @@ config ISDN_DIVERSION
 endmenu
 
 comment "ISDN4Linux hardware drivers"
-	depends on NET && ISDN && ISDN_I4L
 
 source "drivers/isdn/hisax/Kconfig"
 
-
-menu "Active cards"
-	depends on NET && ISDN && ISDN_I4L!=n
-
-source "drivers/isdn/icn/Kconfig"
-
-source "drivers/isdn/pcbit/Kconfig"
-
-source "drivers/isdn/sc/Kconfig"
-
-source "drivers/isdn/act2000/Kconfig"
-
-source "drivers/isdn/tpam/Kconfig"
-
-source "drivers/isdn/hysdn/Kconfig"
-
-endmenu
+# end ISDN_I4L
+endif
 

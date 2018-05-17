@@ -22,20 +22,16 @@
  *
  * Lasat specific setup.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/interrupt.h>
 #include <linux/tty.h>
-#include <linux/serial.h>
-#include <linux/serial_core.h>
 
 #include <asm/time.h>
 #include <asm/cpu.h>
 #include <asm/bootinfo.h>
 #include <asm/irq.h>
-#include <asm/serial.h>
 #include <asm/lasat/lasat.h>
 #include <asm/lasat/serial.h>
 
@@ -50,7 +46,7 @@
 
 #include "prom.h"
 
-int lasat_command_line = 0;
+int lasat_command_line;
 void lasatint_init(void);
 
 extern void lasat_reboot_setup(void);
@@ -59,11 +55,16 @@ extern void edhac_init(void *, void *, void *);
 extern void addrflt_init(void);
 
 struct lasat_misc lasat_misc_info[N_MACHTYPES] = {
-	{(void *)KSEG1ADDR(0x1c840000), (void *)KSEG1ADDR(0x1c800000), 2},
-	{(void *)KSEG1ADDR(0x11080000), (void *)KSEG1ADDR(0x11000000), 6}
+	{
+		.reset_reg	= (void *)KSEG1ADDR(0x1c840000),
+		.flash_wp_reg	= (void *)KSEG1ADDR(0x1c800000), 2
+	}, {
+		.reset_reg	= (void *)KSEG1ADDR(0x11080000),
+		.flash_wp_reg	= (void *)KSEG1ADDR(0x11000000), 6
+	}
 };
 
-struct lasat_misc *lasat_misc = NULL;
+struct lasat_misc *lasat_misc;
 
 #ifdef CONFIG_DS1603
 static struct ds_defs ds_defs[N_MACHTYPES] = {
@@ -105,88 +106,48 @@ static int lasat_panic_prom_monitor(struct notifier_block *this,
 	return NOTIFY_DONE;
 }
 
-static struct notifier_block lasat_panic_block[] = 
+static struct notifier_block lasat_panic_block[] =
 {
-	{ lasat_panic_display, NULL, INT_MAX },
-	{ lasat_panic_prom_monitor, NULL, INT_MIN }
+	{
+		.notifier_call	= lasat_panic_display,
+		.priority	= INT_MAX
+	}, {
+		.notifier_call	= lasat_panic_prom_monitor,
+		.priority	= INT_MIN
+	}
 };
 
-static void lasat_time_init(void)
+void __init plat_time_init(void)
 {
 	mips_hpt_frequency = lasat_board_info.li_cpu_hz / 2;
+
+	change_c0_status(ST0_IM, IE_IRQ0);
 }
 
-static void lasat_timer_setup(struct irqaction *irq)
-{
-
-	write_c0_compare(
-		read_c0_count() + 
-		mips_hpt_frequency / HZ);
-	change_c0_status(ST0_IM, IE_IRQ0 | IE_IRQ5);
-}
-
-#define DYNAMIC_SERIAL_INIT
-#ifdef DYNAMIC_SERIAL_INIT
-void __init serial_init(void)
-{
-#ifdef CONFIG_SERIAL_8250
-	struct uart_port s;
-
-	memset(&s, 0, sizeof(s));
-
-	s.flags = STD_COM_FLAGS;
-	s.iotype = SERIAL_IO_MEM;
-
-	if (mips_machtype == MACH_LASAT_100) {
-		s.uartclk = LASAT_BASE_BAUD_100 * 16;
-		s.irq = LASATINT_UART_100;
-		s.regshift = LASAT_UART_REGS_SHIFT_100;
-		s.membase = (char *)KSEG1ADDR(LASAT_UART_REGS_BASE_100);
-	} else {
-		s.uartclk = LASAT_BASE_BAUD_200 * 16;
-		s.irq = LASATINT_UART_200;
-		s.regshift = LASAT_UART_REGS_SHIFT_200;
-		s.membase = (char *)KSEG1ADDR(LASAT_UART_REGS_BASE_200);
-	}
-
-	if (early_serial_setup(&s) != 0)
-		printk(KERN_ERR "Serial setup failed!\n");
-#endif
-}
-#endif
-
-static int __init lasat_setup(void)
+void __init plat_mem_setup(void)
 {
 	int i;
-	lasat_misc  = &lasat_misc_info[mips_machtype];
+	int lasat_type = IS_LASAT_200() ? 1 : 0;
+
+	lasat_misc  = &lasat_misc_info[lasat_type];
 #ifdef CONFIG_PICVUE
-	picvue = &pvc_defs[mips_machtype];
+	picvue = &pvc_defs[lasat_type];
 #endif
 
 	/* Set up panic notifier */
-	for (i = 0; i < sizeof(lasat_panic_block) / sizeof(struct notifier_block); i++)
-		notifier_chain_register(&panic_notifier_list, &lasat_panic_block[i]);
+	for (i = 0; i < ARRAY_SIZE(lasat_panic_block); i++)
+		atomic_notifier_chain_register(&panic_notifier_list,
+				&lasat_panic_block[i]);
 
 	lasat_reboot_setup();
 
-	board_time_init = lasat_time_init;
-	board_timer_setup = lasat_timer_setup;
-
 #ifdef CONFIG_DS1603
-	ds1603 = &ds_defs[mips_machtype];
-	rtc_get_time = ds1603_read;
-	rtc_set_time = ds1603_set;
+	ds1603 = &ds_defs[lasat_type];
 #endif
 
 #ifdef DYNAMIC_SERIAL_INIT
 	serial_init();
 #endif
-	/* Switch from prom exception handler to normal mode */
-	change_c0_status(ST0_BEV,0);
 
-	prom_printf("Lasat specific initialization complete\n");
-
-        return 0;
+	pr_info("Lasat specific initialization complete\n");
 }
-
-early_initcall(lasat_setup);

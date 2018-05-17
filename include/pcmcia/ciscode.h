@@ -1,5 +1,5 @@
 /*
- * ciscode.h -- Definitions for bulk memory services
+ * ciscode.h
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -95,6 +95,7 @@
 #define PRODID_QUATECH_DUAL_RS232	0x0012
 #define PRODID_QUATECH_DUAL_RS232_D1	0x0007
 #define PRODID_QUATECH_DUAL_RS232_D2	0x0052
+#define PRODID_QUATECH_DUAL_RS232_G	0x004d
 #define PRODID_QUATECH_QUAD_RS232	0x001b
 #define PRODID_QUATECH_DUAL_RS422	0x000e
 #define PRODID_QUATECH_QUAD_RS422	0x0045
@@ -112,12 +113,19 @@
 
 #define MANFID_TDK			0x0105
 #define PRODID_TDK_CF010		0x0900
+#define PRODID_TDK_NP9610		0x0d0a
+#define PRODID_TDK_MN3200		0x0e0a
 #define PRODID_TDK_GN3410		0x4815
 
 #define MANFID_TOSHIBA			0x0098
 
-#define MANFID_UNGERMANN 0x02c0
+#define MANFID_UNGERMANN		0x02c0
 
 #define MANFID_XIRCOM			0x0105
+
+#define MANFID_POSSIO			0x030c
+#define PRODID_POSSIO_GCC		0x0003
+
+#define MANFID_NEC			0x0010
 
 #endif /* _LINUX_CISCODE_H */

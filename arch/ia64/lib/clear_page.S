@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 1999-2002 Hewlett-Packard Co
  *	Stephane Eranian <eranian@hpl.hp.com>
@@ -8,10 +9,10 @@
  * 2/12/02 kchen	Tuned for both Itanium and McKinley
  * 3/08/02 davidm	Some more tweaking
  */
-#include <linux/config.h>
 
 #include <asm/asmmacro.h>
 #include <asm/page.h>
+#include <asm/export.h>
 
 #ifdef CONFIG_ITANIUM
 # define L3_LINE_SIZE	64	// Itanium L3 line size
@@ -75,3 +76,4 @@ GLOBAL_ENTRY(clear_page)
 	mov ar.lc = saved_lc		// restore lc
 	br.ret.sptk.many rp
 END(clear_page)
+EXPORT_SYMBOL(clear_page)

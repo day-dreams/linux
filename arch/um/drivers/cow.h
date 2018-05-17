@@ -1,17 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __COW_H__
 #define __COW_H__
 
 #include <asm/types.h>
-
-#if __BYTE_ORDER == __BIG_ENDIAN
-# define ntohll(x) (x)
-# define htonll(x) (x)
-#elif __BYTE_ORDER == __LITTLE_ENDIAN
-# define ntohll(x)  bswap_64(x)
-# define htonll(x)  bswap_64(x)
-#else
-#error "__BYTE_ORDER not defined"
-#endif
 
 extern int init_cow_file(int fd, char *cow_file, char *backing_file,
 			 int sectorsize, int alignment, int *bitmap_offset_out,

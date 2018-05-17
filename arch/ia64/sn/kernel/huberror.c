@@ -3,12 +3,11 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1992 - 1997, 2000,2002-2004 Silicon Graphics, Inc. All rights reserved.
+ * Copyright (C) 1992 - 1997, 2000,2002-2007 Silicon Graphics, Inc. All rights reserved.
  */
 
 #include <linux/types.h>
 #include <linux/interrupt.h>
-#include <linux/pci.h>
 #include <asm/delay.h>
 #include <asm/sn/sn_sal.h>
 #include "ioerror.h"
@@ -22,7 +21,7 @@
 void hubiio_crb_error_handler(struct hubdev_info *hubdev_info);
 extern void bte_crb_error_handler(cnodeid_t, int, int, ioerror_t *,
 				  int);
-static irqreturn_t hub_eint_handler(int irq, void *arg, struct pt_regs *ep)
+static irqreturn_t hub_eint_handler(int irq, void *arg)
 {
 	struct hubdev_info *hubdev_info;
 	struct ia64_sal_retval ret_stuff;
@@ -32,14 +31,26 @@ static irqreturn_t hub_eint_handler(int irq, void *arg, struct pt_regs *ep)
 	ret_stuff.v0 = 0;
 	hubdev_info = (struct hubdev_info *)arg;
 	nasid = hubdev_info->hdi_nasid;
-	SAL_CALL_NOLOCK(ret_stuff, SN_SAL_HUB_ERROR_INTERRUPT,
+
+	if (is_shub1()) {
+		SAL_CALL_NOLOCK(ret_stuff, SN_SAL_HUB_ERROR_INTERRUPT,
 			(u64) nasid, 0, 0, 0, 0, 0, 0);
 
-	if ((int)ret_stuff.v0)
-		panic("hubii_eint_handler(): Fatal TIO Error");
+		if ((int)ret_stuff.v0)
+			panic("%s: Fatal %s Error", __func__,
+				((nasid & 1) ? "TIO" : "HUBII"));
 
-	if (!(nasid & 1)) /* Not a TIO, handle CRB errors */
-		(void)hubiio_crb_error_handler(hubdev_info);
+		if (!(nasid & 1)) /* Not a TIO, handle CRB errors */
+			(void)hubiio_crb_error_handler(hubdev_info);
+	} else
+		if (nasid & 1) {	/* TIO errors */
+			SAL_CALL_NOLOCK(ret_stuff, SN_SAL_HUB_ERROR_INTERRUPT,
+				(u64) nasid, 0, 0, 0, 0, 0, 0);
+
+			if ((int)ret_stuff.v0)
+				panic("%s: Fatal TIO Error", __func__);
+		} else
+			bte_error_handler(NODEPDA(nasid_to_cnodeid(nasid)));
 
 	return IRQ_HANDLED;
 }
@@ -73,7 +84,7 @@ void hubiio_crb_free(struct hubdev_info *hubdev_info, int crbnum)
 	 */
 	REMOTE_HUB_S(hubdev_info->hdi_nasid, IIO_ICDR, (IIO_ICDR_PND | crbnum));
 	while (REMOTE_HUB_L(hubdev_info->hdi_nasid, IIO_ICDR) & IIO_ICDR_PND)
-		udelay(1);
+		cpu_relax();
 
 }
 
@@ -174,11 +185,15 @@ void hubiio_crb_error_handler(struct hubdev_info *hubdev_info)
  */
 void hub_error_init(struct hubdev_info *hubdev_info)
 {
-	if (request_irq(SGI_II_ERROR, (void *)hub_eint_handler, SA_SHIRQ,
-			"SN_hub_error", (void *)hubdev_info))
-		printk("hub_error_init: Failed to request_irq for 0x%p\n",
+
+	if (request_irq(SGI_II_ERROR, hub_eint_handler, IRQF_SHARED,
+			"SN_hub_error", hubdev_info)) {
+		printk(KERN_ERR "hub_error_init: Failed to request_irq for 0x%p\n",
 		    hubdev_info);
-	return;
+		return;
+	}
+	irq_set_handler(SGI_II_ERROR, handle_level_irq);
+	sn_set_err_irq_affinity(SGI_II_ERROR);
 }
 
 
@@ -191,11 +206,15 @@ void hub_error_init(struct hubdev_info *hubdev_info)
  */
 void ice_error_init(struct hubdev_info *hubdev_info)
 {
+
         if (request_irq
-            (SGI_TIO_ERROR, (void *)hub_eint_handler, SA_SHIRQ, "SN_TIO_error",
-             (void *)hubdev_info))
+            (SGI_TIO_ERROR, (void *)hub_eint_handler, IRQF_SHARED, "SN_TIO_error",
+             (void *)hubdev_info)) {
                 printk("ice_error_init: request_irq() error hubdev_info 0x%p\n",
                        hubdev_info);
-        return;
+		return;
+	}
+	irq_set_handler(SGI_TIO_ERROR, handle_level_irq);
+	sn_set_err_irq_affinity(SGI_TIO_ERROR);
 }
 

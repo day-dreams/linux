@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 # Makefile for the CAPI subsystem.
 
 # Ordering constraints: kernelcapi.o first
@@ -7,7 +8,6 @@
 obj-$(CONFIG_ISDN_CAPI)			+= kernelcapi.o
 obj-$(CONFIG_ISDN_CAPI_CAPI20)		+= capi.o 
 obj-$(CONFIG_ISDN_CAPI_CAPIDRV)		+= capidrv.o
-obj-$(CONFIG_ISDN_CAPI_CAPIFS)		+= capifs.o
 
 # Multipart objects.
 

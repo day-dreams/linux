@@ -1,13 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _I8042_SPARCIO_H
 #define _I8042_SPARCIO_H
 
-#include <linux/config.h>
-#include <asm/io.h>
+#include <linux/of_device.h>
 
-#ifdef CONFIG_PCI
+#include <asm/io.h>
 #include <asm/oplib.h>
-#include <asm/ebus.h>
-#endif
+#include <asm/prom.h>
 
 static int i8042_kbd_irq = -1;
 static int i8042_aux_irq = -1;
@@ -43,74 +42,117 @@ static inline void i8042_write_command(int val)
 	writeb(val, kbd_iobase + 0x64UL);
 }
 
+#ifdef CONFIG_PCI
+
+static struct resource *kbd_res;
+
 #define OBP_PS2KBD_NAME1	"kb_ps2"
 #define OBP_PS2KBD_NAME2	"keyboard"
 #define OBP_PS2MS_NAME1		"kdmouse"
 #define OBP_PS2MS_NAME2		"mouse"
 
-static int i8042_platform_init(void)
+static int sparc_i8042_probe(struct platform_device *op)
 {
-#ifndef CONFIG_PCI
-	return -1;
-#else
-	char prop[128];
-	int len;
+	struct device_node *dp = op->dev.of_node;
 
-	len = prom_getproperty(prom_root_node, "name", prop, sizeof(prop));
-	if (len < 0) {
-		printk("i8042: Cannot get name property of root OBP node.\n");
-		return -1;
+	dp = dp->child;
+	while (dp) {
+		if (!strcmp(dp->name, OBP_PS2KBD_NAME1) ||
+		    !strcmp(dp->name, OBP_PS2KBD_NAME2)) {
+			struct platform_device *kbd = of_find_device_by_node(dp);
+			unsigned int irq = kbd->archdata.irqs[0];
+			if (irq == 0xffffffff)
+				irq = op->archdata.irqs[0];
+			i8042_kbd_irq = irq;
+			kbd_iobase = of_ioremap(&kbd->resource[0],
+						0, 8, "kbd");
+			kbd_res = &kbd->resource[0];
+		} else if (!strcmp(dp->name, OBP_PS2MS_NAME1) ||
+			   !strcmp(dp->name, OBP_PS2MS_NAME2)) {
+			struct platform_device *ms = of_find_device_by_node(dp);
+			unsigned int irq = ms->archdata.irqs[0];
+			if (irq == 0xffffffff)
+				irq = op->archdata.irqs[0];
+			i8042_aux_irq = irq;
+		}
+
+		dp = dp->sibling;
 	}
-	if (strncmp(prop, "SUNW,JavaStation-1", len) == 0) {
+
+	return 0;
+}
+
+static int sparc_i8042_remove(struct platform_device *op)
+{
+	of_iounmap(kbd_res, kbd_iobase, 8);
+
+	return 0;
+}
+
+static const struct of_device_id sparc_i8042_match[] = {
+	{
+		.name = "8042",
+	},
+	{},
+};
+MODULE_DEVICE_TABLE(of, sparc_i8042_match);
+
+static struct platform_driver sparc_i8042_driver = {
+	.driver = {
+		.name = "i8042",
+		.of_match_table = sparc_i8042_match,
+	},
+	.probe		= sparc_i8042_probe,
+	.remove		= sparc_i8042_remove,
+};
+
+static int __init i8042_platform_init(void)
+{
+	struct device_node *root = of_find_node_by_path("/");
+
+	if (!strcmp(root->name, "SUNW,JavaStation-1")) {
 		/* Hardcoded values for MrCoffee.  */
 		i8042_kbd_irq = i8042_aux_irq = 13 | 0x20;
 		kbd_iobase = ioremap(0x71300060, 8);
 		if (!kbd_iobase)
-			return -1;
+			return -ENODEV;
 	} else {
-		struct linux_ebus *ebus;
-		struct linux_ebus_device *edev;
-		struct linux_ebus_child *child;
+		int err = platform_driver_register(&sparc_i8042_driver);
+		if (err)
+			return err;
 
-		for_each_ebus(ebus) {
-			for_each_ebusdev(edev, ebus) {
-				if (!strcmp(edev->prom_name, "8042"))
-					goto edev_found;
-			}
-		}
-		return -1;
-
-	edev_found:
-		for_each_edevchild(edev, child) {
-			if (!strcmp(child->prom_name, OBP_PS2KBD_NAME1) ||
-			    !strcmp(child->prom_name, OBP_PS2KBD_NAME2)) {
-				i8042_kbd_irq = child->irqs[0];
-				kbd_iobase =
-					ioremap(child->resource[0].start, 8);
-			}
-			if (!strcmp(child->prom_name, OBP_PS2MS_NAME1) ||
-			    !strcmp(child->prom_name, OBP_PS2MS_NAME2))
-				i8042_aux_irq = child->irqs[0];
-		}
 		if (i8042_kbd_irq == -1 ||
 		    i8042_aux_irq == -1) {
-			printk("i8042: Error, 8042 device lacks both kbd and "
-			       "mouse nodes.\n");
-			return -1;
+			if (kbd_iobase) {
+				of_iounmap(kbd_res, kbd_iobase, 8);
+				kbd_iobase = (void __iomem *) NULL;
+			}
+			return -ENODEV;
 		}
 	}
 
-	i8042_reset = 1;
+	i8042_reset = I8042_RESET_ALWAYS;
 
 	return 0;
-#endif /* CONFIG_PCI */
 }
 
 static inline void i8042_platform_exit(void)
 {
-#ifdef CONFIG_PCI
-	iounmap(kbd_iobase);
-#endif
+	struct device_node *root = of_find_node_by_path("/");
+
+	if (strcmp(root->name, "SUNW,JavaStation-1"))
+		platform_driver_unregister(&sparc_i8042_driver);
 }
+
+#else /* !CONFIG_PCI */
+static int __init i8042_platform_init(void)
+{
+	return -ENODEV;
+}
+
+static inline void i8042_platform_exit(void)
+{
+}
+#endif /* !CONFIG_PCI */
 
 #endif /* _I8042_SPARCIO_H */

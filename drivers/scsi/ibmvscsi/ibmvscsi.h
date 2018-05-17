@@ -33,7 +33,7 @@
 #include <linux/list.h>
 #include <linux/completion.h>
 #include <linux/interrupt.h>
-#include "viosrp.h"
+#include <scsi/viosrp.h>
 
 struct scsi_cmnd;
 struct Scsi_Host;
@@ -43,6 +43,12 @@ struct Scsi_Host;
  * descriptor
  */
 #define MAX_INDIRECT_BUFS 10
+
+#define IBMVSCSI_MAX_REQUESTS_DEFAULT 100
+#define IBMVSCSI_CMDS_PER_LUN_DEFAULT 16
+#define IBMVSCSI_MAX_SECTORS_DEFAULT 256 /* 32 * 8 = default max I/O 32 pages */
+#define IBMVSCSI_MAX_CMDS_PER_LUN 64
+#define IBMVSCSI_MAX_LUN 32
 
 /* ------------------------------------------------------------
  * Data Structures
@@ -67,7 +73,10 @@ struct srp_event_struct {
 	union viosrp_iu iu;
 	void (*cmnd_done) (struct scsi_cmnd *);
 	struct completion comp;
+	struct timer_list timer;
 	union viosrp_iu *sync_srp;
+	struct srp_direct_buf *ext_list;
+	dma_addr_t ext_list_token;
 };
 
 /* a pool of event structs for use */
@@ -81,29 +90,23 @@ struct event_pool {
 
 /* all driver data associated with a host adapter */
 struct ibmvscsi_host_data {
+	struct list_head host_list;
 	atomic_t request_limit;
+	int client_migrated;
+	int reset_crq;
+	int reenable_crq;
 	struct device *dev;
 	struct event_pool pool;
 	struct crq_queue queue;
 	struct tasklet_struct srp_task;
 	struct list_head sent;
 	struct Scsi_Host *host;
+	struct task_struct *work_thread;
+	wait_queue_head_t work_wait_q;
 	struct mad_adapter_info_data madapter_info;
+	struct capabilities caps;
+	dma_addr_t caps_addr;
+	dma_addr_t adapter_info_addr;
 };
-
-/* routines for managing a command/response queue */
-int ibmvscsi_init_crq_queue(struct crq_queue *queue,
-			    struct ibmvscsi_host_data *hostdata,
-			    int max_requests);
-void ibmvscsi_release_crq_queue(struct crq_queue *queue,
-				struct ibmvscsi_host_data *hostdata,
-				int max_requests);
-void ibmvscsi_reset_crq_queue(struct crq_queue *queue,
-			      struct ibmvscsi_host_data *hostdata);
-
-void ibmvscsi_handle_crq(struct viosrp_crq *crq,
-			 struct ibmvscsi_host_data *hostdata);
-int ibmvscsi_send_crq(struct ibmvscsi_host_data *hostdata,
-		      u64 word1, u64 word2);
 
 #endif				/* IBMVSCSI_H */

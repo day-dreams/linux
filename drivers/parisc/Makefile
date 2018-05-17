@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for most of the non-PCI devices in PA-RISC machines
 #
@@ -22,5 +23,6 @@ obj-$(CONFIG_EISA)		+= eisa.o eisa_enumerator.o eisa_eeprom.o
 
 obj-$(CONFIG_SUPERIO)		+= superio.o
 obj-$(CONFIG_CHASSIS_LCD_LED)	+= led.o
+obj-$(CONFIG_PDC_STABLE)	+= pdc_stable.o
 obj-y				+= power.o
 

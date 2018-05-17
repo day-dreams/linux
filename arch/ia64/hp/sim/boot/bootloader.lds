@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 OUTPUT_FORMAT("elf64-ia64-little")
 OUTPUT_ARCH(ia64)
 ENTRY(_start)
@@ -22,10 +23,11 @@ SECTIONS
   .sdata     : { *(.sdata) }
   _edata  =  .;
 
-  _bss = .;
+  __bss_start = .;
   .sbss      : { *(.sbss) *(.scommon) }
   .bss       : { *(.bss) *(COMMON) }
   . = ALIGN(64 / 8);
+  __bss_stop = .;
   _end = . ;
 
   /* Stabs debugging sections.  */

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*    Kernel link layout for various "sections"
  *
  *    Copyright (C) 1999-2003 Matthew Wilcox <willy at parisc-linux.org>
@@ -6,30 +7,27 @@
  *    Copyright (C) 2000 Michael Ang <mang with subcarrier.org>
  *    Copyright (C) 2002 Randolph Chung <tausq with parisc-linux.org>
  *    Copyright (C) 2003 James Bottomley <jejb with parisc-linux.org>
- *
- *
- *    This program is free software; you can redistribute it and/or modify
- *    it under the terms of the GNU General Public License as published by
- *    the Free Software Foundation; either version 2 of the License, or
- *    (at your option) any later version.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU General Public License for more details.
- *
- *    You should have received a copy of the GNU General Public License
- *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *    Copyright (C) 2006-2013 Helge Deller <deller@gmx.de>
  */
-#include <linux/config.h>
+
+/*
+ * Put page table entries (swapper_pg_dir) as the first thing in .bss. This
+ * will ensure that it has .bss alignment (PAGE_SIZE).
+ */
+#define BSS_FIRST_SECTIONS	*(.data..vm0.pmd) \
+				*(.data..vm0.pgd) \
+				*(.data..vm0.pte)
+
 #include <asm-generic/vmlinux.lds.h>
+
 /* needed for the processor specific cache alignment size */	
 #include <asm/cache.h>
 #include <asm/page.h>
+#include <asm/asm-offsets.h>
+#include <asm/thread_info.h>
 	
 /* ld script to make hppa Linux kernel */
-#ifndef CONFIG_PARISC64
+#ifndef CONFIG_64BIT
 OUTPUT_FORMAT("elf32-hppa-linux")
 OUTPUT_ARCH(hppa)
 #else
@@ -37,168 +35,138 @@ OUTPUT_FORMAT("elf64-hppa-linux")
 OUTPUT_ARCH(hppa:hppa2.0w)
 #endif
 
-ENTRY(_stext)
-#ifndef CONFIG_PARISC64
+ENTRY(parisc_kernel_start)
+#ifndef CONFIG_64BIT
 jiffies = jiffies_64 + 4;
 #else
 jiffies = jiffies_64;
 #endif
 SECTIONS
 {
+	. = KERNEL_BINARY_TEXT_START;
 
-  . = KERNEL_BINARY_TEXT_START;
+	__init_begin = .;
+	HEAD_TEXT_SECTION
+	INIT_TEXT_SECTION(8)
 
-  _text = .;			/* Text and read-only data */
-  .text ALIGN(16) : {
-	*(.text)
-	SCHED_TEXT
-	LOCK_TEXT
-	*(.text.do_softirq)
-	*(.text.sys_exit)
-	*(.text.do_sigaltstack)
-	*(.text.do_fork)
-	*(.text.*)
-	*(.fixup)
-	*(.lock.text)		/* out-of-line lock text */
-	*(.gnu.warning)
-	} = 0
-
-  _etext = .;			/* End of text section */
-
-  RODATA
-
-  /* writeable */
-  . = ALIGN(4096);		/* Make sure this is paged aligned so
-  				   that we can properly leave these
-				   as writable */
-  data_start = .;
-
-  . = ALIGN(16);		/* Exception table */
-  __start___ex_table = .;
-  __ex_table : { *(__ex_table) }
-  __stop___ex_table = .;
-
-  __start___unwind = .;         /* unwind info */
-  .PARISC.unwind : { *(.PARISC.unwind) }
-  __stop___unwind = .;
- 
-  .data : {			/* Data */
-	*(.data)
-	CONSTRUCTORS
+	. = ALIGN(PAGE_SIZE);
+	INIT_DATA_SECTION(PAGE_SIZE)
+	/* we have to discard exit text and such at runtime, not link time */
+	.exit.text :
+	{
+		EXIT_TEXT
 	}
+	.exit.data :
+	{
+		EXIT_DATA
+	}
+	PERCPU_SECTION(8)
+	. = ALIGN(HUGEPAGE_SIZE);
+	__init_end = .;
+	/* freed after init ends here */
 
-  . = ALIGN(4096);
-  /* nosave data is really only used for software suspend...it's here
-   * just in case we ever implement it */
-  __nosave_begin = .;
-  .data_nosave : { *(.data.nosave) }
-  . = ALIGN(4096);
-  __nosave_end = .;
+	_text = .;		/* Text and read-only data */
+	_stext = .;
+	.text ALIGN(PAGE_SIZE) : {
+		TEXT_TEXT
+		SCHED_TEXT
+		CPUIDLE_TEXT
+		LOCK_TEXT
+		KPROBES_TEXT
+		IRQENTRY_TEXT
+		SOFTIRQENTRY_TEXT
+		*(.text.do_softirq)
+		*(.text.sys_exit)
+		*(.text.do_sigaltstack)
+		*(.text.do_fork)
+		*(.text.div)
+		*($$*)			/* millicode routines */
+		*(.text.*)
+		*(.fixup)
+		*(.lock.text)		/* out-of-line lock text */
+		*(.gnu.warning)
+	}
+	. = ALIGN(PAGE_SIZE);
+	_etext = .;
+	/* End of text section */
 
-  . = ALIGN(L1_CACHE_BYTES);
-  .data.cacheline_aligned : { *(.data.cacheline_aligned) }
+	/* Start of data section */
+	_sdata = .;
 
-  /* PA-RISC locks requires 16-byte alignment */
-  . = ALIGN(16);
-  .data.lock_aligned : { *(.data.lock_aligned) }
-
-  _edata = .;			/* End of data section */
-
-  . = ALIGN(16384); 		/* init_task */
-  .data.init_task : { *(.data.init_task) }
-
-  /* The interrupt stack is currently partially coded, but not yet
-   * implemented */
-  . = ALIGN(16384);	
-  init_istack : { *(init_istack) }
-
-#ifdef CONFIG_PARISC64
-  . = ALIGN(16);               /* Linkage tables */
-  .opd : { *(.opd) } PROVIDE (__gp = .); 
-  .plt : { *(.plt) } 
-  .dlt : { *(.dlt) }
+	/* Architecturally we need to keep __gp below 0x1000000 and thus
+	 * in front of RO_DATA_SECTION() which stores lots of tracepoint
+	 * and ftrace symbols. */
+#ifdef CONFIG_64BIT
+	. = ALIGN(16);
+	/* Linkage tables */
+	.opd : {
+		__start_opd = .;
+		*(.opd)
+		__end_opd = .;
+	} PROVIDE (__gp = .);
+	.plt : {
+		*(.plt)
+	}
+	.dlt : {
+		*(.dlt)
+	}
 #endif
 
-  . = ALIGN(16384);
-  __init_begin = .;
-  .init.text : { 
-	_sinittext = .;
-	*(.init.text)
-	_einittext = .;
-  }
-  .init.data : { *(.init.data) }
-  . = ALIGN(16);
-  __setup_start = .;
-  .init.setup : { *(.init.setup) }
-  __setup_end = .;
-  __initcall_start = .;
-  .initcall.init : {
-	*(.initcall1.init) 
-	*(.initcall2.init) 
-	*(.initcall3.init) 
-	*(.initcall4.init) 
-	*(.initcall5.init) 
-	*(.initcall6.init) 
-	*(.initcall7.init)
-  }
-  __initcall_end = .;
-  __con_initcall_start = .;
-  .con_initcall.init : { *(.con_initcall.init) }
-  __con_initcall_end = .;
-  SECURITY_INIT
-  /* alternate instruction replacement.  This is a mechanism x86 uses
-   * to detect the CPU type and replace generic instruction sequences
-   * with CPU specific ones.  We don't currently do this in PA, but
-   * it seems like a good idea... */
-  . = ALIGN(4);
-  __alt_instructions = .;
-  .altinstructions : { *(.altinstructions) } 
-  __alt_instructions_end = .; 
- .altinstr_replacement : { *(.altinstr_replacement) } 
-  /* .exit.text is discard at runtime, not link time, to deal with references
-     from .altinstructions and .eh_frame */
-  .exit.text : { *(.exit.text) }
-  .exit.data : { *(.exit.data) }
-  . = ALIGN(4096);
-  __initramfs_start = .;
-  .init.ramfs : { *(.init.ramfs) }
-  __initramfs_end = .;
-  . = ALIGN(32);
-  __per_cpu_start = .;
-  .data.percpu  : { *(.data.percpu) }
-  __per_cpu_end = .;
-  . = ALIGN(4096);
-  __init_end = .;
-  /* freed after init ends here */
-	
-  __bss_start = .;		/* BSS */
-  .bss : { *(.bss) *(COMMON) }
-  __bss_stop = .; 
+	RO_DATA_SECTION(8)
 
-  _end = . ;
+	/* RO because of BUILDTIME_EXTABLE_SORT */
+	EXCEPTION_TABLE(8)
+	NOTES
 
-  /* Sections to be discarded */
-  /DISCARD/ : {
-	*(.exitcall.exit)
-#ifdef CONFIG_PARISC64
-	/* temporary hack until binutils is fixed to not emit these
-	 for static binaries */
-	*(.interp)
-	*(.dynsym)
-	*(.dynstr)
-	*(.dynamic)
-	*(.hash)
-#endif
+	/* unwind info */
+	.PARISC.unwind : {
+		__start___unwind = .;
+		*(.PARISC.unwind)
+		__stop___unwind = .;
 	}
 
-  /* Stabs debugging sections.  */
-  .stab 0 : { *(.stab) }
-  .stabstr 0 : { *(.stabstr) }
-  .stab.excl 0 : { *(.stab.excl) }
-  .stab.exclstr 0 : { *(.stab.exclstr) }
-  .stab.index 0 : { *(.stab.index) }
-  .stab.indexstr 0 : { *(.stab.indexstr) }
-  .comment 0 : { *(.comment) }
-  .note 0 : { *(.note) }	
+	/* writeable */
+	/* Make sure this is page aligned so
+	 * that we can properly leave these
+	 * as writable
+	 */
+	. = ALIGN(HUGEPAGE_SIZE);
+	data_start = .;
 
+	/* Data */
+	RW_DATA_SECTION(L1_CACHE_BYTES, PAGE_SIZE, PAGE_SIZE)
+
+	/* PA-RISC locks requires 16-byte alignment */
+	. = ALIGN(16);
+	.data..lock_aligned : {
+		*(.data..lock_aligned)
+	}
+
+	/* End of data section */
+	_edata = .;
+
+	/* BSS */
+	BSS_SECTION(PAGE_SIZE, PAGE_SIZE, PAGE_SIZE)
+
+	. = ALIGN(HUGEPAGE_SIZE);
+	_end = . ;
+
+	STABS_DEBUG
+	.note 0 : { *(.note) }
+
+	/* Sections to be discarded */
+	DISCARDS
+	/DISCARD/ : {
+#ifdef CONFIG_64BIT
+		/* temporary hack until binutils is fixed to not emit these
+	 	 * for static binaries
+		 */
+		*(.interp)
+		*(.dynsym)
+		*(.dynstr)
+		*(.dynamic)
+		*(.hash)
+		*(.gnu.hash)
+#endif
+	}
 }

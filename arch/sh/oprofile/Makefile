@@ -1,4 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0
 obj-$(CONFIG_OPROFILE) += oprofile.o
+
+CFLAGS_common.o	+= -DUTS_MACHINE='"$(UTS_MACHINE)"'
 
 DRIVER_OBJS = $(addprefix ../../../drivers/oprofile/, \
 		oprof.o cpu_buffer.o buffer_sync.o \
@@ -6,8 +9,8 @@ DRIVER_OBJS = $(addprefix ../../../drivers/oprofile/, \
 		oprofilefs.o oprofile_stats.o \
 		timer_int.o )
 
-profdrvr-y				:= op_model_null.o
-profdrvr-$(CONFIG_CPU_SUBTYPE_SH7750)	:= op_model_sh7750.o
+ifeq ($(CONFIG_HW_PERF_EVENTS),y)
+DRIVER_OBJS += $(addprefix ../../../drivers/oprofile/, oprofile_perf.o)
+endif
 
-oprofile-y				:= $(DRIVER_OBJS) $(profdrvr-y)
-
+oprofile-y	:= $(DRIVER_OBJS) common.o backtrace.o

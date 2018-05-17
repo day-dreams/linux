@@ -1,47 +1,43 @@
-/* SCTP kernel reference Implementation
+/* SCTP kernel implementation
  * (C) Copyright IBM Corp. 2003, 2004
  *
- * This file is part of the SCTP kernel reference Implementation
+ * This file is part of the SCTP kernel implementation
  *
- * This file contains the code relating the the chunk abstraction.
+ * This file contains the code relating the chunk abstraction.
  *
- * The SCTP reference implementation is free software;
+ * This SCTP implementation is free software;
  * you can redistribute it and/or modify it under the terms of
  * the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
  * any later version.
  *
- * The SCTP reference implementation is distributed in the hope that it
+ * This SCTP implementation is distributed in the hope that it
  * will be useful, but WITHOUT ANY WARRANTY; without even the implied
  *                 ************************
  * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
  * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with GNU CC; see the file COPYING.  If not, write to
- * the Free Software Foundation, 59 Temple Place - Suite 330,
- * Boston, MA 02111-1307, USA.
+ * along with GNU CC; see the file COPYING.  If not, see
+ * <http://www.gnu.org/licenses/>.
  *
  * Please send any bug reports or fixes you make to the
  * email address(es):
- *    lksctp developers <lksctp-developers@lists.sourceforge.net>
- *
- * Or submit a bug report through the following website:
- *    http://www.sf.net/projects/lksctp
+ *    lksctp developers <linux-sctp@vger.kernel.org>
  *
  * Written or modified by:
  *    Jon Grimm             <jgrimm@us.ibm.com>
  *    Sridhar Samudrala     <sri@us.ibm.com>
- *
- * Any bugs reported given to us we will try to fix... any fixes shared will
- * be incorporated into the next SCTP release.
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/net.h>
 #include <linux/inet.h>
 #include <linux/skbuff.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <net/sctp/sctp.h>
 #include <net/sctp/sm.h>
@@ -53,23 +49,38 @@
 /* Initialize datamsg from memory. */
 static void sctp_datamsg_init(struct sctp_datamsg *msg)
 {
-	atomic_set(&msg->refcnt, 1);
+	refcount_set(&msg->refcnt, 1);
 	msg->send_failed = 0;
 	msg->send_error = 0;
-	msg->can_abandon = 0;
+	msg->can_delay = 1;
+	msg->abandoned = 0;
 	msg->expires_at = 0;
 	INIT_LIST_HEAD(&msg->chunks);
 }
 
 /* Allocate and initialize datamsg. */
-SCTP_STATIC struct sctp_datamsg *sctp_datamsg_new(int gfp)
+static struct sctp_datamsg *sctp_datamsg_new(gfp_t gfp)
 {
 	struct sctp_datamsg *msg;
 	msg = kmalloc(sizeof(struct sctp_datamsg), gfp);
-	if (msg)
+	if (msg) {
 		sctp_datamsg_init(msg);
-	SCTP_DBG_OBJCNT_INC(datamsg);
+		SCTP_DBG_OBJCNT_INC(datamsg);
+	}
 	return msg;
+}
+
+void sctp_datamsg_free(struct sctp_datamsg *msg)
+{
+	struct sctp_chunk *chunk;
+
+	/* This doesn't have to be a _safe vairant because
+	 * sctp_chunk_free() only drops the refs.
+	 */
+	list_for_each_entry(chunk, &msg->chunks, frag_list)
+		sctp_chunk_free(chunk);
+
+	sctp_datamsg_put(msg);
 }
 
 /* Final destructruction of datamsg memory. */
@@ -113,7 +124,7 @@ static void sctp_datamsg_destroy(struct sctp_datamsg *msg)
 			ev = sctp_ulpevent_make_send_failed(asoc, chunk, sent,
 							    error, GFP_ATOMIC);
 			if (ev)
-				sctp_ulpq_tail_event(&asoc->ulpq, ev);
+				asoc->stream.si->enqueue_event(&asoc->ulpq, ev);
 		}
 
 		sctp_chunk_put(chunk);
@@ -126,28 +137,14 @@ static void sctp_datamsg_destroy(struct sctp_datamsg *msg)
 /* Hold a reference. */
 static void sctp_datamsg_hold(struct sctp_datamsg *msg)
 {
-	atomic_inc(&msg->refcnt);
+	refcount_inc(&msg->refcnt);
 }
 
 /* Release a reference. */
 void sctp_datamsg_put(struct sctp_datamsg *msg)
 {
-	if (atomic_dec_and_test(&msg->refcnt))
+	if (refcount_dec_and_test(&msg->refcnt))
 		sctp_datamsg_destroy(msg);
-}
-
-/* Free a message.  Really just give up a reference, the
- * really free happens in sctp_datamsg_destroy().
- */
-void sctp_datamsg_free(struct sctp_datamsg *msg)
-{
-	sctp_datamsg_put(msg);
-}
-
-/* Hold on to all the fragments until all chunks have been sent. */
-void sctp_datamsg_track(struct sctp_chunk *chunk)
-{
-	sctp_chunk_hold(chunk);
 }
 
 /* Assign a chunk to this datamsg. */
@@ -167,109 +164,120 @@ static void sctp_datamsg_assign(struct sctp_datamsg *msg, struct sctp_chunk *chu
  */
 struct sctp_datamsg *sctp_datamsg_from_user(struct sctp_association *asoc,
 					    struct sctp_sndrcvinfo *sinfo,
-					    struct msghdr *msgh, int msg_len)
+					    struct iov_iter *from)
 {
-	int max, whole, i, offset, over, err;
-	int len, first_len;
+	size_t len, first_len, max_data, remaining;
+	size_t msg_len = iov_iter_count(from);
+	struct list_head *pos, *temp;
 	struct sctp_chunk *chunk;
 	struct sctp_datamsg *msg;
-	struct list_head *pos, *temp;
-	__u8 frag;
+	int err;
 
 	msg = sctp_datamsg_new(GFP_KERNEL);
 	if (!msg)
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 
 	/* Note: Calculate this outside of the loop, so that all fragments
 	 * have the same expiration.
 	 */
-	if (sinfo->sinfo_timetolive) {
-		/* sinfo_timetolive is in milliseconds */
+	if (asoc->peer.prsctp_capable && sinfo->sinfo_timetolive &&
+	    (SCTP_PR_TTL_ENABLED(sinfo->sinfo_flags) ||
+	     !SCTP_PR_POLICY(sinfo->sinfo_flags)))
 		msg->expires_at = jiffies +
-				    msecs_to_jiffies(sinfo->sinfo_timetolive);
-		msg->can_abandon = 1;
-		SCTP_DEBUG_PRINTK("%s: msg:%p expires_at: %ld jiffies:%ld\n",
-				  __FUNCTION__, msg, msg->expires_at, jiffies);
+				  msecs_to_jiffies(sinfo->sinfo_timetolive);
+
+	/* This is the biggest possible DATA chunk that can fit into
+	 * the packet
+	 */
+	max_data = asoc->pathmtu -
+		   sctp_sk(asoc->base.sk)->pf->af->net_header_len -
+		   sizeof(struct sctphdr) - sctp_datachk_len(&asoc->stream);
+	max_data = SCTP_TRUNC4(max_data);
+
+	/* If the the peer requested that we authenticate DATA chunks
+	 * we need to account for bundling of the AUTH chunks along with
+	 * DATA.
+	 */
+	if (sctp_auth_send_cid(SCTP_CID_DATA, asoc)) {
+		struct sctp_hmac *hmac_desc = sctp_auth_asoc_get_hmac(asoc);
+
+		if (hmac_desc)
+			max_data -= SCTP_PAD4(sizeof(struct sctp_auth_chunk) +
+					      hmac_desc->hmac_len);
 	}
 
-	max = asoc->frag_point;
+	/* Check what's our max considering the above */
+	max_data = min_t(size_t, max_data, asoc->frag_point);
 
-	whole = 0;
-	first_len = max;
+	/* Set first_len and then account for possible bundles on first frag */
+	first_len = max_data;
+
+	/* Check to see if we have a pending SACK and try to let it be bundled
+	 * with this message.  Do this if we don't have any data queued already.
+	 * To check that, look at out_qlen and retransmit list.
+	 * NOTE: we will not reduce to account for SACK, if the message would
+	 * not have been fragmented.
+	 */
+	if (timer_pending(&asoc->timers[SCTP_EVENT_TIMEOUT_SACK]) &&
+	    asoc->outqueue.out_qlen == 0 &&
+	    list_empty(&asoc->outqueue.retransmit) &&
+	    msg_len > max_data)
+		first_len -= SCTP_PAD4(sizeof(struct sctp_sack_chunk));
 
 	/* Encourage Cookie-ECHO bundling. */
-	if (asoc->state < SCTP_STATE_COOKIE_ECHOED) {
-		whole = msg_len / (max - SCTP_ARBITRARY_COOKIE_ECHO_LEN);
+	if (asoc->state < SCTP_STATE_COOKIE_ECHOED)
+		first_len -= SCTP_ARBITRARY_COOKIE_ECHO_LEN;
 
-		/* Account for the DATA to be bundled with the COOKIE-ECHO. */
-		if (whole) {
-			first_len = max - SCTP_ARBITRARY_COOKIE_ECHO_LEN;
-			msg_len -= first_len;
-			whole = 1;
-		}
+	/* Account for a different sized first fragment */
+	if (msg_len >= first_len) {
+		msg->can_delay = 0;
+		SCTP_INC_STATS(sock_net(asoc->base.sk), SCTP_MIB_FRAGUSRMSGS);
+	} else {
+		/* Which may be the only one... */
+		first_len = msg_len;
 	}
 
-	/* How many full sized?  How many bytes leftover? */
-	whole += msg_len / max;
-	over = msg_len % max;
-	offset = 0;
+	/* Create chunks for all DATA chunks. */
+	for (remaining = msg_len; remaining; remaining -= len) {
+		u8 frag = SCTP_DATA_MIDDLE_FRAG;
 
-	if ((whole > 1) || (whole && over))
-		SCTP_INC_STATS_USER(SCTP_MIB_FRAGUSRMSGS);
-
-	/* Create chunks for all the full sized DATA chunks. */
-	for (i=0, len=first_len; i < whole; i++) {
-		frag = SCTP_DATA_MIDDLE_FRAG;
-
-		if (0 == i)
+		if (remaining == msg_len) {
+			/* First frag, which may also be the last */
 			frag |= SCTP_DATA_FIRST_FRAG;
+			len = first_len;
+		} else {
+			/* Middle frags */
+			len = max_data;
+		}
 
-		if ((i == (whole - 1)) && !over)
+		if (len >= remaining) {
+			/* Last frag, which may also be the first */
+			len = remaining;
 			frag |= SCTP_DATA_LAST_FRAG;
 
-		chunk = sctp_make_datafrag_empty(asoc, sinfo, len, frag, 0);
+			/* The application requests to set the I-bit of the
+			 * last DATA chunk of a user message when providing
+			 * the user message to the SCTP implementation.
+			 */
+			if ((sinfo->sinfo_flags & SCTP_EOF) ||
+			    (sinfo->sinfo_flags & SCTP_SACK_IMMEDIATELY))
+				frag |= SCTP_DATA_SACK_IMM;
+		}
 
-		if (!chunk)
+		chunk = asoc->stream.si->make_datafrag(asoc, sinfo, len, frag,
+						       GFP_KERNEL);
+		if (!chunk) {
+			err = -ENOMEM;
 			goto errout;
-		err = sctp_user_addto_chunk(chunk, offset, len, msgh->msg_iov);
+		}
+
+		err = sctp_user_addto_chunk(chunk, len, from);
 		if (err < 0)
-			goto errout;
-
-		offset += len;
+			goto errout_chunk_free;
 
 		/* Put the chunk->skb back into the form expected by send.  */
-		__skb_pull(chunk->skb, (__u8 *)chunk->chunk_hdr
-			   - (__u8 *)chunk->skb->data);
-
-		sctp_datamsg_assign(msg, chunk);
-		list_add_tail(&chunk->frag_list, &msg->chunks);
-
-		/* The first chunk, the first chunk was likely short
-		 * to allow bundling, so reset to full size.
-		 */
-		if (0 == i)
-			len = max;
-	}
-
-	/* .. now the leftover bytes. */
-	if (over) {
-		if (!whole)
-			frag = SCTP_DATA_NOT_FRAG;
-		else
-			frag = SCTP_DATA_LAST_FRAG;
-
-		chunk = sctp_make_datafrag_empty(asoc, sinfo, over, frag, 0);
-
-		if (!chunk)
-			goto errout;
-
-		err = sctp_user_addto_chunk(chunk, offset, over,msgh->msg_iov);
-
-		/* Put the chunk->skb back into the form expected by send.  */
-		__skb_pull(chunk->skb, (__u8 *)chunk->chunk_hdr
-			   - (__u8 *)chunk->skb->data);
-		if (err < 0)
-			goto errout;
+		__skb_pull(chunk->skb, (__u8 *)chunk->chunk_hdr -
+				       chunk->skb->data);
 
 		sctp_datamsg_assign(msg, chunk);
 		list_add_tail(&chunk->frag_list, &msg->chunks);
@@ -277,26 +285,63 @@ struct sctp_datamsg *sctp_datamsg_from_user(struct sctp_association *asoc,
 
 	return msg;
 
+errout_chunk_free:
+	sctp_chunk_free(chunk);
+
 errout:
 	list_for_each_safe(pos, temp, &msg->chunks) {
 		list_del_init(pos);
 		chunk = list_entry(pos, struct sctp_chunk, frag_list);
 		sctp_chunk_free(chunk);
 	}
-	sctp_datamsg_free(msg);
-	return NULL;
+	sctp_datamsg_put(msg);
+
+	return ERR_PTR(err);
 }
 
 /* Check whether this message has expired. */
 int sctp_chunk_abandoned(struct sctp_chunk *chunk)
 {
-	struct sctp_datamsg *msg = chunk->msg;
-
-	if (!msg->can_abandon)
+	if (!chunk->asoc->peer.prsctp_capable)
 		return 0;
 
-	if (time_after(jiffies, msg->expires_at))
+	if (chunk->msg->abandoned)
 		return 1;
+
+	if (!chunk->has_tsn &&
+	    !(chunk->chunk_hdr->flags & SCTP_DATA_FIRST_FRAG))
+		return 0;
+
+	if (SCTP_PR_TTL_ENABLED(chunk->sinfo.sinfo_flags) &&
+	    time_after(jiffies, chunk->msg->expires_at)) {
+		struct sctp_stream_out *streamout =
+			&chunk->asoc->stream.out[chunk->sinfo.sinfo_stream];
+
+		if (chunk->sent_count) {
+			chunk->asoc->abandoned_sent[SCTP_PR_INDEX(TTL)]++;
+			streamout->ext->abandoned_sent[SCTP_PR_INDEX(TTL)]++;
+		} else {
+			chunk->asoc->abandoned_unsent[SCTP_PR_INDEX(TTL)]++;
+			streamout->ext->abandoned_unsent[SCTP_PR_INDEX(TTL)]++;
+		}
+		chunk->msg->abandoned = 1;
+		return 1;
+	} else if (SCTP_PR_RTX_ENABLED(chunk->sinfo.sinfo_flags) &&
+		   chunk->sent_count > chunk->sinfo.sinfo_timetolive) {
+		struct sctp_stream_out *streamout =
+			&chunk->asoc->stream.out[chunk->sinfo.sinfo_stream];
+
+		chunk->asoc->abandoned_sent[SCTP_PR_INDEX(RTX)]++;
+		streamout->ext->abandoned_sent[SCTP_PR_INDEX(RTX)]++;
+		chunk->msg->abandoned = 1;
+		return 1;
+	} else if (!SCTP_PR_POLICY(chunk->sinfo.sinfo_flags) &&
+		   chunk->msg->expires_at &&
+		   time_after(jiffies, chunk->msg->expires_at)) {
+		chunk->msg->abandoned = 1;
+		return 1;
+	}
+	/* PRIO policy is processed by sendmsg, not here */
 
 	return 0;
 }

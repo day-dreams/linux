@@ -10,6 +10,8 @@
 #ifndef OP_IMPL_H
 #define OP_IMPL_H 1
 
+extern int (*perf_irq)(void);
+
 /* Per-counter configuration as set via oprofilefs.  */
 struct op_counter_config {
 	unsigned long enabled;
@@ -22,10 +24,10 @@ struct op_counter_config {
 	unsigned long unit_mask;
 };
 
-/* Per-architecture configury and hooks.  */
+/* Per-architecture configure and hooks.  */
 struct op_mips_model {
 	void (*reg_setup) (struct op_counter_config *);
-	void (*cpu_setup) (void * dummy);
+	void (*cpu_setup) (void *dummy);
 	int (*init)(void);
 	void (*exit)(void);
 	void (*cpu_start)(void *args);
@@ -33,5 +35,7 @@ struct op_mips_model {
 	char *cpu_type;
 	unsigned char num_counters;
 };
+
+void op_mips_backtrace(struct pt_regs * const regs, unsigned int depth);
 
 #endif

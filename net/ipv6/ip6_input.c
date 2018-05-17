@@ -1,12 +1,10 @@
 /*
  *	IPv6 input
- *	Linux INET6 implementation 
+ *	Linux INET6 implementation
  *
  *	Authors:
  *	Pedro Roque		<roque@di.fc.ul.pt>
  *	Ian P. Morris		<I.P.Morris@soton.ac.uk>
- *
- *	$Id: ip6_input.c,v 1.19 2000/12/13 18:31:50 davem Exp $
  *
  *	Based in linux/net/ipv4/ip_input.c
  *
@@ -17,19 +15,20 @@
  */
 /* Changes
  *
- * 	Mitsuru KANDA @USAGI and
- * 	YOSHIFUJI Hideaki @USAGI: Remove ipv6_parse_exthdrs().
+ *	Mitsuru KANDA @USAGI and
+ *	YOSHIFUJI Hideaki @USAGI: Remove ipv6_parse_exthdrs().
  */
 
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
-#include <linux/sched.h>
 #include <linux/net.h>
 #include <linux/netdevice.h>
 #include <linux/in6.h>
 #include <linux/icmpv6.h>
+#include <linux/mroute6.h>
+#include <linux/slab.h>
 
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv6.h>
@@ -45,85 +44,176 @@
 #include <net/ip6_route.h>
 #include <net/addrconf.h>
 #include <net/xfrm.h>
+#include <net/inet_ecn.h>
+#include <net/dst_metadata.h>
 
-
-
-static inline int ip6_rcv_finish( struct sk_buff *skb) 
+int ip6_rcv_finish(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
-	if (skb->dst == NULL)
+	void (*edemux)(struct sk_buff *skb);
+
+	/* if ingress device is enslaved to an L3 master device pass the
+	 * skb to its handler for processing
+	 */
+	skb = l3mdev_ip6_rcv(skb);
+	if (!skb)
+		return NET_RX_SUCCESS;
+
+	if (net->ipv4.sysctl_ip_early_demux && !skb_dst(skb) && skb->sk == NULL) {
+		const struct inet6_protocol *ipprot;
+
+		ipprot = rcu_dereference(inet6_protos[ipv6_hdr(skb)->nexthdr]);
+		if (ipprot && (edemux = READ_ONCE(ipprot->early_demux)))
+			edemux(skb);
+	}
+	if (!skb_valid_dst(skb))
 		ip6_route_input(skb);
 
 	return dst_input(skb);
 }
 
-int ipv6_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
+int ipv6_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt, struct net_device *orig_dev)
 {
-	struct ipv6hdr *hdr;
-	u32 		pkt_len;
+	const struct ipv6hdr *hdr;
+	u32 pkt_len;
+	struct inet6_dev *idev;
+	struct net *net = dev_net(skb->dev);
 
-	if (skb->pkt_type == PACKET_OTHERHOST)
-		goto drop;
-
-	IP6_INC_STATS_BH(IPSTATS_MIB_INRECEIVES);
-
-	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL) {
-		IP6_INC_STATS_BH(IPSTATS_MIB_INDISCARDS);
-		goto out;
+	if (skb->pkt_type == PACKET_OTHERHOST) {
+		kfree_skb(skb);
+		return NET_RX_DROP;
 	}
 
-	/* Store incoming device index. When the packet will
-	   be queued, we cannot refer to skb->dev anymore.
-	 */
-	IP6CB(skb)->iif = dev->ifindex;
+	rcu_read_lock();
 
-	if (skb->len < sizeof(struct ipv6hdr))
+	idev = __in6_dev_get(skb->dev);
+
+	__IP6_UPD_PO_STATS(net, idev, IPSTATS_MIB_IN, skb->len);
+
+	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL ||
+	    !idev || unlikely(idev->cnf.disable_ipv6)) {
+		__IP6_INC_STATS(net, idev, IPSTATS_MIB_INDISCARDS);
+		goto drop;
+	}
+
+	memset(IP6CB(skb), 0, sizeof(struct inet6_skb_parm));
+
+	/*
+	 * Store incoming device index. When the packet will
+	 * be queued, we cannot refer to skb->dev anymore.
+	 *
+	 * BTW, when we send a packet for our own local address on a
+	 * non-loopback interface (e.g. ethX), it is being delivered
+	 * via the loopback interface (lo) here; skb->dev = loopback_dev.
+	 * It, however, should be considered as if it is being
+	 * arrived via the sending interface (ethX), because of the
+	 * nature of scoping architecture. --yoshfuji
+	 */
+	IP6CB(skb)->iif = skb_valid_dst(skb) ? ip6_dst_idev(skb_dst(skb))->dev->ifindex : dev->ifindex;
+
+	if (unlikely(!pskb_may_pull(skb, sizeof(*hdr))))
 		goto err;
 
-	if (!pskb_may_pull(skb, sizeof(struct ipv6hdr))) {
-		IP6_INC_STATS_BH(IPSTATS_MIB_INHDRERRORS);
-		goto drop;
-	}
-
-	hdr = skb->nh.ipv6h;
+	hdr = ipv6_hdr(skb);
 
 	if (hdr->version != 6)
 		goto err;
+
+	__IP6_ADD_STATS(net, idev,
+			IPSTATS_MIB_NOECTPKTS +
+				(ipv6_get_dsfield(hdr) & INET_ECN_MASK),
+			max_t(unsigned short, 1, skb_shinfo(skb)->gso_segs));
+	/*
+	 * RFC4291 2.5.3
+	 * The loopback address must not be used as the source address in IPv6
+	 * packets that are sent outside of a single node. [..]
+	 * A packet received on an interface with a destination address
+	 * of loopback must be dropped.
+	 */
+	if ((ipv6_addr_loopback(&hdr->saddr) ||
+	     ipv6_addr_loopback(&hdr->daddr)) &&
+	     !(dev->flags & IFF_LOOPBACK))
+		goto err;
+
+	/* RFC4291 Errata ID: 3480
+	 * Interface-Local scope spans only a single interface on a
+	 * node and is useful only for loopback transmission of
+	 * multicast.  Packets with interface-local scope received
+	 * from another node must be discarded.
+	 */
+	if (!(skb->pkt_type == PACKET_LOOPBACK ||
+	      dev->flags & IFF_LOOPBACK) &&
+	    ipv6_addr_is_multicast(&hdr->daddr) &&
+	    IPV6_ADDR_MC_SCOPE(&hdr->daddr) == 1)
+		goto err;
+
+	/* If enabled, drop unicast packets that were encapsulated in link-layer
+	 * multicast or broadcast to protected against the so-called "hole-196"
+	 * attack in 802.11 wireless.
+	 */
+	if (!ipv6_addr_is_multicast(&hdr->daddr) &&
+	    (skb->pkt_type == PACKET_BROADCAST ||
+	     skb->pkt_type == PACKET_MULTICAST) &&
+	    idev->cnf.drop_unicast_in_l2_multicast)
+		goto err;
+
+	/* RFC4291 2.7
+	 * Nodes must not originate a packet to a multicast address whose scope
+	 * field contains the reserved value 0; if such a packet is received, it
+	 * must be silently dropped.
+	 */
+	if (ipv6_addr_is_multicast(&hdr->daddr) &&
+	    IPV6_ADDR_MC_SCOPE(&hdr->daddr) == 0)
+		goto err;
+
+	/*
+	 * RFC4291 2.7
+	 * Multicast addresses must not be used as source addresses in IPv6
+	 * packets or appear in any Routing header.
+	 */
+	if (ipv6_addr_is_multicast(&hdr->saddr))
+		goto err;
+
+	skb->transport_header = skb->network_header + sizeof(*hdr);
+	IP6CB(skb)->nhoff = offsetof(struct ipv6hdr, nexthdr);
 
 	pkt_len = ntohs(hdr->payload_len);
 
 	/* pkt_len may be zero if Jumbo payload option is present */
 	if (pkt_len || hdr->nexthdr != NEXTHDR_HOP) {
-		if (pkt_len + sizeof(struct ipv6hdr) > skb->len)
-			goto truncated;
-		if (pkt_len + sizeof(struct ipv6hdr) < skb->len) {
-			if (__pskb_trim(skb, pkt_len + sizeof(struct ipv6hdr))){
-				IP6_INC_STATS_BH(IPSTATS_MIB_INHDRERRORS);
-				goto drop;
-			}
-			hdr = skb->nh.ipv6h;
-			if (skb->ip_summed == CHECKSUM_HW)
-				skb->ip_summed = CHECKSUM_NONE;
+		if (pkt_len + sizeof(struct ipv6hdr) > skb->len) {
+			__IP6_INC_STATS(net,
+					idev, IPSTATS_MIB_INTRUNCATEDPKTS);
+			goto drop;
 		}
+		if (pskb_trim_rcsum(skb, pkt_len + sizeof(struct ipv6hdr))) {
+			__IP6_INC_STATS(net, idev, IPSTATS_MIB_INHDRERRORS);
+			goto drop;
+		}
+		hdr = ipv6_hdr(skb);
 	}
 
 	if (hdr->nexthdr == NEXTHDR_HOP) {
-		skb->h.raw = (u8*)(hdr+1);
-		if (ipv6_parse_hopopts(skb, offsetof(struct ipv6hdr, nexthdr)) < 0) {
-			IP6_INC_STATS_BH(IPSTATS_MIB_INHDRERRORS);
-			return 0;
+		if (ipv6_parse_hopopts(skb) < 0) {
+			__IP6_INC_STATS(net, idev, IPSTATS_MIB_INHDRERRORS);
+			rcu_read_unlock();
+			return NET_RX_DROP;
 		}
-		hdr = skb->nh.ipv6h;
 	}
 
-	return NF_HOOK(PF_INET6,NF_IP6_PRE_ROUTING, skb, dev, NULL, ip6_rcv_finish);
-truncated:
-	IP6_INC_STATS_BH(IPSTATS_MIB_INTRUNCATEDPKTS);
+	rcu_read_unlock();
+
+	/* Must drop socket now because of tproxy. */
+	skb_orphan(skb);
+
+	return NF_HOOK(NFPROTO_IPV6, NF_INET_PRE_ROUTING,
+		       net, NULL, skb, dev, NULL,
+		       ip6_rcv_finish);
 err:
-	IP6_INC_STATS_BH(IPSTATS_MIB_INHDRERRORS);
+	__IP6_INC_STATS(net, idev, IPSTATS_MIB_INHDRERRORS);
 drop:
+	rcu_read_unlock();
 	kfree_skb(skb);
-out:
-	return 0;
+	return NET_RX_DROP;
 }
 
 /*
@@ -131,85 +221,101 @@ out:
  */
 
 
-static inline int ip6_input_finish(struct sk_buff *skb)
+static int ip6_input_finish(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
-	struct inet6_protocol *ipprot;
-	struct sock *raw_sk;
+	const struct inet6_protocol *ipprot;
+	struct inet6_dev *idev;
 	unsigned int nhoff;
 	int nexthdr;
-	u8 hash;
-	int cksum_sub = 0;
-
-	skb->h.raw = skb->nh.raw + sizeof(struct ipv6hdr);
+	bool raw;
+	bool have_final = false;
 
 	/*
 	 *	Parse extension headers
 	 */
 
-	nexthdr = skb->nh.ipv6h->nexthdr;
-	nhoff = offsetof(struct ipv6hdr, nexthdr);
-
-	/* Skip hop-by-hop options, they are already parsed. */
-	if (nexthdr == NEXTHDR_HOP) {
-		nhoff = sizeof(struct ipv6hdr);
-		nexthdr = skb->h.raw[0];
-		skb->h.raw += (skb->h.raw[1]+1)<<3;
-	}
-
 	rcu_read_lock();
 resubmit:
-	if (!pskb_pull(skb, skb->h.raw - skb->data))
+	idev = ip6_dst_idev(skb_dst(skb));
+	if (!pskb_pull(skb, skb_transport_offset(skb)))
 		goto discard;
-	nexthdr = skb->nh.raw[nhoff];
+	nhoff = IP6CB(skb)->nhoff;
+	nexthdr = skb_network_header(skb)[nhoff];
 
-	raw_sk = sk_head(&raw_v6_htable[nexthdr & (MAX_INET_PROTOS - 1)]);
-	if (raw_sk)
-		ipv6_raw_deliver(skb, nexthdr);
-
-	hash = nexthdr & (MAX_INET_PROTOS - 1);
-	if ((ipprot = rcu_dereference(inet6_protos[hash])) != NULL) {
+resubmit_final:
+	raw = raw6_local_deliver(skb, nexthdr);
+	ipprot = rcu_dereference(inet6_protos[nexthdr]);
+	if (ipprot) {
 		int ret;
-		
-		if (ipprot->flags & INET6_PROTO_FINAL) {
-			struct ipv6hdr *hdr;	
 
-			if (!cksum_sub && skb->ip_summed == CHECKSUM_HW) {
-				skb->csum = csum_sub(skb->csum,
-						     csum_partial(skb->nh.raw, skb->h.raw-skb->nh.raw, 0));
-				cksum_sub++;
+		if (have_final) {
+			if (!(ipprot->flags & INET6_PROTO_FINAL)) {
+				/* Once we've seen a final protocol don't
+				 * allow encapsulation on any non-final
+				 * ones. This allows foo in UDP encapsulation
+				 * to work.
+				 */
+				goto discard;
 			}
-			hdr = skb->nh.ipv6h;
+		} else if (ipprot->flags & INET6_PROTO_FINAL) {
+			const struct ipv6hdr *hdr;
+
+			/* Only do this once for first final protocol */
+			have_final = true;
+
+			/* Free reference early: we don't need it any more,
+			   and it may hold ip_conntrack module loaded
+			   indefinitely. */
+			nf_reset(skb);
+
+			skb_postpull_rcsum(skb, skb_network_header(skb),
+					   skb_network_header_len(skb));
+			hdr = ipv6_hdr(skb);
 			if (ipv6_addr_is_multicast(&hdr->daddr) &&
 			    !ipv6_chk_mcast_addr(skb->dev, &hdr->daddr,
 			    &hdr->saddr) &&
-			    !ipv6_is_mld(skb, nexthdr))
+			    !ipv6_is_mld(skb, nexthdr, skb_network_header_len(skb)))
 				goto discard;
 		}
 		if (!(ipprot->flags & INET6_PROTO_NOPOLICY) &&
-		    !xfrm6_policy_check(NULL, XFRM_POLICY_IN, skb)) 
+		    !xfrm6_policy_check(NULL, XFRM_POLICY_IN, skb))
 			goto discard;
-		
-		ret = ipprot->handler(&skb, &nhoff);
-		if (ret > 0)
-			goto resubmit;
-		else if (ret == 0)
-			IP6_INC_STATS_BH(IPSTATS_MIB_INDELIVERS);
-	} else {
-		if (!raw_sk) {
-			if (xfrm6_policy_check(NULL, XFRM_POLICY_IN, skb)) {
-				IP6_INC_STATS_BH(IPSTATS_MIB_INUNKNOWNPROTOS);
-				icmpv6_param_prob(skb, ICMPV6_UNK_NEXTHDR, nhoff);
+
+		ret = ipprot->handler(skb);
+		if (ret > 0) {
+			if (ipprot->flags & INET6_PROTO_FINAL) {
+				/* Not an extension header, most likely UDP
+				 * encapsulation. Use return value as nexthdr
+				 * protocol not nhoff (which presumably is
+				 * not set by handler).
+				 */
+				nexthdr = ret;
+				goto resubmit_final;
+			} else {
+				goto resubmit;
 			}
-		} else {
-			IP6_INC_STATS_BH(IPSTATS_MIB_INDELIVERS);
+		} else if (ret == 0) {
+			__IP6_INC_STATS(net, idev, IPSTATS_MIB_INDELIVERS);
+		}
+	} else {
+		if (!raw) {
+			if (xfrm6_policy_check(NULL, XFRM_POLICY_IN, skb)) {
+				__IP6_INC_STATS(net, idev,
+						IPSTATS_MIB_INUNKNOWNPROTOS);
+				icmpv6_send(skb, ICMPV6_PARAMPROB,
+					    ICMPV6_UNK_NEXTHDR, nhoff);
+			}
 			kfree_skb(skb);
+		} else {
+			__IP6_INC_STATS(net, idev, IPSTATS_MIB_INDELIVERS);
+			consume_skb(skb);
 		}
 	}
 	rcu_read_unlock();
 	return 0;
 
 discard:
-	IP6_INC_STATS_BH(IPSTATS_MIB_INDISCARDS);
+	__IP6_INC_STATS(net, idev, IPSTATS_MIB_INDISCARDS);
 	rcu_read_unlock();
 	kfree_skb(skb);
 	return 0;
@@ -218,52 +324,88 @@ discard:
 
 int ip6_input(struct sk_buff *skb)
 {
-	return NF_HOOK(PF_INET6,NF_IP6_LOCAL_IN, skb, skb->dev, NULL, ip6_input_finish);
+	return NF_HOOK(NFPROTO_IPV6, NF_INET_LOCAL_IN,
+		       dev_net(skb->dev), NULL, skb, skb->dev, NULL,
+		       ip6_input_finish);
 }
+EXPORT_SYMBOL_GPL(ip6_input);
 
 int ip6_mc_input(struct sk_buff *skb)
 {
-	struct ipv6hdr *hdr;
-	int deliver;
+	const struct ipv6hdr *hdr;
+	bool deliver;
 
-	IP6_INC_STATS_BH(IPSTATS_MIB_INMCASTPKTS);
+	__IP6_UPD_PO_STATS(dev_net(skb_dst(skb)->dev),
+			 ip6_dst_idev(skb_dst(skb)), IPSTATS_MIB_INMCAST,
+			 skb->len);
 
-	hdr = skb->nh.ipv6h;
-	deliver = likely(!(skb->dev->flags & (IFF_PROMISC|IFF_ALLMULTI))) ||
-	    ipv6_chk_mcast_addr(skb->dev, &hdr->daddr, NULL);
+	hdr = ipv6_hdr(skb);
+	deliver = ipv6_chk_mcast_addr(skb->dev, &hdr->daddr, NULL);
 
+#ifdef CONFIG_IPV6_MROUTE
 	/*
-	 *	IPv6 multicast router mode isnt currently supported.
+	 *      IPv6 multicast router mode is now supported ;)
 	 */
-#if 0
-	if (ipv6_config.multicast_route) {
-		int addr_type;
+	if (dev_net(skb->dev)->ipv6.devconf_all->mc_forwarding &&
+	    !(ipv6_addr_type(&hdr->daddr) &
+	      (IPV6_ADDR_LOOPBACK|IPV6_ADDR_LINKLOCAL)) &&
+	    likely(!(IP6CB(skb)->flags & IP6SKB_FORWARDED))) {
+		/*
+		 * Okay, we try to forward - split and duplicate
+		 * packets.
+		 */
+		struct sk_buff *skb2;
+		struct inet6_skb_parm *opt = IP6CB(skb);
 
-		addr_type = ipv6_addr_type(&hdr->daddr);
+		/* Check for MLD */
+		if (unlikely(opt->flags & IP6SKB_ROUTERALERT)) {
+			/* Check if this is a mld message */
+			u8 nexthdr = hdr->nexthdr;
+			__be16 frag_off;
+			int offset;
 
-		if (!(addr_type & (IPV6_ADDR_LOOPBACK | IPV6_ADDR_LINKLOCAL))) {
-			struct sk_buff *skb2;
-			struct dst_entry *dst;
+			/* Check if the value of Router Alert
+			 * is for MLD (0x0000).
+			 */
+			if (opt->ra == htons(IPV6_OPT_ROUTERALERT_MLD)) {
+				deliver = false;
 
-			dst = skb->dst;
-			
-			if (deliver) {
-				skb2 = skb_clone(skb, GFP_ATOMIC);
-				dst_output(skb2);
-			} else {
-				dst_output(skb);
-				return 0;
+				if (!ipv6_ext_hdr(nexthdr)) {
+					/* BUG */
+					goto out;
+				}
+				offset = ipv6_skip_exthdr(skb, sizeof(*hdr),
+							  &nexthdr, &frag_off);
+				if (offset < 0)
+					goto out;
+
+				if (ipv6_is_mld(skb, nexthdr, offset))
+					deliver = true;
+
+				goto out;
 			}
+			/* unknown RA - process it normally */
+		}
+
+		if (deliver)
+			skb2 = skb_clone(skb, GFP_ATOMIC);
+		else {
+			skb2 = skb;
+			skb = NULL;
+		}
+
+		if (skb2) {
+			ip6_mr_input(skb2);
 		}
 	}
+out:
 #endif
-
-	if (likely(deliver)) {
+	if (likely(deliver))
 		ip6_input(skb);
-		return 0;
+	else {
+		/* discard */
+		kfree_skb(skb);
 	}
-	/* discard */
-	kfree_skb(skb);
 
 	return 0;
 }

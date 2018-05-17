@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 2001 by Hiroyuki Kondo
  */
@@ -9,7 +10,7 @@
 #endif
 
 /*
- * M32R PC Card Controler
+ * M32R PC Card Controller
  */
 #define M32R_PCC0_BASE        0x00ef7000
 #define M32R_PCC1_BASE        0x00ef7020
@@ -71,11 +72,15 @@
 
 #define CFC_IOPORT_BASE		0x1000
 
-#if !defined(CONFIG_PLAT_USRV)
+#if defined(CONFIG_PLAT_MAPPI3)
+#define CFC_ATTR_MAPBASE	0x14014000
+#define CFC_IO_MAPBASE_BYTE	0xb4012000
+#define CFC_IO_MAPBASE_WORD	0xb4002000
+#elif !defined(CONFIG_PLAT_USRV)
 #define CFC_ATTR_MAPBASE        0x0c014000
 #define CFC_IO_MAPBASE_BYTE     0xac012000
 #define CFC_IO_MAPBASE_WORD     0xac002000
-#else	/* CONFIG_PLAT_USRV */
+#else
 #define CFC_ATTR_MAPBASE	0x04014000
 #define CFC_IO_MAPBASE_BYTE	0xa4012000
 #define CFC_IO_MAPBASE_WORD	0xa4002000

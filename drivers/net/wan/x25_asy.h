@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_X25_ASY_H
 #define _LINUX_X25_ASY_H
 
@@ -28,10 +29,6 @@ struct x25_asy {
   unsigned char		*xbuff;		/* transmitter buffer		*/
   unsigned char         *xhead;         /* pointer to next byte to XMIT */
   int                   xleft;          /* bytes left in XMIT queue     */
-
-  /* X.25 interface statistics. */
-  struct net_device_stats stats;
-
   int                   buffsize;       /* Max buffers sizes            */
 
   unsigned long		flags;		/* Flag values/ mode etc	*/
@@ -45,6 +42,6 @@ struct x25_asy {
 
 #define X25_ASY_MAGIC 0x5303
 
-extern int x25_asy_init(struct net_device *dev);
+int x25_asy_init(struct net_device *dev);
 
 #endif	/* _LINUX_X25_ASY.H */

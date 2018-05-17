@@ -3,63 +3,36 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1992 - 1997, 2000-2004 Silicon Graphics, Inc. All rights reserved.
+ * Copyright (C) 1992 - 1997, 2000-2006 Silicon Graphics, Inc. All rights reserved.
  */
 
-#include <linux/bootmem.h>
-#include <linux/nodemask.h>
+#include <linux/slab.h>
+#include <linux/export.h>
 #include <asm/sn/types.h>
-#include <asm/sn/sn_sal.h>
 #include <asm/sn/addrs.h>
-#include "pci/pcibus_provider_defs.h"
-#include "pci/pcidev.h"
-#include "pci/pcibr_provider.h"
-#include "xtalk/xwidgetdev.h"
-#include <asm/sn/geo.h>
-#include "xtalk/hubdev.h"
 #include <asm/sn/io.h>
-#include <asm/sn/simulator.h>
-
-char master_baseio_wid;
-nasid_t master_nasid = INVALID_NASID;	/* Partition Master */
-
-struct slab_info {
-	struct hubdev_info hubdev;
-};
-
-struct brick {
-	moduleid_t id;		/* Module ID of this module        */
-	struct slab_info slab_info[MAX_SLABS + 1];
-};
-
-int sn_ioif_inited = 0;		/* SN I/O infrastructure initialized? */
+#include <asm/sn/module.h>
+#include <asm/sn/intr.h>
+#include <asm/sn/pcibus_provider_defs.h>
+#include <asm/sn/pcidev.h>
+#include <asm/sn/sn_sal.h>
+#include "xtalk/hubdev.h"
 
 /*
- * Retrieve the DMA Flush List given nasid.  This list is needed 
- * to implement the WAR - Flush DMA data on PIO Reads.
+ * The code in this file will only be executed when running with
+ * a PROM that does _not_ have base ACPI IO support.
+ * (i.e., SN_ACPI_BASE_SUPPORT() == 0)
  */
-static inline uint64_t
-sal_get_widget_dmaflush_list(u64 nasid, u64 widget_num, u64 address)
-{
 
-	struct ia64_sal_retval ret_stuff;
-	ret_stuff.status = 0;
-	ret_stuff.v0 = 0;
+static int max_segment_number;		 /* Default highest segment number */
+static int max_pcibus_number = 255;	/* Default highest pci bus number */
 
-	SAL_CALL_NOLOCK(ret_stuff,
-			(u64) SN_SAL_IOIF_GET_WIDGET_DMAFLUSH_LIST,
-			(u64) nasid, (u64) widget_num, (u64) address, 0, 0, 0,
-			0);
-	return ret_stuff.v0;
-
-}
 
 /*
  * Retrieve the hub device info structure for the given nasid.
  */
-static inline uint64_t sal_get_hubdev_info(u64 handle, u64 address)
+static inline u64 sal_get_hubdev_info(u64 handle, u64 address)
 {
-
 	struct ia64_sal_retval ret_stuff;
 	ret_stuff.status = 0;
 	ret_stuff.v0 = 0;
@@ -73,9 +46,8 @@ static inline uint64_t sal_get_hubdev_info(u64 handle, u64 address)
 /*
  * Retrieve the pci bus information given the bus number.
  */
-static inline uint64_t sal_get_pcibus_info(u64 segment, u64 busnum, u64 address)
+static inline u64 sal_get_pcibus_info(u64 segment, u64 busnum, u64 address)
 {
-
 	struct ia64_sal_retval ret_stuff;
 	ret_stuff.status = 0;
 	ret_stuff.v0 = 0;
@@ -89,9 +61,9 @@ static inline uint64_t sal_get_pcibus_info(u64 segment, u64 busnum, u64 address)
 /*
  * Retrieve the pci device information given the bus and device|function number.
  */
-static inline uint64_t
-sal_get_pcidev_info(u64 segment, u64 bus_number, u64 devfn, u64 pci_dev, 
-			u64 sn_irq_info)
+static inline u64
+sal_get_pcidev_info(u64 segment, u64 bus_number, u64 devfn, u64 pci_dev,
+		    u64 sn_irq_info)
 {
 	struct ia64_sal_retval ret_stuff;
 	ret_stuff.status = 0;
@@ -99,313 +71,238 @@ sal_get_pcidev_info(u64 segment, u64 bus_number, u64 devfn, u64 pci_dev,
 
 	SAL_CALL_NOLOCK(ret_stuff,
 			(u64) SN_SAL_IOIF_GET_PCIDEV_INFO,
-			(u64) segment, (u64) bus_number, (u64) devfn, 
+			(u64) segment, (u64) bus_number, (u64) devfn,
 			(u64) pci_dev,
 			sn_irq_info, 0, 0);
 	return ret_stuff.v0;
 }
 
-/*
- * sn_alloc_pci_sysdata() - This routine allocates a pci controller
- *	which is expected as the pci_dev and pci_bus sysdata by the Linux
- *	PCI infrastructure.
- */
-static inline struct pci_controller *sn_alloc_pci_sysdata(void)
-{
-	struct pci_controller *pci_sysdata;
-
-	pci_sysdata = kmalloc(sizeof(*pci_sysdata), GFP_KERNEL);
-	if (!pci_sysdata)
-		BUG();
-
-	memset(pci_sysdata, 0, sizeof(*pci_sysdata));
-	return pci_sysdata;
-}
 
 /*
- * sn_fixup_ionodes() - This routine initializes the HUB data strcuture for 
- *	each node in the system.
+ * sn_fixup_ionodes() - This routine initializes the HUB data structure for
+ *			each node in the system. This function is only
+ *			executed when running with a non-ACPI capable PROM.
  */
-static void sn_fixup_ionodes(void)
+static void __init sn_fixup_ionodes(void)
 {
 
-	struct sn_flush_device_list *sn_flush_device_list;
 	struct hubdev_info *hubdev;
-	uint64_t status;
-	uint64_t nasid;
-	int i, widget;
+	u64 status;
+	u64 nasid;
+	int i;
+	extern void sn_common_hubdev_init(struct hubdev_info *);
 
-	for (i = 0; i < numionodes; i++) {
+	/*
+	 * Get SGI Specific HUB chipset information.
+	 * Inform Prom that this kernel can support domain bus numbering.
+	 */
+	for (i = 0; i < num_cnodes; i++) {
 		hubdev = (struct hubdev_info *)(NODEPDA(i)->pdinfo);
 		nasid = cnodeid_to_nasid(i);
-		status = sal_get_hubdev_info(nasid, (uint64_t) __pa(hubdev));
+		hubdev->max_segment_number = 0xffffffff;
+		hubdev->max_pcibus_number = 0xff;
+		status = sal_get_hubdev_info(nasid, (u64) __pa(hubdev));
 		if (status)
 			continue;
 
-		for (widget = 0; widget <= HUB_WIDGET_ID_MAX; widget++)
-			hubdev->hdi_xwidget_info[widget].xwi_hubinfo = hubdev;
-
-		if (!hubdev->hdi_flush_nasid_list.widget_p)
-			continue;
-
-		hubdev->hdi_flush_nasid_list.widget_p =
-		    kmalloc((HUB_WIDGET_ID_MAX + 1) *
-			    sizeof(struct sn_flush_device_list *), GFP_KERNEL);
-
-		memset(hubdev->hdi_flush_nasid_list.widget_p, 0x0,
-		       (HUB_WIDGET_ID_MAX + 1) *
-		       sizeof(struct sn_flush_device_list *));
-
-		for (widget = 0; widget <= HUB_WIDGET_ID_MAX; widget++) {
-			sn_flush_device_list = kmalloc(DEV_PER_WIDGET *
-						       sizeof(struct
-							      sn_flush_device_list),
-						       GFP_KERNEL);
-			memset(sn_flush_device_list, 0x0,
-			       DEV_PER_WIDGET *
-			       sizeof(struct sn_flush_device_list));
-
-			status =
-			    sal_get_widget_dmaflush_list(nasid, widget,
-							 (uint64_t)
-							 __pa
-							 (sn_flush_device_list));
-			if (status) {
-				kfree(sn_flush_device_list);
-				continue;
-			}
-
-			hubdev->hdi_flush_nasid_list.widget_p[widget] =
-			    sn_flush_device_list;
+		/* Save the largest Domain and pcibus numbers found. */
+		if (hubdev->max_segment_number) {
+			/*
+			 * Dealing with a Prom that supports segments.
+			 */
+			max_segment_number = hubdev->max_segment_number;
+			max_pcibus_number = hubdev->max_pcibus_number;
 		}
-
-		if (!(i & 1))
-			hub_error_init(hubdev);
-		else
-			ice_error_init(hubdev);
+		sn_common_hubdev_init(hubdev);
 	}
-
 }
 
 /*
- * sn_pci_fixup_slot() - This routine sets up a slot's resources
- * consistent with the Linux PCI abstraction layer.  Resources acquired
- * from our PCI provider include PIO maps to BAR space and interrupt
- * objects.
+ * sn_pci_legacy_window_fixup - Setup PCI resources for
+ *				legacy IO and MEM space. This needs to
+ *				be done here, as the PROM does not have
+ *				ACPI support defining the root buses
+ *				and their resources (_CRS),
  */
-static void sn_pci_fixup_slot(struct pci_dev *dev)
+static void
+sn_legacy_pci_window_fixup(struct resource *res,
+		u64 legacy_io, u64 legacy_mem)
+{
+		res[0].name = "legacy_io";
+		res[0].flags = IORESOURCE_IO;
+		res[0].start = legacy_io;
+		res[0].end = res[0].start + 0xffff;
+		res[0].parent = &ioport_resource;
+		res[1].name = "legacy_mem";
+		res[1].flags = IORESOURCE_MEM;
+		res[1].start = legacy_mem;
+		res[1].end = res[1].start + (1024 * 1024) - 1;
+		res[1].parent = &iomem_resource;
+}
+
+/*
+ * sn_io_slot_fixup() -   We are not running with an ACPI capable PROM,
+ *			  and need to convert the pci_dev->resource
+ *			  'start' and 'end' addresses to mapped addresses,
+ *			  and setup the pci_controller->window array entries.
+ */
+void
+sn_io_slot_fixup(struct pci_dev *dev)
 {
 	int idx;
-	int segment = 0;
-	uint64_t size;
+	struct resource *res;
+	unsigned long size;
+	struct pcidev_info *pcidev_info;
 	struct sn_irq_info *sn_irq_info;
-	struct pci_dev *host_pci_dev;
-	int status = 0;
+	int status;
 
-	dev->sysdata = kmalloc(sizeof(struct pcidev_info), GFP_KERNEL);
-	if (SN_PCIDEV_INFO(dev) <= 0)
-		BUG();		/* Cannot afford to run out of memory */
-	memset(SN_PCIDEV_INFO(dev), 0, sizeof(struct pcidev_info));
+	pcidev_info = kzalloc(sizeof(struct pcidev_info), GFP_KERNEL);
+	if (!pcidev_info)
+		panic("%s: Unable to alloc memory for pcidev_info", __func__);
 
-	sn_irq_info = kmalloc(sizeof(struct sn_irq_info), GFP_KERNEL);
-	if (sn_irq_info <= 0)
-		BUG();		/* Cannot afford to run out of memory */
-	memset(sn_irq_info, 0, sizeof(struct sn_irq_info));
+	sn_irq_info = kzalloc(sizeof(struct sn_irq_info), GFP_KERNEL);
+	if (!sn_irq_info)
+		panic("%s: Unable to alloc memory for sn_irq_info", __func__);
 
 	/* Call to retrieve pci device information needed by kernel. */
-	status = sal_get_pcidev_info((u64) segment, (u64) dev->bus->number, 
-				     dev->devfn,
-				     (u64) __pa(SN_PCIDEV_INFO(dev)),
-				     (u64) __pa(sn_irq_info));
-	if (status)
-		BUG();		/* Cannot get platform pci device information information */
+	status = sal_get_pcidev_info((u64) pci_domain_nr(dev),
+		(u64) dev->bus->number,
+		dev->devfn,
+		(u64) __pa(pcidev_info),
+		(u64) __pa(sn_irq_info));
+
+	BUG_ON(status); /* Cannot get platform pci device information */
+
 
 	/* Copy over PIO Mapped Addresses */
 	for (idx = 0; idx <= PCI_ROM_RESOURCE; idx++) {
-		unsigned long start, end, addr;
-
-		if (!SN_PCIDEV_INFO(dev)->pdi_pio_mapped_addr[idx])
+		if (!pcidev_info->pdi_pio_mapped_addr[idx])
 			continue;
 
-		start = dev->resource[idx].start;
-		end = dev->resource[idx].end;
-		size = end - start;
-		addr = SN_PCIDEV_INFO(dev)->pdi_pio_mapped_addr[idx];
-		addr = ((addr << 4) >> 4) | __IA64_UNCACHED_OFFSET;
-		dev->resource[idx].start = addr;
-		dev->resource[idx].end = addr + size;
-		if (dev->resource[idx].flags & IORESOURCE_IO)
-			dev->resource[idx].parent = &ioport_resource;
+		res = &dev->resource[idx];
+
+		size = res->end - res->start;
+		if (size == 0)
+			continue;
+
+		res->start = pcidev_info->pdi_pio_mapped_addr[idx];
+		res->end = res->start + size;
+
+		/*
+		 * if it's already in the device structure, remove it before
+		 * inserting
+		 */
+		if (res->parent && res->parent->child)
+			release_resource(res);
+
+		if (res->flags & IORESOURCE_IO)
+			insert_resource(&ioport_resource, res);
 		else
-			dev->resource[idx].parent = &iomem_resource;
+			insert_resource(&iomem_resource, res);
+		/*
+		 * If ROM, mark as shadowed in PROM.
+		 */
+		if (idx == PCI_ROM_RESOURCE) {
+			pci_disable_rom(dev);
+			res->flags = IORESOURCE_MEM | IORESOURCE_ROM_SHADOW |
+				     IORESOURCE_PCI_FIXED;
+		}
 	}
 
-	/* set up host bus linkages */
-	host_pci_dev =
-	    pci_find_slot(SN_PCIDEV_INFO(dev)->pdi_slot_host_handle >> 32,
-			  SN_PCIDEV_INFO(dev)->
-			  pdi_slot_host_handle & 0xffffffff);
-	SN_PCIDEV_INFO(dev)->pdi_host_pcidev_info =
-	    SN_PCIDEV_INFO(host_pci_dev);
-	SN_PCIDEV_INFO(dev)->pdi_linux_pcidev = dev;
-	SN_PCIDEV_INFO(dev)->pdi_pcibus_info = SN_PCIBUS_BUSSOFT(dev->bus);
-
-	/* Only set up IRQ stuff if this device has a host bus context */
-	if (SN_PCIDEV_BUSSOFT(dev) && sn_irq_info->irq_irq) {
-		SN_PCIDEV_INFO(dev)->pdi_sn_irq_info = sn_irq_info;
-		dev->irq = SN_PCIDEV_INFO(dev)->pdi_sn_irq_info->irq_irq;
-		sn_irq_fixup(dev, sn_irq_info);
-	}
+	sn_pci_fixup_slot(dev, pcidev_info, sn_irq_info);
 }
+EXPORT_SYMBOL(sn_io_slot_fixup);
 
 /*
  * sn_pci_controller_fixup() - This routine sets up a bus's resources
- * consistent with the Linux PCI abstraction layer.
+ *			       consistent with the Linux PCI abstraction layer.
  */
-static void sn_pci_controller_fixup(int segment, int busnum)
+static void __init
+sn_pci_controller_fixup(int segment, int busnum, struct pci_bus *bus)
 {
-	int status = 0;
-	int nasid, cnode;
-	struct pci_bus *bus;
+	s64 status = 0;
 	struct pci_controller *controller;
 	struct pcibus_bussoft *prom_bussoft_ptr;
-	struct hubdev_info *hubdev_info;
-	void *provider_soft;
+	struct resource *res;
+	LIST_HEAD(resources);
 
-	status =
-	    sal_get_pcibus_info((u64) segment, (u64) busnum,
-				(u64) ia64_tpa(&prom_bussoft_ptr));
-	if (status > 0) {
-		return;		/* bus # does not exist */
-	}
-
+ 	status = sal_get_pcibus_info((u64) segment, (u64) busnum,
+ 				     (u64) ia64_tpa(&prom_bussoft_ptr));
+ 	if (status > 0)
+		return;		/*bus # does not exist */
 	prom_bussoft_ptr = __va(prom_bussoft_ptr);
-	controller = sn_alloc_pci_sysdata();
-	/* controller non-zero is BUG'd in sn_alloc_pci_sysdata */
 
-	bus = pci_scan_bus(busnum, &pci_root_ops, controller);
-	if (bus == NULL) {
-		return;		/* error, or bus already scanned */
-	}
+	controller = kzalloc(sizeof(*controller), GFP_KERNEL);
+	BUG_ON(!controller);
+	controller->segment = segment;
 
-	/*
-	 * Per-provider fixup.  Copies the contents from prom to local
-	 * area and links SN_PCIBUS_BUSSOFT().
-	 *
-	 * Note:  Provider is responsible for ensuring that prom_bussoft_ptr
-	 * represents an asic-type that it can handle.
-	 */
-
-	if (prom_bussoft_ptr->bs_asic_type == PCIIO_ASIC_TYPE_PPB) {
-		return;		/* no further fixup necessary */
-	}
-
-	provider_soft = pcibr_bus_fixup(prom_bussoft_ptr);
-	if (provider_soft == NULL) {
-		return;		/* fixup failed or not applicable */
-	}
+	res = kcalloc(2, sizeof(struct resource), GFP_KERNEL);
+	BUG_ON(!res);
 
 	/*
-	 * Generic bus fixup goes here.  Don't reference prom_bussoft_ptr
-	 * after this point.
+	 * Temporarily save the prom_bussoft_ptr for use by sn_bus_fixup().
+	 * (platform_data will be overwritten later in sn_common_bus_fixup())
 	 */
+	controller->platform_data = prom_bussoft_ptr;
 
-	bus->sysdata = controller;
-	PCI_CONTROLLER(bus)->platform_data = provider_soft;
+	sn_legacy_pci_window_fixup(res,
+			prom_bussoft_ptr->bs_legacy_io,
+			prom_bussoft_ptr->bs_legacy_mem);
+	pci_add_resource_offset(&resources,	&res[0],
+			prom_bussoft_ptr->bs_legacy_io);
+	pci_add_resource_offset(&resources,	&res[1],
+			prom_bussoft_ptr->bs_legacy_mem);
 
-	nasid = NASID_GET(SN_PCIBUS_BUSSOFT(bus)->bs_base);
-	cnode = nasid_to_cnodeid(nasid);
-	hubdev_info = (struct hubdev_info *)(NODEPDA(cnode)->pdinfo);
-	SN_PCIBUS_BUSSOFT(bus)->bs_xwidget_info =
-	    &(hubdev_info->hdi_xwidget_info[SN_PCIBUS_BUSSOFT(bus)->bs_xid]);
+	bus = pci_scan_root_bus(NULL, busnum, &pci_root_ops, controller,
+				&resources);
+ 	if (bus == NULL) {
+		kfree(res);
+		kfree(controller);
+		return;
+	}
+	pci_bus_add_devices(bus);
 }
 
 /*
- * Ugly hack to get PCI setup until we have a proper ACPI namespace.
+ * sn_bus_fixup
  */
-
-#define PCI_BUSES_TO_SCAN 256
-
-static int __init sn_pci_init(void)
+void
+sn_bus_fixup(struct pci_bus *bus)
 {
-	int i = 0;
 	struct pci_dev *pci_dev = NULL;
-	extern void sn_init_cpei_timer(void);
-#ifdef CONFIG_PROC_FS
-	extern void register_sn_procfs(void);
-#endif
+	struct pcibus_bussoft *prom_bussoft_ptr;
 
-	if (!ia64_platform_is("sn2") || IS_RUNNING_ON_SIMULATOR())
-		return 0;
+	if (!bus->parent) {  /* If root bus */
+		prom_bussoft_ptr = PCI_CONTROLLER(bus)->platform_data;
+		if (prom_bussoft_ptr == NULL) {
+			printk(KERN_ERR
+			       "sn_bus_fixup: 0x%04x:0x%02x Unable to "
+			       "obtain prom_bussoft_ptr\n",
+			       pci_domain_nr(bus), bus->number);
+			return;
+		}
+		sn_common_bus_fixup(bus, prom_bussoft_ptr);
+        }
+        list_for_each_entry(pci_dev, &bus->devices, bus_list) {
+                sn_io_slot_fixup(pci_dev);
+        }
 
-	/*
-	 * This is needed to avoid bounce limit checks in the blk layer
-	 */
-	ia64_max_iommu_merge_mask = ~PAGE_MASK;
-	sn_fixup_ionodes();
-	sn_irq = kmalloc(sizeof(struct sn_irq_info *) * NR_IRQS, GFP_KERNEL);
-	if (sn_irq <= 0)
-		BUG();		/* Canno afford to run out of memory. */
-	memset(sn_irq, 0, sizeof(struct sn_irq_info *) * NR_IRQS);
-
-	sn_init_cpei_timer();
-
-#ifdef CONFIG_PROC_FS
-	register_sn_procfs();
-#endif
-
-	for (i = 0; i < PCI_BUSES_TO_SCAN; i++) {
-		sn_pci_controller_fixup(0, i);
-	}
-
-	/*
-	 * Generic Linux PCI Layer has created the pci_bus and pci_dev 
-	 * structures - time for us to add our SN PLatform specific 
-	 * information.
-	 */
-
-	while ((pci_dev =
-		pci_find_device(PCI_ANY_ID, PCI_ANY_ID, pci_dev)) != NULL) {
-		sn_pci_fixup_slot(pci_dev);
-	}
-
-	sn_ioif_inited = 1;	/* sn I/O infrastructure now initialized */
-
-	return 0;
 }
 
 /*
- * hubdev_init_node() - Creates the HUB data structure and link them to it's 
- *	own NODE specific data area.
+ * sn_io_init - PROM does not have ACPI support to define nodes or root buses,
+ *		so we need to do things the hard way, including initiating the
+ *		bus scanning ourselves.
  */
-void hubdev_init_node(nodepda_t * npda, cnodeid_t node)
+
+void __init sn_io_init(void)
 {
+	int i, j;
 
-	struct hubdev_info *hubdev_info;
+	sn_fixup_ionodes();
 
-	if (node >= num_online_nodes())	/* Headless/memless IO nodes */
-		hubdev_info =
-		    (struct hubdev_info *)alloc_bootmem_node(NODE_DATA(0),
-							     sizeof(struct
-								    hubdev_info));
-	else
-		hubdev_info =
-		    (struct hubdev_info *)alloc_bootmem_node(NODE_DATA(node),
-							     sizeof(struct
-								    hubdev_info));
-	npda->pdinfo = (void *)hubdev_info;
-
+	/* busses are not known yet ... */
+	for (i = 0; i <= max_segment_number; i++)
+		for (j = 0; j <= max_pcibus_number; j++)
+			sn_pci_controller_fixup(i, j, NULL);
 }
-
-geoid_t
-cnodeid_get_geoid(cnodeid_t cnode)
-{
-
-	struct hubdev_info *hubdev;
-
-	hubdev = (struct hubdev_info *)(NODEPDA(cnode)->pdinfo);
-	return hubdev->hdi_geoid;
-
-}
-
-subsys_initcall(sn_pci_init);

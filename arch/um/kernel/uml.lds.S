@@ -1,4 +1,6 @@
-#include <asm-generic/vmlinux.lds.h>
+/* SPDX-License-Identifier: GPL-2.0 */
+#include <asm/vmlinux.lds.h>
+#include <asm/page.h>
 
 OUTPUT_FORMAT(ELF_FORMAT)
 OUTPUT_ARCH(ELF_ARCH)
@@ -7,42 +9,27 @@ jiffies = jiffies_64;
 
 SECTIONS
 {
-  /*This must contain the right address - not quite the default ELF one.*/
+  /* This must contain the right address - not quite the default ELF one.*/
   PROVIDE (__executable_start = START);
+  /* Static binaries stick stuff here, like the sigreturn trampoline,
+   * invisibly to objdump.  So, just make __binary_start equal to the very
+   * beginning of the executable, and if there are unmapped pages after this,
+   * they are forever unusable.
+   */
+  __binary_start = START;
+
   . = START + SIZEOF_HEADERS;
 
-  /* Used in arch/um/kernel/mem.c. Any memory between START and __binary_start
-   * is remapped.*/
-  __binary_start = .;
-#ifdef MODE_TT
-  .thread_private : {
-    __start_thread_private = .;
-    errno = .;
-    . += 4;
-    arch/um/kernel/tt/unmap_fin.o (.data)
-    __end_thread_private = .;
-  }
-  . = ALIGN(4096);
-  .remap : { arch/um/kernel/tt/unmap_fin.o (.text) }
+  _text = .;
+  INIT_TEXT_SECTION(0)
+  . = ALIGN(PAGE_SIZE);
 
-  /* We want it only if we are in MODE_TT. In both cases, however, when MODE_TT
-   * is off the resulting binary segfaults.*/
-
-  . = ALIGN(4096);		/* Init code and data */
-#endif
-
-  _stext = .;
-  __init_begin = .;
-  .init.text : {
-	_sinittext = .;
-	*(.init.text)
-	_einittext = .;
-  }
-  . = ALIGN(4096);
   .text      :
   {
-    *(.text)
+    _stext = .;
+    TEXT_TEXT
     SCHED_TEXT
+    CPUIDLE_TEXT
     LOCK_TEXT
     *(.fixup)
     /* .gnu.warning sections are handled specially by elf32.em.  */
@@ -50,14 +37,42 @@ SECTIONS
     *(.gnu.linkonce.t*)
   }
 
-  #include "asm/common.lds.S"
+  . = ALIGN(PAGE_SIZE);
+  .syscall_stub : {
+	__syscall_stub_start = .;
+	*(.__syscall_stub*)
+	__syscall_stub_end = .;
+  }
 
-  init.data : { *(init.data) }
+  /*
+   * These are needed even in a static link, even if they wind up being empty.
+   * Newer glibc needs these __rel{,a}_iplt_{start,end} symbols.
+   */
+  .rel.plt : {
+	*(.rel.plt)
+	PROVIDE_HIDDEN(__rel_iplt_start = .);
+	*(.rel.iplt)
+	PROVIDE_HIDDEN(__rel_iplt_end = .);
+  }
+  .rela.plt : {
+	*(.rela.plt)
+	PROVIDE_HIDDEN(__rela_iplt_start = .);
+	*(.rela.iplt)
+	PROVIDE_HIDDEN(__rela_iplt_end = .);
+  }
+
+  #include <asm/common.lds.S>
+
+  __init_begin = .;
+  init.data : { INIT_DATA }
+  __init_end = .;
+
   .data    :
   {
-    . = ALIGN(KERNEL_STACK_SIZE);		/* init_task */
-    *(.data.init_task)
-    *(.data)
+    INIT_TASK_DATA(KERNEL_STACK_SIZE)
+    . = ALIGN(KERNEL_STACK_SIZE);
+    *(.data..init_irqstack)
+    DATA_DATA
     *(.gnu.linkonce.d*)
     CONSTRUCTORS
   }
@@ -73,34 +88,26 @@ SECTIONS
 
   .got           : { *(.got.plt) *(.got) }
   .dynamic       : { *(.dynamic) }
+  .tdata	  : { *(.tdata .tdata.* .gnu.linkonce.td.*) }
+  .tbss		  : { *(.tbss .tbss.* .gnu.linkonce.tb.*) *(.tcommon) }
   /* We want the small data sections together, so single-instruction offsets
      can access them all, and initialized data all before uninitialized, so
      we can shorten the on-disk segment size.  */
   .sdata     : { *(.sdata) }
   _edata  =  .;
   PROVIDE (edata = .);
-  . = ALIGN(0x1000);
-  .sbss      :
-  {
-   __bss_start = .;
-   PROVIDE(_bss_start = .);
-   *(.sbss)
-   *(.scommon)
-  }
-  .bss       :
-  {
-   *(.dynbss)
-   *(.bss)
-   *(COMMON)
-  }
-  _end = . ;
+  . = ALIGN(PAGE_SIZE);
+  __bss_start = .;
+  PROVIDE(_bss_start = .);
+  SBSS(0)
+  BSS(0)
+   __bss_stop = .;
+  _end = .;
   PROVIDE (end = .);
-  /* Stabs debugging sections.  */
-  .stab 0 : { *(.stab) }
-  .stabstr 0 : { *(.stabstr) }
-  .stab.excl 0 : { *(.stab.excl) }
-  .stab.exclstr 0 : { *(.stab.exclstr) }
-  .stab.index 0 : { *(.stab.index) }
-  .stab.indexstr 0 : { *(.stab.indexstr) }
-  .comment 0 : { *(.comment) }
+
+  STABS_DEBUG
+
+  DWARF_DEBUG
+
+  DISCARDS
 }

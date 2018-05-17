@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/fs/lockd/svcshare.c
  *
@@ -23,7 +24,7 @@ nlm_cmp_owner(struct nlm_share *share, struct xdr_netobj *oh)
 	    && !memcmp(share->s_owner.data, oh->data, oh->len);
 }
 
-u32
+__be32
 nlmsvc_share_file(struct nlm_host *host, struct nlm_file *file,
 			struct nlm_args *argp)
 {
@@ -39,7 +40,7 @@ nlmsvc_share_file(struct nlm_host *host, struct nlm_file *file,
 			return nlm_lck_denied;
 	}
 
-	share = (struct nlm_share *) kmalloc(sizeof(*share) + oh->len,
+	share = kmalloc(sizeof(*share) + oh->len,
 						GFP_KERNEL);
 	if (share == NULL)
 		return nlm_lck_denied_nolocks;
@@ -64,14 +65,15 @@ update:
 /*
  * Delete a share.
  */
-u32
+__be32
 nlmsvc_unshare_file(struct nlm_host *host, struct nlm_file *file,
 			struct nlm_args *argp)
 {
 	struct nlm_share	*share, **shpp;
 	struct xdr_netobj	*oh = &argp->lock.oh;
 
-	for (shpp = &file->f_shares; (share = *shpp) != 0; shpp = &share->s_next) {
+	for (shpp = &file->f_shares; (share = *shpp) != NULL;
+					shpp = &share->s_next) {
 		if (share->s_host == host && nlm_cmp_owner(share, oh)) {
 			*shpp = share->s_next;
 			kfree(share);
@@ -85,27 +87,21 @@ nlmsvc_unshare_file(struct nlm_host *host, struct nlm_file *file,
 }
 
 /*
- * Traverse all shares for a given file (and host).
- * NLM_ACT_CHECK is handled by nlmsvc_inspect_file.
+ * Traverse all shares for a given file, and delete
+ * those owned by the given (type of) host
  */
-int
-nlmsvc_traverse_shares(struct nlm_host *host, struct nlm_file *file, int action)
+void nlmsvc_traverse_shares(struct nlm_host *host, struct nlm_file *file,
+		nlm_host_match_fn_t match)
 {
 	struct nlm_share	*share, **shpp;
 
 	shpp = &file->f_shares;
 	while ((share = *shpp) !=  NULL) {
-		if (action == NLM_ACT_MARK)
-			share->s_host->h_inuse = 1;
-		else if (action == NLM_ACT_UNLOCK) {
-			if (host == NULL || host == share->s_host) {
-				*shpp = share->s_next;
-				kfree(share);
-				continue;
-			}
+		if (match(share->s_host, host)) {
+			*shpp = share->s_next;
+			kfree(share);
+			continue;
 		}
 		shpp = &share->s_next;
 	}
-
-	return 0;
 }

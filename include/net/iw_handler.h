@@ -1,10 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * This file define the new driver API for Wireless Extensions
  *
- * Version :	6	21.6.04
+ * Version :	8	16.3.07
  *
  * Authors :	Jean Tourrilhes - HPL - <jt@hpl.hp.com>
- * Copyright (c) 2001-2004 Jean Tourrilhes, All Rights Reserved.
+ * Copyright (c) 2001-2007 Jean Tourrilhes, All Rights Reserved.
  */
 
 #ifndef _IW_HANDLER_H
@@ -91,7 +92,7 @@
  * --------------------
  * The implementation goals were as follow :
  *	o Obvious : you should not need a PhD to understand what's happening,
- *		the benefit is easier maintainance.
+ *		the benefit is easier maintenance.
  *	o Flexible : it should accommodate a wide variety of driver
  *		implementations and be as flexible as the old API.
  *	o Lean : it should be efficient memory wise to minimise the impact
@@ -129,7 +130,7 @@
  *
  * Functions prototype uses union iwreq_data
  * -----------------------------------------
- * Some would have prefered functions defined this way :
+ * Some would have preferred functions defined this way :
  *	static int mydriver_ioctl_setrate(struct net_device *dev, 
  *					  long rate, int auto)
  * 1) The kernel code doesn't "validate" the content of iwreq_data, and
@@ -207,7 +208,7 @@
  * will be needed...
  * I just plan to increment with each new version.
  */
-#define IW_HANDLER_VERSION	6
+#define IW_HANDLER_VERSION	8
 
 /*
  * Changes :
@@ -232,6 +233,17 @@
  *	- Remove spy #ifdef, they are always on -> cleaner code
  *	- Add IW_DESCR_FLAG_NOMAX flag for very large requests
  *	- Start migrating get_wireless_stats to struct iw_handler_def
+ *
+ * V6 to V7
+ * --------
+ *	- Add struct ieee80211_device pointer in struct iw_public_data
+ *	- Remove (struct iw_point *)->pointer from events and streams
+ *	- Remove spy_offset from struct iw_handler_def
+ *	- Add "check" version of event macros for ieee802.11 stack
+ *
+ * V7 to V8
+ * ----------
+ *	- Prevent leaking of kernel space in stream on 64 bits.
  */
 
 /**************************** CONSTANTS ****************************/
@@ -245,7 +257,7 @@
 #define EIWCOMMIT	EINPROGRESS
 
 /* Flags available in struct iw_request_info */
-#define IW_REQUEST_FLAG_NONE	0x0000	/* No flag so far */
+#define IW_REQUEST_FLAG_COMPAT	0x0001	/* Compat ioctl call */
 
 /* Type of headers we know about (basically union iwreq_data) */
 #define IW_HEADER_TYPE_NULL	0	/* Not available */
@@ -289,8 +301,7 @@
  * This struct is also my long term insurance. I can add new fields here
  * without breaking the prototype of iw_handler...
  */
-struct iw_request_info
-{
+struct iw_request_info {
 	__u16		cmd;		/* Wireless Extension command */
 	__u16		flags;		/* More to come ;-) */
 };
@@ -310,20 +321,20 @@ typedef int (*iw_handler)(struct net_device *dev, struct iw_request_info *info,
  * shared by all driver instances... Same for the members...
  * This will be linked from net_device in <linux/netdevice.h>
  */
-struct iw_handler_def
-{
+struct iw_handler_def {
+
+	/* Array of handlers for standard ioctls
+	 * We will call dev->wireless_handlers->standard[ioctl - SIOCIWFIRST]
+	 */
+	const iw_handler *	standard;
 	/* Number of handlers defined (more precisely, index of the
 	 * last defined handler + 1) */
 	__u16			num_standard;
+
+#ifdef CONFIG_WEXT_PRIV
 	__u16			num_private;
 	/* Number of private arg description */
 	__u16			num_private_args;
-
-	/* Array of handlers for standard ioctls
-	 * We will call dev->wireless_handlers->standard[ioctl - SIOCSIWNAME]
-	 */
-	const iw_handler *	standard;
-
 	/* Array of handlers for private ioctls
 	 * Will call dev->wireless_handlers->private[ioctl - SIOCIWFIRSTPRIV]
 	 */
@@ -333,9 +344,7 @@ struct iw_handler_def
 	 * can put it in any order you want and should not leave holes...
 	 * We will automatically export that to user space... */
 	const struct iw_priv_args *	private_args;
-
-	/* This field will be *removed* in the next version of WE */
-	long			spy_offset;	/* DO NOT USE */
+#endif
 
 	/* New location of get_wireless_stats, to de-bloat struct net_device.
 	 * The old pointer in struct net_device will be gradually phased
@@ -362,8 +371,7 @@ struct iw_handler_def
 /*
  * Describe how a standard IOCTL looks like.
  */
-struct iw_ioctl_description
-{
+struct iw_ioctl_description {
 	__u8	header_type;		/* NULL, iw_point or other */
 	__u8	token_type;		/* Future */
 	__u16	token_size;		/* Granularity of payload */
@@ -385,8 +393,7 @@ struct iw_ioctl_description
 /*
  * Instance specific spy data, i.e. addresses spied and quality for them.
  */
-struct iw_spy_data
-{
+struct iw_spy_data {
 	/* --- Standard spy support --- */
 	int			spy_number;
 	u_char			spy_address[IW_MAX_SPY][ETH_ALEN];
@@ -400,16 +407,21 @@ struct iw_spy_data
 /* --------------------- DEVICE WIRELESS DATA --------------------- */
 /*
  * This is all the wireless data specific to a device instance that
- * is managed by the core of Wireless Extensions.
+ * is managed by the core of Wireless Extensions or the 802.11 layer.
  * We only keep pointer to those structures, so that a driver is free
  * to share them between instances.
  * This structure should be initialised before registering the device.
  * Access to this data follow the same rules as any other struct net_device
  * data (i.e. valid as long as struct net_device exist, same locking rules).
  */
+/* Forward declaration */
+struct libipw_device;
+/* The struct */
 struct iw_public_data {
 	/* Driver enhanced spy support */
-	struct iw_spy_data *	spy_data;
+	struct iw_spy_data *		spy_data;
+	/* Legacy structure managed by the ipw2x00-specific IEEE 802.11 layer */
+	struct libipw_device *		libipw;
 };
 
 /**************************** PROTOTYPES ****************************/
@@ -421,70 +433,91 @@ struct iw_public_data {
 /* First : function strictly used inside the kernel */
 
 /* Handle /proc/net/wireless, called in net/code/dev.c */
-extern int dev_get_wireless_info(char * buffer, char **start, off_t offset,
-				 int length);
-
-/* Handle IOCTLs, called in net/code/dev.c */
-extern int wireless_process_ioctl(struct ifreq *ifr, unsigned int cmd);
+int dev_get_wireless_info(char *buffer, char **start, off_t offset, int length);
 
 /* Second : functions that may be called by driver modules */
 
 /* Send a single event to user space */
-extern void wireless_send_event(struct net_device *	dev,
-				unsigned int		cmd,
-				union iwreq_data *	wrqu,
-				char *			extra);
+void wireless_send_event(struct net_device *dev, unsigned int cmd,
+			 union iwreq_data *wrqu, const char *extra);
+#ifdef CONFIG_WEXT_CORE
+/* flush all previous wext events - if work is done from netdev notifiers */
+void wireless_nlevent_flush(void);
+#else
+static inline void wireless_nlevent_flush(void) {}
+#endif
 
 /* We may need a function to send a stream of events to user space.
  * More on that later... */
 
 /* Standard handler for SIOCSIWSPY */
-extern int iw_handler_set_spy(struct net_device *	dev,
-			      struct iw_request_info *	info,
-			      union iwreq_data *	wrqu,
-			      char *			extra);
+int iw_handler_set_spy(struct net_device *dev, struct iw_request_info *info,
+		       union iwreq_data *wrqu, char *extra);
 /* Standard handler for SIOCGIWSPY */
-extern int iw_handler_get_spy(struct net_device *	dev,
-			      struct iw_request_info *	info,
-			      union iwreq_data *	wrqu,
-			      char *			extra);
+int iw_handler_get_spy(struct net_device *dev, struct iw_request_info *info,
+		       union iwreq_data *wrqu, char *extra);
 /* Standard handler for SIOCSIWTHRSPY */
-extern int iw_handler_set_thrspy(struct net_device *	dev,
-				 struct iw_request_info *info,
-				 union iwreq_data *	wrqu,
-				 char *			extra);
+int iw_handler_set_thrspy(struct net_device *dev, struct iw_request_info *info,
+			  union iwreq_data *wrqu, char *extra);
 /* Standard handler for SIOCGIWTHRSPY */
-extern int iw_handler_get_thrspy(struct net_device *	dev,
-				 struct iw_request_info *info,
-				 union iwreq_data *	wrqu,
-				 char *			extra);
+int iw_handler_get_thrspy(struct net_device *dev, struct iw_request_info *info,
+			  union iwreq_data *wrqu, char *extra);
 /* Driver call to update spy records */
-extern void wireless_spy_update(struct net_device *	dev,
-				unsigned char *		address,
-				struct iw_quality *	wstats);
+void wireless_spy_update(struct net_device *dev, unsigned char *address,
+			 struct iw_quality *wstats);
 
 /************************* INLINE FUNTIONS *************************/
 /*
  * Function that are so simple that it's more efficient inlining them
  */
 
+static inline int iwe_stream_lcp_len(struct iw_request_info *info)
+{
+#ifdef CONFIG_COMPAT
+	if (info->flags & IW_REQUEST_FLAG_COMPAT)
+		return IW_EV_COMPAT_LCP_LEN;
+#endif
+	return IW_EV_LCP_LEN;
+}
+
+static inline int iwe_stream_point_len(struct iw_request_info *info)
+{
+#ifdef CONFIG_COMPAT
+	if (info->flags & IW_REQUEST_FLAG_COMPAT)
+		return IW_EV_COMPAT_POINT_LEN;
+#endif
+	return IW_EV_POINT_LEN;
+}
+
+static inline int iwe_stream_event_len_adjust(struct iw_request_info *info,
+					      int event_len)
+{
+#ifdef CONFIG_COMPAT
+	if (info->flags & IW_REQUEST_FLAG_COMPAT) {
+		event_len -= IW_EV_LCP_LEN;
+		event_len += IW_EV_COMPAT_LCP_LEN;
+	}
+#endif
+
+	return event_len;
+}
+
 /*------------------------------------------------------------------*/
 /*
  * Wrapper to add an Wireless Event to a stream of events.
  */
+char *iwe_stream_add_event(struct iw_request_info *info, char *stream,
+			   char *ends, struct iw_event *iwe, int event_len);
+
 static inline char *
-iwe_stream_add_event(char *	stream,		/* Stream of events */
-		     char *	ends,		/* End of stream */
-		     struct iw_event *iwe,	/* Payload */
-		     int	event_len)	/* Real size of payload */
+iwe_stream_add_event_check(struct iw_request_info *info, char *stream,
+			   char *ends, struct iw_event *iwe, int event_len)
 {
-	/* Check if it's possible */
-	if((stream + event_len) < ends) {
-		iwe->len = event_len;
-		memcpy(stream, (char *) iwe, event_len);
-		stream += event_len;
-	}
-	return stream;
+	char *res = iwe_stream_add_event(info, stream, ends, iwe, event_len);
+
+	if (res == stream)
+		return ERR_PTR(-E2BIG);
+	return res;
 }
 
 /*------------------------------------------------------------------*/
@@ -492,21 +525,18 @@ iwe_stream_add_event(char *	stream,		/* Stream of events */
  * Wrapper to add an short Wireless Event containing a pointer to a
  * stream of events.
  */
+char *iwe_stream_add_point(struct iw_request_info *info, char *stream,
+			   char *ends, struct iw_event *iwe, char *extra);
+
 static inline char *
-iwe_stream_add_point(char *	stream,		/* Stream of events */
-		     char *	ends,		/* End of stream */
-		     struct iw_event *iwe,	/* Payload */
-		     char *	extra)
+iwe_stream_add_point_check(struct iw_request_info *info, char *stream,
+			   char *ends, struct iw_event *iwe, char *extra)
 {
-	int	event_len = IW_EV_POINT_LEN + iwe->u.data.length;
-	/* Check if it's possible */
-	if((stream + event_len) < ends) {
-		iwe->len = event_len;
-		memcpy(stream, (char *) iwe, IW_EV_POINT_LEN);
-		memcpy(stream + IW_EV_POINT_LEN, extra, iwe->u.data.length);
-		stream += event_len;
-	}
-	return stream;
+	char *res = iwe_stream_add_point(info, stream, ends, iwe, extra);
+
+	if (res == stream)
+		return ERR_PTR(-E2BIG);
+	return res;
 }
 
 /*------------------------------------------------------------------*/
@@ -515,26 +545,8 @@ iwe_stream_add_point(char *	stream,		/* Stream of events */
  * Be careful, this one is tricky to use properly :
  * At the first run, you need to have (value = event + IW_EV_LCP_LEN).
  */
-static inline char *
-iwe_stream_add_value(char *	event,		/* Event in the stream */
-		     char *	value,		/* Value in event */
-		     char *	ends,		/* End of stream */
-		     struct iw_event *iwe,	/* Payload */
-		     int	event_len)	/* Real size of payload */
-{
-	/* Don't duplicate LCP */
-	event_len -= IW_EV_LCP_LEN;
-
-	/* Check if it's possible */
-	if((value + event_len) < ends) {
-		/* Add new value */
-		memcpy(value, (char *) iwe + IW_EV_LCP_LEN, event_len);
-		value += event_len;
-		/* Patch LCP */
-		iwe->len = value - event;
-		memcpy(event, (char *) iwe, IW_EV_LCP_LEN);
-	}
-	return value;
-}
+char *iwe_stream_add_value(struct iw_request_info *info, char *event,
+			   char *value, char *ends, struct iw_event *iwe,
+			   int event_len);
 
 #endif	/* _IW_HANDLER_H */

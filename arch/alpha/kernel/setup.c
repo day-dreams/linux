@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/alpha/kernel/setup.c
  *
@@ -18,22 +19,23 @@
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/user.h>
-#include <linux/a.out.h>
-#include <linux/tty.h>
+#include <linux/screen_info.h>
 #include <linux/delay.h>
-#include <linux/config.h>	/* CONFIG_ALPHA_LCA etc */
 #include <linux/mc146818rtc.h>
 #include <linux/console.h>
+#include <linux/cpu.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
+#include <linux/platform_device.h>
 #include <linux/bootmem.h>
 #include <linux/pci.h>
 #include <linux/seq_file.h>
 #include <linux/root_dev.h>
 #include <linux/initrd.h>
 #include <linux/eisa.h>
+#include <linux/pfn.h>
 #ifdef CONFIG_MAGIC_SYSRQ
 #include <linux/sysrq.h>
 #include <linux/reboot.h>
@@ -41,8 +43,10 @@
 #include <linux/notifier.h>
 #include <asm/setup.h>
 #include <asm/io.h>
+#include <linux/log2.h>
+#include <linux/export.h>
 
-extern struct notifier_block *panic_notifier_list;
+extern struct atomic_notifier_head panic_notifier_list;
 static int alpha_panic_event(struct notifier_block *, unsigned long, void *);
 static struct notifier_block alpha_panic_block = {
 	alpha_panic_event,
@@ -50,12 +54,10 @@ static struct notifier_block alpha_panic_block = {
         INT_MAX /* try to do it first */
 };
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/hwrpb.h>
 #include <asm/dma.h>
-#include <asm/io.h>
 #include <asm/mmu_context.h>
 #include <asm/console.h>
 
@@ -64,6 +66,7 @@ static struct notifier_block alpha_panic_block = {
 
 
 struct hwrpb_struct *hwrpb;
+EXPORT_SYMBOL(hwrpb);
 unsigned long srm_hae;
 
 int alpha_l1i_cacheshape;
@@ -75,6 +78,11 @@ int alpha_l3_cacheshape;
 /* 0=minimum, 1=verbose, 2=all */
 /* These can be overridden via the command line, ie "verbose_mcheck=2") */
 unsigned long alpha_verbose_mcheck = CONFIG_VERBOSE_MCHECK_ON;
+#endif
+
+#ifdef CONFIG_NUMA
+struct cpumask node_to_cpumask_map[MAX_NUMNODES] __read_mostly;
+EXPORT_SYMBOL(node_to_cpumask_map);
 #endif
 
 /* Which processor we booted from.  */
@@ -108,12 +116,17 @@ unsigned long alpha_agpgart_size = DEFAULT_AGP_APER_SIZE;
 
 #ifdef CONFIG_ALPHA_GENERIC
 struct alpha_machine_vector alpha_mv;
-int alpha_using_srm;
+EXPORT_SYMBOL(alpha_mv);
 #endif
 
-unsigned char aux_device_present = 0xaa;
+#ifndef alpha_using_srm
+int alpha_using_srm;
+EXPORT_SYMBOL(alpha_using_srm);
+#endif
 
-#define N(a) (sizeof(a)/sizeof(a[0]))
+#ifndef alpha_using_qemu
+int alpha_using_qemu;
+#endif
 
 static struct alpha_machine_vector *get_sysvec(unsigned long, unsigned long,
 					       unsigned long);
@@ -122,7 +135,7 @@ static void get_sysnames(unsigned long, unsigned long, unsigned long,
 			 char **, char **);
 static void determine_cpu_caches (unsigned int);
 
-static char command_line[COMMAND_LINE_SIZE];
+static char __initdata command_line[COMMAND_LINE_SIZE];
 
 /*
  * The format of "screen_info" is strange, and due to early
@@ -139,6 +152,8 @@ struct screen_info screen_info = {
 	.orig_video_points = 16
 };
 
+EXPORT_SYMBOL(screen_info);
+
 /*
  * The direct map I/O window, if any.  This should be the same
  * for all busses, since it's used by virt_to_bus.
@@ -146,6 +161,8 @@ struct screen_info screen_info = {
 
 unsigned long __direct_map_base;
 unsigned long __direct_map_size;
+EXPORT_SYMBOL(__direct_map_base);
+EXPORT_SYMBOL(__direct_map_size);
 
 /*
  * Declare all of the machine vectors.
@@ -239,17 +256,14 @@ reserve_std_resources(void)
 	standard_io_resources[0].start = RTC_PORT(0);
 	standard_io_resources[0].end = RTC_PORT(0) + 0x10;
 
-	for (i = 0; i < N(standard_io_resources); ++i)
+	for (i = 0; i < ARRAY_SIZE(standard_io_resources); ++i)
 		request_resource(io, standard_io_resources+i);
 }
 
-#define PFN_UP(x)	(((x) + PAGE_SIZE-1) >> PAGE_SHIFT)
-#define PFN_DOWN(x)	((x) >> PAGE_SHIFT)
-#define PFN_PHYS(x)	((x) << PAGE_SHIFT)
 #define PFN_MAX		PFN_DOWN(0x80000000)
-#define for_each_mem_cluster(memdesc, cluster, i)		\
-	for ((cluster) = (memdesc)->cluster, (i) = 0;		\
-	     (i) < (memdesc)->numclusters; (i)++, (cluster)++)
+#define for_each_mem_cluster(memdesc, _cluster, i)		\
+	for ((_cluster) = (memdesc)->cluster, (i) = 0;		\
+	     (i) < (memdesc)->numclusters; (i)++, (_cluster)++)
 
 static unsigned long __init
 get_mem_size_limit(char *s)
@@ -427,7 +441,8 @@ setup_memory(void *kernel_end)
 	}
 
 	/* Reserve the bootmap memory.  */
-	reserve_bootmem(PFN_PHYS(bootmap_start), bootmap_size);
+	reserve_bootmem(PFN_PHYS(bootmap_start), bootmap_size,
+			BOOTMEM_DEFAULT);
 	printk("reserving pages %ld:%ld\n", bootmap_start, bootmap_start+PFN_UP(bootmap_size));
 
 #ifdef CONFIG_BLK_DEV_INITRD
@@ -445,7 +460,7 @@ setup_memory(void *kernel_end)
 				       phys_to_virt(PFN_PHYS(max_low_pfn)));
 		} else {
 			reserve_bootmem(virt_to_phys((void *)initrd_start),
-					INITRD_SIZE);
+					INITRD_SIZE, BOOTMEM_DEFAULT);
 		}
 	}
 #endif /* CONFIG_BLK_DEV_INITRD */
@@ -474,10 +489,21 @@ page_is_ram(unsigned long pfn)
 	return 0;
 }
 
-#undef PFN_UP
-#undef PFN_DOWN
-#undef PFN_PHYS
-#undef PFN_MAX
+static int __init
+register_cpus(void)
+{
+	int i;
+
+	for_each_possible_cpu(i) {
+		struct cpu *p = kzalloc(sizeof(*p), GFP_KERNEL);
+		if (!p)
+			return -ENOMEM;
+		register_cpu(p, i);
+	}
+	return 0;
+}
+
+arch_initcall(register_cpus);
 
 void __init
 setup_arch(char **cmdline_p)
@@ -509,12 +535,17 @@ setup_arch(char **cmdline_p)
 	}
 
 	/* Register a call for panic conditions. */
-	notifier_chain_register(&panic_notifier_list, &alpha_panic_block);
+	atomic_notifier_chain_register(&panic_notifier_list,
+			&alpha_panic_block);
 
-#ifdef CONFIG_ALPHA_GENERIC
+#ifndef alpha_using_srm
 	/* Assume that we've booted from SRM if we haven't booted from MILO.
 	   Detect the later by looking for "MILO" in the system serial nr.  */
 	alpha_using_srm = strncmp((const char *)hwrpb->ssn, "MILO", 4) != 0;
+#endif
+#ifndef alpha_using_qemu
+	/* Similarly, look for QEMU.  */
+	alpha_using_qemu = strstr((const char *)hwrpb->ssn, "QEMU") != 0;
 #endif
 
 	/* If we are using SRM, we want to allow callbacks
@@ -534,7 +565,7 @@ setup_arch(char **cmdline_p)
 	} else {
 		strlcpy(command_line, COMMAND_LINE, sizeof command_line);
 	}
-	strcpy(saved_command_line, command_line);
+	strcpy(boot_command_line, command_line);
 	*cmdline_p = command_line;
 
 	/* 
@@ -576,7 +607,7 @@ setup_arch(char **cmdline_p)
 	}
 
 	/* Replace the command line, now that we've killed it with strsep.  */
-	strcpy(command_line, saved_command_line);
+	strcpy(command_line, boot_command_line);
 
 	/* If we want SRM console printk echoing early, do it now. */
 	if (alpha_using_srm && srmcons_output) {
@@ -729,15 +760,6 @@ setup_arch(char **cmdline_p)
 	setup_smp();
 #endif
 	paging_init();
-}
-
-void __init
-disable_early_printk(void)
-{
-	if (alpha_using_srm && srmcons_output) {
-		unregister_srm_console();
-		srmcons_output = 0;
-	}
 }
 
 static char sys_unknown[] = "Unknown";
@@ -908,13 +930,13 @@ get_sysvec(unsigned long type, unsigned long variation, unsigned long cpu)
 
 	/* Search the system tables first... */
 	vec = NULL;
-	if (type < N(systype_vecs)) {
+	if (type < ARRAY_SIZE(systype_vecs)) {
 		vec = systype_vecs[type];
 	} else if ((type > ST_API_BIAS) &&
-		   (type - ST_API_BIAS) < N(api_vecs)) {
+		   (type - ST_API_BIAS) < ARRAY_SIZE(api_vecs)) {
 		vec = api_vecs[type - ST_API_BIAS];
 	} else if ((type > ST_UNOFFICIAL_BIAS) &&
-		   (type - ST_UNOFFICIAL_BIAS) < N(unofficial_vecs)) {
+		   (type - ST_UNOFFICIAL_BIAS) < ARRAY_SIZE(unofficial_vecs)) {
 		vec = unofficial_vecs[type - ST_UNOFFICIAL_BIAS];
 	}
 
@@ -928,11 +950,11 @@ get_sysvec(unsigned long type, unsigned long variation, unsigned long cpu)
 
 		switch (type) {
 		case ST_DEC_ALCOR:
-			if (member < N(alcor_indices))
+			if (member < ARRAY_SIZE(alcor_indices))
 				vec = alcor_vecs[alcor_indices[member]];
 			break;
 		case ST_DEC_EB164:
-			if (member < N(eb164_indices))
+			if (member < ARRAY_SIZE(eb164_indices))
 				vec = eb164_vecs[eb164_indices[member]];
 			/* PC164 may show as EB164 variation with EV56 CPU,
 			   but, since no true EB164 had anything but EV5... */
@@ -940,24 +962,24 @@ get_sysvec(unsigned long type, unsigned long variation, unsigned long cpu)
 				vec = &pc164_mv;
 			break;
 		case ST_DEC_EB64P:
-			if (member < N(eb64p_indices))
+			if (member < ARRAY_SIZE(eb64p_indices))
 				vec = eb64p_vecs[eb64p_indices[member]];
 			break;
 		case ST_DEC_EB66:
-			if (member < N(eb66_indices))
+			if (member < ARRAY_SIZE(eb66_indices))
 				vec = eb66_vecs[eb66_indices[member]];
 			break;
 		case ST_DEC_MARVEL:
-			if (member < N(marvel_indices))
+			if (member < ARRAY_SIZE(marvel_indices))
 				vec = marvel_vecs[marvel_indices[member]];
 			break;
 		case ST_DEC_TITAN:
 			vec = titan_vecs[0];	/* default */
-			if (member < N(titan_indices))
+			if (member < ARRAY_SIZE(titan_indices))
 				vec = titan_vecs[titan_indices[member]];
 			break;
 		case ST_DEC_TSUNAMI:
-			if (member < N(tsunami_indices))
+			if (member < ARRAY_SIZE(tsunami_indices))
 				vec = tsunami_vecs[tsunami_indices[member]];
 			break;
 		case ST_DEC_1000:
@@ -1029,7 +1051,7 @@ get_sysvec_byname(const char *name)
 
 	size_t i;
 
-	for (i = 0; i < N(all_vecs); ++i) {
+	for (i = 0; i < ARRAY_SIZE(all_vecs); ++i) {
 		struct alpha_machine_vector *mv = all_vecs[i];
 		if (strcasecmp(mv->vector_name, name) == 0)
 			return mv;
@@ -1045,13 +1067,13 @@ get_sysnames(unsigned long type, unsigned long variation, unsigned long cpu,
 
 	/* If not in the tables, make it UNKNOWN,
 	   else set type name to family */
-	if (type < N(systype_names)) {
+	if (type < ARRAY_SIZE(systype_names)) {
 		*type_name = systype_names[type];
 	} else if ((type > ST_API_BIAS) &&
-		   (type - ST_API_BIAS) < N(api_names)) {
+		   (type - ST_API_BIAS) < ARRAY_SIZE(api_names)) {
 		*type_name = api_names[type - ST_API_BIAS];
 	} else if ((type > ST_UNOFFICIAL_BIAS) &&
-		   (type - ST_UNOFFICIAL_BIAS) < N(unofficial_names)) {
+		   (type - ST_UNOFFICIAL_BIAS) < ARRAY_SIZE(unofficial_names)) {
 		*type_name = unofficial_names[type - ST_UNOFFICIAL_BIAS];
 	} else {
 		*type_name = sys_unknown;
@@ -1073,40 +1095,41 @@ get_sysnames(unsigned long type, unsigned long variation, unsigned long cpu,
 	default: /* default to variation "0" for now */
 		break;
 	case ST_DEC_EB164:
-		if (member < N(eb164_indices))
-			*variation_name = eb164_names[eb164_indices[member]];
+		if (member >= ARRAY_SIZE(eb164_indices))
+			break;
+		*variation_name = eb164_names[eb164_indices[member]];
 		/* PC164 may show as EB164 variation, but with EV56 CPU,
 		   so, since no true EB164 had anything but EV5... */
 		if (eb164_indices[member] == 0 && cpu == EV56_CPU)
 			*variation_name = eb164_names[1]; /* make it PC164 */
 		break;
 	case ST_DEC_ALCOR:
-		if (member < N(alcor_indices))
+		if (member < ARRAY_SIZE(alcor_indices))
 			*variation_name = alcor_names[alcor_indices[member]];
 		break;
 	case ST_DEC_EB64P:
-		if (member < N(eb64p_indices))
+		if (member < ARRAY_SIZE(eb64p_indices))
 			*variation_name = eb64p_names[eb64p_indices[member]];
 		break;
 	case ST_DEC_EB66:
-		if (member < N(eb66_indices))
+		if (member < ARRAY_SIZE(eb66_indices))
 			*variation_name = eb66_names[eb66_indices[member]];
 		break;
 	case ST_DEC_MARVEL:
-		if (member < N(marvel_indices))
+		if (member < ARRAY_SIZE(marvel_indices))
 			*variation_name = marvel_names[marvel_indices[member]];
 		break;
 	case ST_DEC_RAWHIDE:
-		if (member < N(rawhide_indices))
+		if (member < ARRAY_SIZE(rawhide_indices))
 			*variation_name = rawhide_names[rawhide_indices[member]];
 		break;
 	case ST_DEC_TITAN:
 		*variation_name = titan_names[0];	/* default */
-		if (member < N(titan_indices))
+		if (member < ARRAY_SIZE(titan_indices))
 			*variation_name = titan_names[titan_indices[member]];
 		break;
 	case ST_DEC_TSUNAMI:
-		if (member < N(tsunami_indices))
+		if (member < ARRAY_SIZE(tsunami_indices))
 			*variation_name = tsunami_names[tsunami_indices[member]];
 		break;
 	}
@@ -1198,16 +1221,23 @@ show_cpuinfo(struct seq_file *f, void *slot)
 	char *systype_name;
 	char *sysvariation_name;
 	int nr_processors;
+	unsigned long timer_freq;
 
 	cpu_index = (unsigned) (cpu->type - 1);
 	cpu_name = "Unknown";
-	if (cpu_index < N(cpu_names))
+	if (cpu_index < ARRAY_SIZE(cpu_names))
 		cpu_name = cpu_names[cpu_index];
 
 	get_sysnames(hwrpb->sys_type, hwrpb->sys_variation,
 		     cpu->type, &systype_name, &sysvariation_name);
 
 	nr_processors = get_nr_processors(cpu, hwrpb->nr_processors);
+
+#if CONFIG_HZ == 1024 || CONFIG_HZ == 1200
+	timer_freq = (100UL * hwrpb->intr_freq) / 4096;
+#else
+	timer_freq = 100UL * CONFIG_HZ;
+#endif
 
 	seq_printf(f, "cpu\t\t\t: Alpha\n"
 		      "cpu model\t\t: %s\n"
@@ -1234,8 +1264,7 @@ show_cpuinfo(struct seq_file *f, void *slot)
 		       (char*)hwrpb->ssn,
 		       est_cycle_freq ? : hwrpb->cycle_freq,
 		       est_cycle_freq ? "est." : "",
-		       hwrpb->intr_freq / 4096,
-		       (100 * hwrpb->intr_freq / 4096) % 100,
+		       timer_freq / 100, timer_freq % 100,
 		       hwrpb->pagesize,
 		       hwrpb->pa_bits,
 		       hwrpb->max_asn,
@@ -1246,9 +1275,9 @@ show_cpuinfo(struct seq_file *f, void *slot)
 		       platform_string(), nr_processors);
 
 #ifdef CONFIG_SMP
-	seq_printf(f, "cpus active\t\t: %d\n"
+	seq_printf(f, "cpus active\t\t: %u\n"
 		      "cpu active mask\t\t: %016lx\n",
-		       num_online_cpus(), cpus_addr(cpu_possible_map)[0]);
+		       num_online_cpus(), cpumask_bits(cpu_possible_mask)[0]);
 #endif
 
 	show_cache_size (f, "L1 Icache", alpha_l1i_cacheshape);
@@ -1299,7 +1328,7 @@ external_cache_probe(int minsize, int width)
 	long size = minsize, maxsize = MAX_BCACHE_SIZE * 2;
 
 	if (maxsize > (max_low_pfn + 1) << PAGE_SHIFT)
-		maxsize = 1 << (floor_log2(max_low_pfn + 1) + PAGE_SHIFT);
+		maxsize = 1 << (ilog2(max_low_pfn + 1) + PAGE_SHIFT);
 
 	/* Get the first block cached. */
 	read_mem_block(__va(0), stride, size);
@@ -1395,8 +1424,6 @@ determine_cpu_caches (unsigned int cpu_type)
 	case PCA56_CPU:
 	case PCA57_CPU:
 	  {
-		unsigned long cbox_config, size;
-
 		if (cpu_type == PCA56_CPU) {
 			L1I = CSHAPE(16*1024, 6, 1);
 			L1D = CSHAPE(8*1024, 5, 1);
@@ -1406,10 +1433,12 @@ determine_cpu_caches (unsigned int cpu_type)
 		}
 		L3 = -1;
 
+#if 0
+		unsigned long cbox_config, size;
+
 		cbox_config = *(vulp) phys_to_virt (0xfffff00008UL);
 		size = 512*1024 * (1 << ((cbox_config >> 12) & 3));
 
-#if 0
 		L2 = ((cbox_config >> 31) & 1 ? CSHAPE (size, 6, 1) : -1);
 #else
 		L2 = external_cache_probe(512*1024, 6);
@@ -1467,7 +1496,7 @@ c_stop(struct seq_file *f, void *v)
 {
 }
 
-struct seq_operations cpuinfo_op = {
+const struct seq_operations cpuinfo_op = {
 	.start	= c_start,
 	.next	= c_next,
 	.stop	= c_stop,
@@ -1486,3 +1515,20 @@ alpha_panic_event(struct notifier_block *this, unsigned long event, void *ptr)
 #endif
         return NOTIFY_DONE;
 }
+
+static __init int add_pcspkr(void)
+{
+	struct platform_device *pd;
+	int ret;
+
+	pd = platform_device_alloc("pcspkr", -1);
+	if (!pd)
+		return -ENOMEM;
+
+	ret = platform_device_add(pd);
+	if (ret)
+		platform_device_put(pd);
+
+	return ret;
+}
+device_initcall(add_pcspkr);

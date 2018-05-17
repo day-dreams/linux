@@ -16,18 +16,36 @@
 # Modified for PA-RISC Linux by Paul Lahaie, Alex deVries, 
 # Mike Shaver, Helge Deller and Martin K. Petersen
 #
+
+KBUILD_IMAGE := vmlinuz
+
+KBUILD_DEFCONFIG := default_defconfig
+
 NM		= sh $(srctree)/arch/parisc/nm
-ifdef CONFIG_PARISC64
-CROSS_COMPILE	:= hppa64-linux-
+CHECKFLAGS	+= -D__hppa__=1 -mbig-endian
+LIBGCC		= $(shell $(CC) $(KBUILD_CFLAGS) -print-libgcc-file-name)
+export LIBGCC
+
+ifdef CONFIG_64BIT
 UTS_MACHINE	:= parisc64
-else
-MACHINE := $(subst 64,,$(shell uname -m))
-ifneq ($(MACHINE),parisc)
-CROSS_COMPILE	:= hppa-linux-
-endif
+CHECKFLAGS	+= -D__LP64__=1 -m64
+CC_ARCHES	= hppa64
+LD_BFD		:= elf64-hppa-linux
+else # 32-bit
+CC_ARCHES	= hppa hppa2.0 hppa1.1
+LD_BFD		:= elf32-hppa-linux
 endif
 
-FINAL_LD=$(CROSS_COMPILE)ld --warn-common --warn-section-align 
+export LD_BFD
+
+ifneq ($(SUBARCH),$(UTS_MACHINE))
+	ifeq ($(CROSS_COMPILE),)
+		CC_SUFFIXES = linux linux-gnu unknown-linux-gnu
+		CROSS_COMPILE := $(call cc-cross-prefix, \
+			$(foreach a,$(CC_ARCHES), \
+			$(foreach s,$(CC_SUFFIXES),$(a)-$(s)-)))
+	endif
+endif
 
 OBJCOPY_FLAGS =-O binary -R .note -R .comment -S
 
@@ -35,19 +53,30 @@ cflags-y	:= -pipe
 
 # These flags should be implied by an hppa-linux configuration, but they
 # are not in gcc 3.2.
-cflags-y	+= -mno-space-regs -mfast-indirect-calls
+cflags-y	+= -mno-space-regs
+
+# -mfast-indirect-calls is only relevant for 32-bit kernels.
+ifndef CONFIG_64BIT
+cflags-y	+= -mfast-indirect-calls
+endif
 
 # Currently we save and restore fpregs on all kernel entry/interruption paths.
 # If that gets optimized, we might need to disable the use of fpregs in the
 # kernel.
-#cflags-y	+= -mdisable-fpregs
+cflags-y	+= -mdisable-fpregs
 
 # Without this, "ld -r" results in .text sections that are too big
 # (> 0x40000) for branches to reach stubs.
 cflags-y	+= -ffunction-sections
 
+# Use long jumps instead of long branches (needed if your linker fails to
+# link a too big vmlinux executable). Not enabled for building modules.
+ifdef CONFIG_MLONGCALLS
+KBUILD_CFLAGS_KERNEL += -mlong-calls
+endif
+
 # select which processor to optimise for
-cflags-$(CONFIG_PA7100)		+= -march=1.1 -mschedule=7100
+cflags-$(CONFIG_PA7000)		+= -march=1.1 -mschedule=7100
 cflags-$(CONFIG_PA7200)		+= -march=1.1 -mschedule=7200
 cflags-$(CONFIG_PA7100LC)	+= -march=1.1 -mschedule=7100LC
 cflags-$(CONFIG_PA7300LC)	+= -march=1.1 -mschedule=7300
@@ -55,60 +84,85 @@ cflags-$(CONFIG_PA8X00)		+= -march=2.0 -mschedule=8000
 
 head-y			:= arch/parisc/kernel/head.o 
 
-CFLAGS	+= $(cflags-y)
+KBUILD_CFLAGS	+= $(cflags-y)
 
-kernel-y			:= mm/ kernel/ math-emu/ kernel/init_task.o
-kernel-$(CONFIG_HPUX)		+= hpux/
+kernel-y			:= mm/ kernel/ math-emu/
 
 core-y	+= $(addprefix arch/parisc/, $(kernel-y))
-libs-y	+= arch/parisc/lib/ `$(CC) -print-libgcc-file-name`
+libs-y	+= arch/parisc/lib/ $(LIBGCC)
 
 drivers-$(CONFIG_OPROFILE)		+= arch/parisc/oprofile/
 
-palo: vmlinux
-	@if [ $$(palo -f /dev/null >/dev/null 2>&1 ; echo $$?) != 2 ]; then \
+boot	:= arch/parisc/boot
+
+PALO := $(shell if (which palo 2>&1); then : ; \
+	elif [ -x /sbin/palo ]; then echo /sbin/palo; \
+	fi)
+
+PALOCONF := $(shell if [ -f $(src)/palo.conf ]; then echo $(src)/palo.conf; \
+	else echo $(obj)/palo.conf; \
+	fi)
+
+palo lifimage: vmlinuz
+	@if test ! -x "$(PALO)"; then \
 		echo 'ERROR: Please install palo first (apt-get install palo)';\
 		echo 'or build it from source and install it somewhere in your $$PATH';\
 		false; \
 	fi
-	@if [ ! -f ./palo.conf ]; then \
-		cp arch/parisc/defpalo.conf palo.conf; \
-		echo 'A generic palo config file (./palo.conf) has been created for you.'; \
+	@if test ! -f "$(PALOCONF)"; then \
+		cp $(src)/arch/parisc/defpalo.conf $(obj)/palo.conf; \
+		echo 'A generic palo config file ($(obj)/palo.conf) has been created for you.'; \
 		echo 'You should check it and re-run "make palo".'; \
 		echo 'WARNING: the "lifimage" file is now placed in this directory by default!'; \
 		false; \
 	fi
-	palo -f ./palo.conf
+	$(PALO) -f $(PALOCONF)
 
-oldpalo: vmlinux
-	export TOPDIR=`pwd`; \
-	unset STRIP LDFLAGS CPP CPPFLAGS AFLAGS CFLAGS CC LD; cd ../palo && make lifimage
+BOOT_TARGETS    = zImage Image palo lifimage
+INSTALL_TARGETS = zinstall install
 
-# Shorthands for known targets not supported by parisc, use palo as default
-Image zImage bzImage: palo
+PHONY += bzImage $(BOOT_TARGETS) $(INSTALL_TARGETS)
 
-kernel_install: vmlinux
-	sh $(src)/arch/parisc/install.sh \
-			$(KERNELRELEASE) $< System.map "$(INSTALL_PATH)"
+zImage: vmlinuz
+Image: vmlinux
 
-install: kernel_install modules_install
+bzImage: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
-prepare: include/asm-parisc/offsets.h
+ifdef CONFIG_PARISC_SELF_EXTRACT
+vmlinuz: bzImage
+	$(OBJCOPY) $(boot)/bzImage $@
+else
+vmlinuz: vmlinux
+	@gzip -cf -9 $< > $@
+endif
 
-arch/parisc/kernel/asm-offsets.s: include/asm include/linux/version.h \
-				   include/config/MARKER
+install:
+	$(CONFIG_SHELL) $(src)/arch/parisc/install.sh \
+			$(KERNELRELEASE) vmlinux System.map "$(INSTALL_PATH)"
+zinstall:
+	$(CONFIG_SHELL) $(src)/arch/parisc/install.sh \
+			$(KERNELRELEASE) vmlinuz System.map "$(INSTALL_PATH)"
 
-include/asm-parisc/offsets.h: arch/parisc/kernel/asm-offsets.s
-	$(call filechk,gen-asm-offsets)
-
-CLEAN_FILES	+= lifimage include/asm-parisc/offsets.h
+CLEAN_FILES	+= lifimage
 MRPROPER_FILES	+= palo.conf
 
 define archhelp
 	@echo  '* vmlinux	- Uncompressed kernel image (./vmlinux)'
+	@echo  '  vmlinuz	- Compressed kernel image (./vmlinuz)'
 	@echo  '  palo		- Bootable image (./lifimage)'
-	@echo  '  install	- Install kernel using'
-	@echo  '		  (your) ~/bin/installkernel or'
-	@echo  '		  (distribution) /sbin/installkernel or'
+	@echo  '  install	- Install uncompressed vmlinux kernel using'
+	@echo  '		  (your) ~/bin/$(INSTALLKERNEL) or'
+	@echo  '		  (distribution) /sbin/$(INSTALLKERNEL) or'
 	@echo  '		  copy to $$(INSTALL_PATH)'
+	@echo  '  zinstall	- Install compressed vmlinuz kernel'
 endef
+
+# we require gcc 3.3 or above to compile the kernel
+archprepare: checkbin
+checkbin:
+	@if test "$(cc-version)" -lt "0303"; then \
+		echo -n "Sorry, GCC v3.3 or above is required to build " ; \
+		echo "the kernel." ; \
+		false ; \
+	fi

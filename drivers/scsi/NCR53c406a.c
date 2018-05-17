@@ -41,7 +41,6 @@
 
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
@@ -62,7 +61,7 @@
 
 #define SYNC_MODE 0		/* Synchronous transfer mode */
 
-#if DEBUG
+#ifdef DEBUG
 #undef NCR53C406A_DEBUG
 #define NCR53C406A_DEBUG 1
 #endif
@@ -168,8 +167,8 @@ enum Phase {
 };
 
 /* Static function prototypes */
-static void NCR53c406a_intr(int, void *, struct pt_regs *);
-static irqreturn_t do_NCR53c406a_intr(int, void *, struct pt_regs *);
+static void NCR53c406a_intr(void *);
+static irqreturn_t do_NCR53c406a_intr(int, void *);
 static void chip_init(void);
 static void calc_port_addr(void);
 #ifndef IRQ_LEV
@@ -182,13 +181,13 @@ static int irq_probe(void);
 static void *bios_base;
 #endif
 
-#if PORT_BASE
+#ifdef PORT_BASE
 static int port_base = PORT_BASE;
 #else
 static int port_base;
 #endif
 
-#if IRQ_LEV
+#ifdef IRQ_LEV
 static int irq_level = IRQ_LEV;
 #else
 static int irq_level = -1;	/* 0 is 'no irq', so use -1 for 'uninitialized' */
@@ -213,16 +212,18 @@ static void *addresses[] = {
 	(void *) 0xd8000,
 	(void *) 0xc8000
 };
-#define ADDRESS_COUNT (sizeof( addresses ) / sizeof( unsigned ))
+#define ADDRESS_COUNT ARRAY_SIZE(addresses)
 #endif				/* USE_BIOS */
 
 /* possible i/o port addresses */
 static unsigned short ports[] = { 0x230, 0x330, 0x280, 0x290, 0x330, 0x340, 0x300, 0x310, 0x348, 0x350 };
-#define PORT_COUNT (sizeof( ports ) / sizeof( unsigned short ))
+#define PORT_COUNT ARRAY_SIZE(ports)
 
+#ifndef MODULE
 /* possible interrupt channels */
 static unsigned short intrs[] = { 10, 11, 12, 15 };
-#define INTR_COUNT (sizeof( intrs ) / sizeof( unsigned short ))
+#define INTR_COUNT ARRAY_SIZE(intrs)
+#endif /* !MODULE */
 
 /* signatures for NCR 53c406a based controllers */
 #if USE_BIOS
@@ -236,7 +237,7 @@ struct signature {
 	{
 "Copyright (C) Acculogic, Inc.\r\n2.8M Diskette Extension Bios ver 4.04.03 03/01/1993", 61, 82},};
 
-#define SIGNATURE_COUNT (sizeof( signatures ) / sizeof( struct signature ))
+#define SIGNATURE_COUNT ARRAY_SIZE(signatures)
 #endif				/* USE_BIOS */
 
 /* ============================================================ */
@@ -447,7 +448,7 @@ static __inline__ int NCR53c406a_pio_write(unsigned char *request, unsigned int 
 }
 #endif				/* USE_PIO */
 
-static int __init NCR53c406a_detect(Scsi_Host_Template * tpnt)
+static int __init NCR53c406a_detect(struct scsi_host_template * tpnt)
 {
 	int present = 0;
 	struct Scsi_Host *shpnt = NULL;
@@ -594,7 +595,7 @@ static int NCR53c406a_release(struct Scsi_Host *shost)
 {
 	if (shost->irq)
 		free_irq(shost->irq, NULL);
-#ifdef USE_DMA
+#if USE_DMA
 	if (shost->dma_channel != 0xff)
 		free_dma(shost->dma_channel);
 #endif
@@ -605,6 +606,7 @@ static int NCR53c406a_release(struct Scsi_Host *shost)
 	return 0;
 }
 
+#ifndef MODULE
 /* called from init/main.c */
 static int __init NCR53c406a_setup(char *str)
 {
@@ -661,6 +663,8 @@ static int __init NCR53c406a_setup(char *str)
 
 __setup("ncr53c406a=", NCR53c406a_setup);
 
+#endif /* !MODULE */
+
 static const char *NCR53c406a_info(struct Scsi_Host *SChost)
 {
 	DEB(printk("NCR53c406a_info called\n"));
@@ -685,16 +689,16 @@ static void wait_intr(void)
 		return;
 	}
 
-	NCR53c406a_intr(0, NULL, NULL);
+	NCR53c406a_intr(NULL);
 }
 #endif
 
-static int NCR53c406a_queue(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
+static int NCR53c406a_queue_lck(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 {
 	int i;
 
 	VDEB(printk("NCR53c406a_queue called\n"));
-	DEB(printk("cmd=%02x, cmd_len=%02x, target=%02x, lun=%02x, bufflen=%d\n", SCpnt->cmnd[0], SCpnt->cmd_len, SCpnt->target, SCpnt->lun, SCpnt->request_bufflen));
+        DEB(printk("cmd=%02x, cmd_len=%02x, target=%02x, lun=%02x, bufflen=%d\n", SCpnt->cmnd[0], SCpnt->cmd_len, SCpnt->device->target, (u8)SCpnt->device->lun, scsi_bufflen(SCpnt)));
 
 #if 0
 	VDEB(for (i = 0; i < SCpnt->cmd_len; i++)
@@ -710,7 +714,7 @@ static int NCR53c406a_queue(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 
 	/* We are locked here already by the mid layer */
 	REG0;
-	outb(SCpnt->device->id, DEST_ID);	/* set destination */
+	outb(scmd_id(SCpnt), DEST_ID);	/* set destination */
 	outb(FLUSH_FIFO, CMD_REG);	/* reset the fifos */
 
 	for (i = 0; i < SCpnt->cmd_len; i++) {
@@ -722,15 +726,14 @@ static int NCR53c406a_queue(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 	return 0;
 }
 
-static int NCR53c406a_abort(Scsi_Cmnd * SCpnt)
-{
-	DEB(printk("NCR53c406a_abort called\n"));
-	return FAILED;		/* Don't know how to abort */
-}
+static DEF_SCSI_QCMD(NCR53c406a_queue)
 
 static int NCR53c406a_host_reset(Scsi_Cmnd * SCpnt)
 {
 	DEB(printk("NCR53c406a_reset called\n"));
+
+	spin_lock_irq(SCpnt->device->host->host_lock);
+
 	outb(C4_IMG, CONFIG4);	/* Select reg set 0 */
 	outb(CHIP_RESET, CMD_REG);
 	outb(SCSI_NOP, CMD_REG);	/* required after reset */
@@ -738,17 +741,10 @@ static int NCR53c406a_host_reset(Scsi_Cmnd * SCpnt)
 	chip_init();
 
 	rtrc(2);
+
+	spin_unlock_irq(SCpnt->device->host->host_lock);
+
 	return SUCCESS;
-}
-
-static int NCR53c406a_device_reset(Scsi_Cmnd * SCpnt)
-{
-	return FAILED;
-}
-
-static int NCR53c406a_bus_reset(Scsi_Cmnd * SCpnt)
-{
-	return FAILED;
 }
 
 static int NCR53c406a_biosparm(struct scsi_device *disk,
@@ -771,19 +767,18 @@ static int NCR53c406a_biosparm(struct scsi_device *disk,
 	return 0;
 }
 
-static irqreturn_t do_NCR53c406a_intr(int unused, void *dev_id,
-					struct pt_regs *regs)
+static irqreturn_t do_NCR53c406a_intr(int unused, void *dev_id)
 {
 	unsigned long flags;
 	struct Scsi_Host *dev = dev_id;
 
 	spin_lock_irqsave(dev->host_lock, flags);
-	NCR53c406a_intr(0, dev_id, regs);
+	NCR53c406a_intr(dev_id);
 	spin_unlock_irqrestore(dev->host_lock, flags);
 	return IRQ_HANDLED;
 }
 
-static void NCR53c406a_intr(int unused, void *dev_id, struct pt_regs *regs)
+static void NCR53c406a_intr(void *dev_id)
 {
 	DEB(unsigned char fifo_size;
 	    )
@@ -792,8 +787,8 @@ static void NCR53c406a_intr(int unused, void *dev_id, struct pt_regs *regs)
 	unsigned char status, int_reg;
 #if USE_PIO
 	unsigned char pio_status;
-	struct scatterlist *sglist;
-	unsigned int sgcount;
+	struct scatterlist *sg;
+        int i;
 #endif
 
 	VDEB(printk("NCR53c406a_intr called\n"));
@@ -873,22 +868,17 @@ static void NCR53c406a_intr(int unused, void *dev_id, struct pt_regs *regs)
 			current_SC->SCp.phase = data_out;
 			VDEB(printk("NCR53c406a: Data-Out phase\n"));
 			outb(FLUSH_FIFO, CMD_REG);
-			LOAD_DMA_COUNT(current_SC->request_bufflen);	/* Max transfer size */
+			LOAD_DMA_COUNT(scsi_bufflen(current_SC));	/* Max transfer size */
 #if USE_DMA			/* No s/g support for DMA */
-			NCR53c406a_dma_write(current_SC->request_buffer, current_SC->request_bufflen);
+			NCR53c406a_dma_write(scsi_sglist(current_SC),
+                                             scsdi_bufflen(current_SC));
+
 #endif				/* USE_DMA */
 			outb(TRANSFER_INFO | DMA_OP, CMD_REG);
 #if USE_PIO
-			if (!current_SC->use_sg)	/* Don't use scatter-gather */
-				NCR53c406a_pio_write(current_SC->request_buffer, current_SC->request_bufflen);
-			else {	/* use scatter-gather */
-				sgcount = current_SC->use_sg;
-				sglist = current_SC->request_buffer;
-				while (sgcount--) {
-					NCR53c406a_pio_write(page_address(sglist->page) + sglist->offset, sglist->length);
-					sglist++;
-				}
-			}
+                        scsi_for_each_sg(current_SC, sg, scsi_sg_count(current_SC), i) {
+                                NCR53c406a_pio_write(sg_virt(sg), sg->length);
+                        }
 			REG0;
 #endif				/* USE_PIO */
 		}
@@ -900,22 +890,16 @@ static void NCR53c406a_intr(int unused, void *dev_id, struct pt_regs *regs)
 			current_SC->SCp.phase = data_in;
 			VDEB(printk("NCR53c406a: Data-In phase\n"));
 			outb(FLUSH_FIFO, CMD_REG);
-			LOAD_DMA_COUNT(current_SC->request_bufflen);	/* Max transfer size */
+			LOAD_DMA_COUNT(scsi_bufflen(current_SC));	/* Max transfer size */
 #if USE_DMA			/* No s/g support for DMA */
-			NCR53c406a_dma_read(current_SC->request_buffer, current_SC->request_bufflen);
+			NCR53c406a_dma_read(scsi_sglist(current_SC),
+                                            scsdi_bufflen(current_SC));
 #endif				/* USE_DMA */
 			outb(TRANSFER_INFO | DMA_OP, CMD_REG);
 #if USE_PIO
-			if (!current_SC->use_sg)	/* Don't use scatter-gather */
-				NCR53c406a_pio_read(current_SC->request_buffer, current_SC->request_bufflen);
-			else {	/* Use scatter-gather */
-				sgcount = current_SC->use_sg;
-				sglist = current_SC->request_buffer;
-				while (sgcount--) {
-					NCR53c406a_pio_read(page_address(sglist->page) + sglist->offset, sglist->length);
-					sglist++;
-				}
-			}
+                        scsi_for_each_sg(current_SC, sg, scsi_sg_count(current_SC), i) {
+                                NCR53c406a_pio_read(sg_virt(sg), sg->length);
+                        }
 			REG0;
 #endif				/* USE_PIO */
 		}
@@ -1067,7 +1051,7 @@ MODULE_LICENSE("GPL");
  * Use SG_NONE if DMA mode is enabled!
  */
 
-static Scsi_Host_Template driver_template = 
+static struct scsi_host_template driver_template =
 {
      .proc_name         	= "NCR53c406a"		/* proc_name */,        
      .name              	= "NCR53c406a"		/* name */,             
@@ -1075,17 +1059,13 @@ static Scsi_Host_Template driver_template =
      .release            	= NCR53c406a_release,
      .info              	= NCR53c406a_info		/* info */,             
      .queuecommand      	= NCR53c406a_queue	/* queuecommand */,     
-     .eh_abort_handler  	= NCR53c406a_abort	/* abort */,            
-     .eh_bus_reset_handler      = NCR53c406a_bus_reset	/* reset */,            
-     .eh_device_reset_handler   = NCR53c406a_device_reset	/* reset */,            
      .eh_host_reset_handler     = NCR53c406a_host_reset	/* reset */,            
      .bios_param        	= NCR53c406a_biosparm	/* biosparm */,         
      .can_queue         	= 1			/* can_queue */,        
      .this_id           	= 7			/* SCSI ID of the chip */,
      .sg_tablesize      	= 32			/*SG_ALL*/ /*SG_NONE*/, 
-     .cmd_per_lun       	= 1			/* commands per lun */, 
      .unchecked_isa_dma 	= 1			/* unchecked_isa_dma */,
-     .use_clustering    	= ENABLE_CLUSTERING                               
+     .use_clustering    	= ENABLE_CLUSTERING,
 };
 
 #include "scsi_module.c"

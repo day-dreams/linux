@@ -31,15 +31,17 @@
 #define CARD_NAME "ESS Maestro3/Allegro/Canyon3D-2"
 #define DRIVER_NAME "Maestro3"
 
-#include <sound/driver.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/dma-mapping.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
+#include <linux/firmware.h>
+#include <linux/input.h>
 #include <sound/core.h>
 #include <sound/info.h>
 #include <sound/control.h>
@@ -47,6 +49,7 @@
 #include <sound/mpu401.h>
 #include <sound/ac97_codec.h>
 #include <sound/initval.h>
+#include <asm/byteorder.h>
 
 MODULE_AUTHOR("Zach Brown <zab@zabbo.net>, Takashi Iwai <tiwai@suse.de>");
 MODULE_DESCRIPTION("ESS Maestro3 PCI");
@@ -56,11 +59,13 @@ MODULE_SUPPORTED_DEVICE("{{ESS,Maestro3 PCI},"
 		"{ESS,Allegro PCI},"
 		"{ESS,Allegro-1 PCI},"
 	        "{ESS,Canyon3D-2/LE PCI}}");
+MODULE_FIRMWARE("ess/maestro3_assp_kernel.fw");
+MODULE_FIRMWARE("ess/maestro3_assp_minisrc.fw");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
-static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP; /* all enabled */
-static int external_amp[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = 1};
+static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP; /* all enabled */
+static bool external_amp[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = 1};
 static int amp_gpio[SNDRV_CARDS] = {[0 ... (SNDRV_CARDS - 1)] = -1};
 
 module_param_array(index, int, NULL, 0444);
@@ -355,74 +360,6 @@ MODULE_PARM_DESC(amp_gpio, "GPIO pin number for external amp. (default = -1)");
 #define DSP2HOST_REQ_PIORECORD  0x01
 #define DSP2HOST_REQ_I2SRATE    0x02
 #define DSP2HOST_REQ_TIMER      0x04
-
-/* AC97 registers */
-/* XXX fix this crap up */
-/*#define AC97_RESET              0x00*/
-
-#define AC97_VOL_MUTE_B         0x8000
-#define AC97_VOL_M              0x1F
-#define AC97_LEFT_VOL_S         8
-
-#define AC97_MASTER_VOL         0x02
-#define AC97_LINE_LEVEL_VOL     0x04
-#define AC97_MASTER_MONO_VOL    0x06
-#define AC97_PC_BEEP_VOL        0x0A
-#define AC97_PC_BEEP_VOL_M      0x0F
-#define AC97_SROUND_MASTER_VOL  0x38
-#define AC97_PC_BEEP_VOL_S      1
-
-/*#define AC97_PHONE_VOL          0x0C
-#define AC97_MIC_VOL            0x0E*/
-#define AC97_MIC_20DB_ENABLE    0x40
-
-/*#define AC97_LINEIN_VOL         0x10
-#define AC97_CD_VOL             0x12
-#define AC97_VIDEO_VOL          0x14
-#define AC97_AUX_VOL            0x16*/
-#define AC97_PCM_OUT_VOL        0x18
-/*#define AC97_RECORD_SELECT      0x1A*/
-#define AC97_RECORD_MIC         0x00
-#define AC97_RECORD_CD          0x01
-#define AC97_RECORD_VIDEO       0x02
-#define AC97_RECORD_AUX         0x03
-#define AC97_RECORD_MONO_MUX    0x02
-#define AC97_RECORD_DIGITAL     0x03
-#define AC97_RECORD_LINE        0x04
-#define AC97_RECORD_STEREO      0x05
-#define AC97_RECORD_MONO        0x06
-#define AC97_RECORD_PHONE       0x07
-
-/*#define AC97_RECORD_GAIN        0x1C*/
-#define AC97_RECORD_VOL_M       0x0F
-
-/*#define AC97_GENERAL_PURPOSE    0x20*/
-#define AC97_POWER_DOWN_CTRL    0x26
-#define AC97_ADC_READY          0x0001
-#define AC97_DAC_READY          0x0002
-#define AC97_ANALOG_READY       0x0004
-#define AC97_VREF_ON            0x0008
-#define AC97_PR0                0x0100
-#define AC97_PR1                0x0200
-#define AC97_PR2                0x0400
-#define AC97_PR3                0x0800
-#define AC97_PR4                0x1000
-
-#define AC97_RESERVED1          0x28
-
-#define AC97_VENDOR_TEST        0x5A
-
-#define AC97_CLOCK_DELAY        0x5C
-#define AC97_LINEOUT_MUX_SEL    0x0001
-#define AC97_MONO_MUX_SEL       0x0002
-#define AC97_CLOCK_DELAY_SEL    0x1F
-#define AC97_DAC_CDS_SHIFT      6
-#define AC97_ADC_CDS_SHIFT      11
-
-#define AC97_MULTI_CHANNEL_SEL  0x74
-
-/*#define AC97_VENDOR_ID1         0x7C
-#define AC97_VENDOR_ID2         0x7E*/
 
 /*
  * ASSP control regs
@@ -725,7 +662,6 @@ MODULE_PARM_DESC(amp_gpio, "GPIO pin number for external amp. (default = -1)");
 
 #define MINISRC_IN_BUFFER_SIZE   ( 0x50 * 2 )
 #define MINISRC_OUT_BUFFER_SIZE  ( 0x50 * 2 * 2)
-#define MINISRC_OUT_BUFFER_SIZE  ( 0x50 * 2 * 2)
 #define MINISRC_TMP_BUFFER_SIZE  ( 112 + ( MINISRC_BIQUAD_STAGE * 3 + 4 ) * 2 * 2 )
 #define MINISRC_BIQUAD_STAGE    2
 #define MINISRC_COEF_LOC          0x175
@@ -767,29 +703,16 @@ MODULE_PARM_DESC(amp_gpio, "GPIO pin number for external amp. (default = -1)");
 /*
  */
 
-typedef struct snd_m3_dma m3_dma_t;
-typedef struct snd_m3 m3_t;
-
-/* quirk lists */
-struct m3_quirk {
-	const char *name;	/* device name */
-	u16 vendor, device;	/* subsystem ids */
-	int amp_gpio;		/* gpio pin #  for external amp, -1 = default */
-	int irda_workaround;	/* non-zero if avoid to touch 0x10 on GPIO_DIRECTION
-				   (e.g. for IrDA on Dell Inspirons) */
-};
-
 struct m3_list {
 	int curlen;
 	int mem_addr;
 	int max;
 };
 
-struct snd_m3_dma {
+struct m3_dma {
 
 	int number;
-	m3_t *chip;
-	snd_pcm_substream_t *substream;
+	struct snd_pcm_substream *substream;
 
 	struct assp_instance {
 		unsigned short code, data;
@@ -815,19 +738,18 @@ struct snd_m3_dma {
     
 struct snd_m3 {
 	
-	snd_card_t *card;
+	struct snd_card *card;
 
 	unsigned long iobase;
 
 	int irq;
-	int allegro_flag : 1;
+	unsigned int allegro_flag : 1;
 
-	ac97_t *ac97;
+	struct snd_ac97 *ac97;
 
-	snd_pcm_t *pcm;
+	struct snd_pcm *pcm;
 
 	struct pci_dev *pci;
-	struct m3_quirk *quirk;
 
 	int dacs_active;
 	int timer_users;
@@ -841,55 +763,44 @@ struct snd_m3 {
 	u8 reset_state;
 
 	int external_amp;
-	int amp_gpio;
+	int amp_gpio;	/* gpio pin #  for external amp, -1 = default */
+	unsigned int hv_config;		/* hardware-volume config bits */
+	unsigned irda_workaround :1;	/* avoid to touch 0x10 on GPIO_DIRECTION
+					   (e.g. for IrDA on Dell Inspirons) */
+	unsigned is_omnibook :1;	/* Do HP OmniBook GPIO magic? */
 
 	/* midi */
-	snd_rawmidi_t *rmidi;
+	struct snd_rawmidi *rmidi;
 
 	/* pcm streams */
 	int num_substreams;
-	m3_dma_t *substreams;
+	struct m3_dma *substreams;
 
 	spinlock_t reg_lock;
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_SND_MAESTRO3_INPUT
+	struct input_dev *input_dev;
+	char phys[64];			/* physical device path */
+#else
+	struct snd_kcontrol *master_switch;
+	struct snd_kcontrol *master_volume;
+#endif
+	struct work_struct hwvol_work;
+
+	unsigned int in_suspend;
+
+#ifdef CONFIG_PM_SLEEP
 	u16 *suspend_mem;
 #endif
+
+	const struct firmware *assp_kernel_image;
+	const struct firmware *assp_minisrc_image;
 };
 
 /*
  * pci ids
  */
-
-#ifndef PCI_VENDOR_ID_ESS
-#define PCI_VENDOR_ID_ESS         0x125D
-#endif
-#ifndef PCI_DEVICE_ID_ESS_ALLEGRO_1
-#define PCI_DEVICE_ID_ESS_ALLEGRO_1	0x1988
-#endif
-#ifndef PCI_DEVICE_ID_ESS_ALLEGRO
-#define PCI_DEVICE_ID_ESS_ALLEGRO	0x1989
-#endif
-#ifndef PCI_DEVICE_ID_ESS_CANYON3D_2LE
-#define PCI_DEVICE_ID_ESS_CANYON3D_2LE	0x1990
-#endif
-#ifndef PCI_DEVICE_ID_ESS_CANYON3D_2
-#define PCI_DEVICE_ID_ESS_CANYON3D_2	0x1992
-#endif
-#ifndef PCI_DEVICE_ID_ESS_MAESTRO3
-#define PCI_DEVICE_ID_ESS_MAESTRO3	0x1998
-#endif
-#ifndef PCI_DEVICE_ID_ESS_MAESTRO3_1
-#define PCI_DEVICE_ID_ESS_MAESTRO3_1	0x1999
-#endif
-#ifndef PCI_DEVICE_ID_ESS_MAESTRO3_HW
-#define PCI_DEVICE_ID_ESS_MAESTRO3_HW	0x199a
-#endif
-#ifndef PCI_DEVICE_ID_ESS_MAESTRO3_2
-#define PCI_DEVICE_ID_ESS_MAESTRO3_2	0x199b
-#endif
-
-static struct pci_device_id snd_m3_ids[] = {
+static const struct pci_device_id snd_m3_ids[] = {
 	{PCI_VENDOR_ID_ESS, PCI_DEVICE_ID_ESS_ALLEGRO_1, PCI_ANY_ID, PCI_ANY_ID,
 	 PCI_CLASS_MULTIMEDIA_AUDIO << 8, 0xffff00, 0},
 	{PCI_VENDOR_ID_ESS, PCI_DEVICE_ID_ESS_ALLEGRO, PCI_ANY_ID, PCI_ANY_ID,
@@ -911,82 +822,127 @@ static struct pci_device_id snd_m3_ids[] = {
 
 MODULE_DEVICE_TABLE(pci, snd_m3_ids);
 
-static struct m3_quirk m3_quirk_list[] = {
-	/* panasonic CF-28 "toughbook" */
-	{
-		.name = "Panasonic CF-28",
-		.vendor = 0x10f7,
-		.device = 0x833e,
-		.amp_gpio = 0x0d,
-	},
-	/* panasonic CF-72 "toughbook" */
-	{
-		.name = "Panasonic CF-72",
-		.vendor = 0x10f7,
-		.device = 0x833d,
-		.amp_gpio = 0x0d,
-	},
-	/* Dell Inspiron 4000 */
-	{
-		.name = "Dell Inspiron 4000",
-		.vendor = 0x1028,
-		.device = 0x00b0,
-		.amp_gpio = -1,
-		.irda_workaround = 1,
-	},
-	/* Dell Inspiron 8000 */
-	{
-		.name = "Dell Inspiron 8000",
-		.vendor = 0x1028,
-		.device = 0x00a4,
-		.amp_gpio = -1,
-		.irda_workaround = 1,
-	},
-	/* Dell Inspiron 8100 */
-	{
-		.name = "Dell Inspiron 8100",
-		.vendor = 0x1028,
-		.device = 0x00e6,
-		.amp_gpio = -1,
-		.irda_workaround = 1,
-	},
-	/* NEC LM800J/7 */
-	{
-		.name = "NEC LM800J/7",
-		.vendor = 0x1033,
-		.device = 0x80f1,
-		.amp_gpio = 0x03,
-	},
-	/* END */
-	{ NULL }
+static struct snd_pci_quirk m3_amp_quirk_list[] = {
+	SND_PCI_QUIRK(0x0E11, 0x0094, "Compaq Evo N600c", 0x0c),
+	SND_PCI_QUIRK(0x10f7, 0x833e, "Panasonic CF-28", 0x0d),
+	SND_PCI_QUIRK(0x10f7, 0x833d, "Panasonic CF-72", 0x0d),
+	SND_PCI_QUIRK(0x1033, 0x80f1, "NEC LM800J/7", 0x03),
+	SND_PCI_QUIRK(0x1509, 0x1740, "LEGEND ZhaoYang 3100CF", 0x03),
+	{ } /* END */
 };
 
+static struct snd_pci_quirk m3_irda_quirk_list[] = {
+	SND_PCI_QUIRK(0x1028, 0x00b0, "Dell Inspiron 4000", 1),
+	SND_PCI_QUIRK(0x1028, 0x00a4, "Dell Inspiron 8000", 1),
+	SND_PCI_QUIRK(0x1028, 0x00e6, "Dell Inspiron 8100", 1),
+	{ } /* END */
+};
+
+/* hardware volume quirks */
+static struct snd_pci_quirk m3_hv_quirk_list[] = {
+	/* Allegro chips */
+	SND_PCI_QUIRK(0x0E11, 0x002E, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x0E11, 0x0094, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x0E11, 0xB112, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x0E11, 0xB114, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x103C, 0x0012, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x103C, 0x0018, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x103C, 0x001C, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x103C, 0x001D, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x103C, 0x001E, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x107B, 0x3350, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x10F7, 0x8338, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x10F7, 0x833C, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x10F7, 0x833D, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x10F7, 0x833E, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x10F7, 0x833F, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x13BD, 0x1018, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x13BD, 0x1019, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x13BD, 0x101A, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x14FF, 0x0F03, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x14FF, 0x0F04, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x14FF, 0x0F05, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x156D, 0xB400, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x156D, 0xB795, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x156D, 0xB797, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x156D, 0xC700, NULL, HV_CTRL_ENABLE | HV_BUTTON_FROM_GD),
+	SND_PCI_QUIRK(0x1033, 0x80F1, NULL,
+		      HV_CTRL_ENABLE | HV_BUTTON_FROM_GD | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x103C, 0x001A, NULL, /* HP OmniBook 6100 */
+		      HV_CTRL_ENABLE | HV_BUTTON_FROM_GD | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x107B, 0x340A, NULL,
+		      HV_CTRL_ENABLE | HV_BUTTON_FROM_GD | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x107B, 0x3450, NULL,
+		      HV_CTRL_ENABLE | HV_BUTTON_FROM_GD | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x109F, 0x3134, NULL,
+		      HV_CTRL_ENABLE | HV_BUTTON_FROM_GD | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x109F, 0x3161, NULL,
+		      HV_CTRL_ENABLE | HV_BUTTON_FROM_GD | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x144D, 0x3280, NULL,
+		      HV_CTRL_ENABLE | HV_BUTTON_FROM_GD | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x144D, 0x3281, NULL,
+		      HV_CTRL_ENABLE | HV_BUTTON_FROM_GD | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x144D, 0xC002, NULL,
+		      HV_CTRL_ENABLE | HV_BUTTON_FROM_GD | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x144D, 0xC003, NULL,
+		      HV_CTRL_ENABLE | HV_BUTTON_FROM_GD | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x1509, 0x1740, NULL,
+		      HV_CTRL_ENABLE | HV_BUTTON_FROM_GD | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x1610, 0x0010, NULL,
+		      HV_CTRL_ENABLE | HV_BUTTON_FROM_GD | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x1042, 0x1042, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x107B, 0x9500, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x14FF, 0x0F06, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x1558, 0x8586, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x161F, 0x2011, NULL, HV_CTRL_ENABLE),
+	/* Maestro3 chips */
+	SND_PCI_QUIRK(0x103C, 0x000E, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x103C, 0x0010, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x103C, 0x0011, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x103C, 0x001B, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x104D, 0x80A6, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x104D, 0x80AA, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x107B, 0x5300, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x110A, 0x1998, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x13BD, 0x1015, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x13BD, 0x101C, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x13BD, 0x1802, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x1599, 0x0715, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x5643, 0x5643, NULL, HV_CTRL_ENABLE),
+	SND_PCI_QUIRK(0x144D, 0x3260, NULL, HV_CTRL_ENABLE | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x144D, 0x3261, NULL, HV_CTRL_ENABLE | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x144D, 0xC000, NULL, HV_CTRL_ENABLE | REDUCED_DEBOUNCE),
+	SND_PCI_QUIRK(0x144D, 0xC001, NULL, HV_CTRL_ENABLE | REDUCED_DEBOUNCE),
+	{ } /* END */
+};
+
+/* HP Omnibook quirks */
+static struct snd_pci_quirk m3_omnibook_quirk_list[] = {
+	SND_PCI_QUIRK_ID(0x103c, 0x0010), /* HP OmniBook 6000 */
+	SND_PCI_QUIRK_ID(0x103c, 0x0011), /* HP OmniBook 500 */
+	{ } /* END */
+};
 
 /*
  * lowlevel functions
  */
 
-#define big_mdelay(msec) do {\
-	set_current_state(TASK_UNINTERRUPTIBLE);\
-	schedule_timeout(((msec) * HZ) / 1000);\
-} while (0)
-	
-inline static void snd_m3_outw(m3_t *chip, u16 value, unsigned long reg)
+static inline void snd_m3_outw(struct snd_m3 *chip, u16 value, unsigned long reg)
 {
 	outw(value, chip->iobase + reg);
 }
 
-inline static u16 snd_m3_inw(m3_t *chip, unsigned long reg)
+static inline u16 snd_m3_inw(struct snd_m3 *chip, unsigned long reg)
 {
 	return inw(chip->iobase + reg);
 }
 
-inline static void snd_m3_outb(m3_t *chip, u8 value, unsigned long reg)
+static inline void snd_m3_outb(struct snd_m3 *chip, u8 value, unsigned long reg)
 {
 	outb(value, chip->iobase + reg);
 }
 
-inline static u8 snd_m3_inb(m3_t *chip, unsigned long reg)
+static inline u8 snd_m3_inb(struct snd_m3 *chip, unsigned long reg)
 {
 	return inb(chip->iobase + reg);
 }
@@ -995,28 +951,28 @@ inline static u8 snd_m3_inb(m3_t *chip, unsigned long reg)
  * access 16bit words to the code or data regions of the dsp's memory.
  * index addresses 16bit words.
  */
-static u16 snd_m3_assp_read(m3_t *chip, u16 region, u16 index)
+static u16 snd_m3_assp_read(struct snd_m3 *chip, u16 region, u16 index)
 {
 	snd_m3_outw(chip, region & MEMTYPE_MASK, DSP_PORT_MEMORY_TYPE);
 	snd_m3_outw(chip, index, DSP_PORT_MEMORY_INDEX);
 	return snd_m3_inw(chip, DSP_PORT_MEMORY_DATA);
 }
 
-static void snd_m3_assp_write(m3_t *chip, u16 region, u16 index, u16 data)
+static void snd_m3_assp_write(struct snd_m3 *chip, u16 region, u16 index, u16 data)
 {
 	snd_m3_outw(chip, region & MEMTYPE_MASK, DSP_PORT_MEMORY_TYPE);
 	snd_m3_outw(chip, index, DSP_PORT_MEMORY_INDEX);
 	snd_m3_outw(chip, data, DSP_PORT_MEMORY_DATA);
 }
 
-static void snd_m3_assp_halt(m3_t *chip)
+static void snd_m3_assp_halt(struct snd_m3 *chip)
 {
 	chip->reset_state = snd_m3_inb(chip, DSP_PORT_CONTROL_REG_B) & ~REGB_STOP_CLOCK;
-	big_mdelay(10);
+	msleep(10);
 	snd_m3_outb(chip, chip->reset_state & ~REGB_ENABLE_RESET, DSP_PORT_CONTROL_REG_B);
 }
 
-static void snd_m3_assp_continue(m3_t *chip)
+static void snd_m3_assp_continue(struct snd_m3 *chip)
 {
 	snd_m3_outb(chip, chip->reset_state | REGB_ENABLE_RESET, DSP_PORT_CONTROL_REG_B);
 }
@@ -1030,7 +986,7 @@ static void snd_m3_assp_continue(m3_t *chip)
  * by the binary code images.
  */
 
-static int snd_m3_add_list(m3_t *chip, struct m3_list *list, u16 val)
+static int snd_m3_add_list(struct snd_m3 *chip, struct m3_list *list, u16 val)
 {
 	snd_m3_assp_write(chip, MEMTYPE_INTERNAL_DATA,
 			  list->mem_addr + list->curlen,
@@ -1038,7 +994,7 @@ static int snd_m3_add_list(m3_t *chip, struct m3_list *list, u16 val)
 	return list->curlen++;
 }
 
-static void snd_m3_remove_list(m3_t *chip, struct m3_list *list, int index)
+static void snd_m3_remove_list(struct snd_m3 *chip, struct m3_list *list, int index)
 {
 	u16  val;
 	int lastindex = list->curlen - 1;
@@ -1058,7 +1014,7 @@ static void snd_m3_remove_list(m3_t *chip, struct m3_list *list, int index)
 	list->curlen--;
 }
 
-static void snd_m3_inc_timer_users(m3_t *chip)
+static void snd_m3_inc_timer_users(struct snd_m3 *chip)
 {
 	chip->timer_users++;
 	if (chip->timer_users != 1) 
@@ -1077,7 +1033,7 @@ static void snd_m3_inc_timer_users(m3_t *chip)
 		    HOST_INT_CTRL);
 }
 
-static void snd_m3_dec_timer_users(m3_t *chip)
+static void snd_m3_dec_timer_users(struct snd_m3 *chip)
 {
 	chip->timer_users--;
 	if (chip->timer_users > 0)  
@@ -1101,7 +1057,8 @@ static void snd_m3_dec_timer_users(m3_t *chip)
  */
 
 /* spinlock held! */
-static int snd_m3_pcm_start(m3_t *chip, m3_dma_t *s, snd_pcm_substream_t *subs)
+static int snd_m3_pcm_start(struct snd_m3 *chip, struct m3_dma *s,
+			    struct snd_pcm_substream *subs)
 {
 	if (! s || ! subs)
 		return -EINVAL;
@@ -1117,7 +1074,7 @@ static int snd_m3_pcm_start(m3_t *chip, m3_dma_t *s, snd_pcm_substream_t *subs)
 				  chip->dacs_active);
 		break;
 	case SNDRV_PCM_STREAM_CAPTURE:
-		snd_m3_assp_write(s->chip, MEMTYPE_INTERNAL_DATA,
+		snd_m3_assp_write(chip, MEMTYPE_INTERNAL_DATA,
 				  KDATA_ADC1_REQUEST, 1);
 		snd_m3_assp_write(chip, MEMTYPE_INTERNAL_DATA,
 				  s->inst.data + CDATA_INSTANCE_READY, 1);
@@ -1127,7 +1084,8 @@ static int snd_m3_pcm_start(m3_t *chip, m3_dma_t *s, snd_pcm_substream_t *subs)
 }
 
 /* spinlock held! */
-static int snd_m3_pcm_stop(m3_t *chip, m3_dma_t *s, snd_pcm_substream_t *subs)
+static int snd_m3_pcm_stop(struct snd_m3 *chip, struct m3_dma *s,
+			   struct snd_pcm_substream *subs)
 {
 	if (! s || ! subs)
 		return -EINVAL;
@@ -1151,13 +1109,14 @@ static int snd_m3_pcm_stop(m3_t *chip, m3_dma_t *s, snd_pcm_substream_t *subs)
 }
 
 static int
-snd_m3_pcm_trigger(snd_pcm_substream_t *subs, int cmd)
+snd_m3_pcm_trigger(struct snd_pcm_substream *subs, int cmd)
 {
-	m3_t *chip = snd_pcm_substream_chip(subs);
-	m3_dma_t *s = (m3_dma_t*)subs->runtime->private_data;
+	struct snd_m3 *chip = snd_pcm_substream_chip(subs);
+	struct m3_dma *s = subs->runtime->private_data;
 	int err = -EINVAL;
 
-	snd_assert(s != NULL, return -ENXIO);
+	if (snd_BUG_ON(!s))
+		return -ENXIO;
 
 	spin_lock(&chip->reg_lock);
 	switch (cmd) {
@@ -1188,10 +1147,10 @@ snd_m3_pcm_trigger(snd_pcm_substream_t *subs, int cmd)
  * setup
  */
 static void 
-snd_m3_pcm_setup1(m3_t *chip, m3_dma_t *s, snd_pcm_substream_t *subs)
+snd_m3_pcm_setup1(struct snd_m3 *chip, struct m3_dma *s, struct snd_pcm_substream *subs)
 {
 	int dsp_in_size, dsp_out_size, dsp_in_buffer, dsp_out_buffer;
-	snd_pcm_runtime_t *runtime = subs->runtime;
+	struct snd_pcm_runtime *runtime = subs->runtime;
 
 	if (subs->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		dsp_in_size = MINISRC_IN_BUFFER_SIZE - (0x20 * 2);
@@ -1273,7 +1232,8 @@ snd_m3_pcm_setup1(m3_t *chip, m3_dma_t *s, snd_pcm_substream_t *subs)
 			  dsp_out_buffer);
 }
 
-static void snd_m3_pcm_setup2(m3_t *chip, m3_dma_t *s, snd_pcm_runtime_t *runtime)
+static void snd_m3_pcm_setup2(struct snd_m3 *chip, struct m3_dma *s,
+			      struct snd_pcm_runtime *runtime)
 {
 	u32 freq;
 
@@ -1310,7 +1270,7 @@ static void snd_m3_pcm_setup2(m3_t *chip, m3_dma_t *s, snd_pcm_runtime_t *runtim
 }
 
 
-static struct play_vals {
+static const struct play_vals {
 	u16 addr, val;
 } pv[] = {
 	{CDATA_LEFT_VOLUME, ARB_VOLUME},
@@ -1339,7 +1299,8 @@ static struct play_vals {
 
 /* the mode passed should be already shifted and masked */
 static void
-snd_m3_playback_setup(m3_t *chip, m3_dma_t *s, snd_pcm_substream_t *subs)
+snd_m3_playback_setup(struct snd_m3 *chip, struct m3_dma *s,
+		      struct snd_pcm_substream *subs)
 {
 	unsigned int i;
 
@@ -1376,7 +1337,7 @@ snd_m3_playback_setup(m3_t *chip, m3_dma_t *s, snd_pcm_substream_t *subs)
 /*
  *    Native record driver 
  */
-static struct rec_vals {
+static const struct rec_vals {
 	u16 addr, val;
 } rv[] = {
 	{CDATA_LEFT_VOLUME, ARB_VOLUME},
@@ -1405,7 +1366,7 @@ static struct rec_vals {
 };
 
 static void
-snd_m3_capture_setup(m3_t *chip, m3_dma_t *s, snd_pcm_substream_t *subs)
+snd_m3_capture_setup(struct snd_m3 *chip, struct m3_dma *s, struct snd_pcm_substream *subs)
 {
 	unsigned int i;
 
@@ -1431,10 +1392,10 @@ snd_m3_capture_setup(m3_t *chip, m3_dma_t *s, snd_pcm_substream_t *subs)
 				  s->inst.data + rv[i].addr, rv[i].val);
 }
 
-static int snd_m3_pcm_hw_params(snd_pcm_substream_t * substream,
-				snd_pcm_hw_params_t * hw_params)
+static int snd_m3_pcm_hw_params(struct snd_pcm_substream *substream,
+				struct snd_pcm_hw_params *hw_params)
 {
-	m3_dma_t *s = (m3_dma_t*) substream->runtime->private_data;
+	struct m3_dma *s = substream->runtime->private_data;
 	int err;
 
 	if ((err = snd_pcm_lib_malloc_pages(substream, params_buffer_bytes(hw_params))) < 0)
@@ -1442,32 +1403,33 @@ static int snd_m3_pcm_hw_params(snd_pcm_substream_t * substream,
 	/* set buffer address */
 	s->buffer_addr = substream->runtime->dma_addr;
 	if (s->buffer_addr & 0x3) {
-		snd_printk("oh my, not aligned\n");
+		dev_err(substream->pcm->card->dev, "oh my, not aligned\n");
 		s->buffer_addr = s->buffer_addr & ~0x3;
 	}
 	return 0;
 }
 
-static int snd_m3_pcm_hw_free(snd_pcm_substream_t * substream)
+static int snd_m3_pcm_hw_free(struct snd_pcm_substream *substream)
 {
-	m3_dma_t *s;
+	struct m3_dma *s;
 	
 	if (substream->runtime->private_data == NULL)
 		return 0;
-	s = (m3_dma_t*) substream->runtime->private_data;
+	s = substream->runtime->private_data;
 	snd_pcm_lib_free_pages(substream);
 	s->buffer_addr = 0;
 	return 0;
 }
 
 static int
-snd_m3_pcm_prepare(snd_pcm_substream_t *subs)
+snd_m3_pcm_prepare(struct snd_pcm_substream *subs)
 {
-	m3_t *chip = snd_pcm_substream_chip(subs);
-	snd_pcm_runtime_t *runtime = subs->runtime;
-	m3_dma_t *s = (m3_dma_t*)runtime->private_data;
+	struct snd_m3 *chip = snd_pcm_substream_chip(subs);
+	struct snd_pcm_runtime *runtime = subs->runtime;
+	struct m3_dma *s = runtime->private_data;
 
-	snd_assert(s != NULL, return -ENXIO);
+	if (snd_BUG_ON(!s))
+		return -ENXIO;
 
 	if (runtime->format != SNDRV_PCM_FORMAT_U8 &&
 	    runtime->format != SNDRV_PCM_FORMAT_S16_LE)
@@ -1496,7 +1458,7 @@ snd_m3_pcm_prepare(snd_pcm_substream_t *subs)
  * get current pointer
  */
 static unsigned int
-snd_m3_get_pointer(m3_t *chip, m3_dma_t *s, snd_pcm_substream_t *subs)
+snd_m3_get_pointer(struct snd_m3 *chip, struct m3_dma *s, struct snd_pcm_substream *subs)
 {
 	u16 hi = 0, lo = 0;
 	int retry = 10;
@@ -1521,12 +1483,14 @@ snd_m3_get_pointer(m3_t *chip, m3_dma_t *s, snd_pcm_substream_t *subs)
 }
 
 static snd_pcm_uframes_t
-snd_m3_pcm_pointer(snd_pcm_substream_t * subs)
+snd_m3_pcm_pointer(struct snd_pcm_substream *subs)
 {
-	m3_t *chip = snd_pcm_substream_chip(subs);
+	struct snd_m3 *chip = snd_pcm_substream_chip(subs);
 	unsigned int ptr;
-	m3_dma_t *s = (m3_dma_t*)subs->runtime->private_data;
-	snd_assert(s != NULL, return 0);
+	struct m3_dma *s = subs->runtime->private_data;
+
+	if (snd_BUG_ON(!s))
+		return 0;
 
 	spin_lock(&chip->reg_lock);
 	ptr = snd_m3_get_pointer(chip, s, subs);
@@ -1537,31 +1501,138 @@ snd_m3_pcm_pointer(snd_pcm_substream_t * subs)
 
 /* update pointer */
 /* spinlock held! */
-static void snd_m3_update_ptr(m3_t *chip, m3_dma_t *s)
+static void snd_m3_update_ptr(struct snd_m3 *chip, struct m3_dma *s)
 {
-	snd_pcm_substream_t *subs = s->substream;
+	struct snd_pcm_substream *subs = s->substream;
 	unsigned int hwptr;
 	int diff;
 
 	if (! s->running)
 		return;
 
-	hwptr = snd_m3_get_pointer(chip, s, subs) % s->dma_size;
-	diff = (s->dma_size + hwptr - s->hwptr) % s->dma_size;
+	hwptr = snd_m3_get_pointer(chip, s, subs);
+
+	/* try to avoid expensive modulo divisions */
+	if (hwptr >= s->dma_size)
+		hwptr %= s->dma_size;
+
+	diff = s->dma_size + hwptr - s->hwptr;
+	if (diff >= s->dma_size)
+		diff %= s->dma_size;
+
 	s->hwptr = hwptr;
 	s->count += diff;
+
 	if (s->count >= (signed)s->period_size) {
-		s->count %= s->period_size;
+
+		if (s->count < 2 * (signed)s->period_size)
+			s->count -= (signed)s->period_size;
+		else
+			s->count %= s->period_size;
+
 		spin_unlock(&chip->reg_lock);
 		snd_pcm_period_elapsed(subs);
 		spin_lock(&chip->reg_lock);
 	}
 }
 
-static irqreturn_t
-snd_m3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+/* The m3's hardware volume works by incrementing / decrementing 2 counters
+   (without wrap around) in response to volume button presses and then
+   generating an interrupt. The pair of counters is stored in bits 1-3 and 5-7
+   of a byte wide register. The meaning of bits 0 and 4 is unknown. */
+static void snd_m3_update_hw_volume(struct work_struct *work)
 {
-	m3_t *chip = dev_id;
+	struct snd_m3 *chip = container_of(work, struct snd_m3, hwvol_work);
+	int x, val;
+
+	/* Figure out which volume control button was pushed,
+	   based on differences from the default register
+	   values. */
+	x = inb(chip->iobase + SHADOW_MIX_REG_VOICE) & 0xee;
+
+	/* Reset the volume counters to 4. Tests on the allegro integrated
+	   into a Compaq N600C laptop, have revealed that:
+	   1) Writing any value will result in the 2 counters being reset to
+	      4 so writing 0x88 is not strictly necessary
+	   2) Writing to any of the 4 involved registers will reset all 4
+	      of them (and reading them always returns the same value for all
+	      of them)
+	   It could be that a maestro deviates from this, so leave the code
+	   as is. */
+	outb(0x88, chip->iobase + SHADOW_MIX_REG_VOICE);
+	outb(0x88, chip->iobase + HW_VOL_COUNTER_VOICE);
+	outb(0x88, chip->iobase + SHADOW_MIX_REG_MASTER);
+	outb(0x88, chip->iobase + HW_VOL_COUNTER_MASTER);
+
+	/* Ignore spurious HV interrupts during suspend / resume, this avoids
+	   mistaking them for a mute button press. */
+	if (chip->in_suspend)
+		return;
+
+#ifndef CONFIG_SND_MAESTRO3_INPUT
+	if (!chip->master_switch || !chip->master_volume)
+		return;
+
+	val = snd_ac97_read(chip->ac97, AC97_MASTER);
+	switch (x) {
+	case 0x88:
+		/* The counters have not changed, yet we've received a HV
+		   interrupt. According to tests run by various people this
+		   happens when pressing the mute button. */
+		val ^= 0x8000;
+		break;
+	case 0xaa:
+		/* counters increased by 1 -> volume up */
+		if ((val & 0x7f) > 0)
+			val--;
+		if ((val & 0x7f00) > 0)
+			val -= 0x0100;
+		break;
+	case 0x66:
+		/* counters decreased by 1 -> volume down */
+		if ((val & 0x7f) < 0x1f)
+			val++;
+		if ((val & 0x7f00) < 0x1f00)
+			val += 0x0100;
+		break;
+	}
+	if (snd_ac97_update(chip->ac97, AC97_MASTER, val))
+		snd_ctl_notify(chip->card, SNDRV_CTL_EVENT_MASK_VALUE,
+			       &chip->master_switch->id);
+#else
+	if (!chip->input_dev)
+		return;
+
+	val = 0;
+	switch (x) {
+	case 0x88:
+		/* The counters have not changed, yet we've received a HV
+		   interrupt. According to tests run by various people this
+		   happens when pressing the mute button. */
+		val = KEY_MUTE;
+		break;
+	case 0xaa:
+		/* counters increased by 1 -> volume up */
+		val = KEY_VOLUMEUP;
+		break;
+	case 0x66:
+		/* counters decreased by 1 -> volume down */
+		val = KEY_VOLUMEDOWN;
+		break;
+	}
+
+	if (val) {
+		input_report_key(chip->input_dev, val, 1);
+		input_sync(chip->input_dev);
+		input_report_key(chip->input_dev, val, 0);
+		input_sync(chip->input_dev);
+	}
+#endif
+}
+
+static irqreturn_t snd_m3_interrupt(int irq, void *dev_id)
+{
+	struct snd_m3 *chip = dev_id;
 	u8 status;
 	int i;
 
@@ -1569,7 +1640,10 @@ snd_m3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (status == 0xff)
 		return IRQ_NONE;
-   
+
+	if (status & HV_INT_PENDING)
+		schedule_work(&chip->hwvol_work);
+
 	/*
 	 * ack an assp int if its running
 	 * and has an int pending
@@ -1583,7 +1657,7 @@ snd_m3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 				/* update adc/dac info if it was a timer int */
 				spin_lock(&chip->reg_lock);
 				for (i = 0; i < chip->num_substreams; i++) {
-					m3_dma_t *s = &chip->substreams[i];
+					struct m3_dma *s = &chip->substreams[i];
 					if (s->running)
 						snd_m3_update_ptr(chip, s);
 				}
@@ -1598,7 +1672,7 @@ snd_m3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 #endif
 
 	/* ack ints */
-	snd_m3_outw(chip, HOST_INT_STATUS, status);
+	outb(status, chip->iobase + HOST_INT_STATUS);
 
 	return IRQ_HANDLED;
 }
@@ -1607,7 +1681,7 @@ snd_m3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 /*
  */
 
-static snd_pcm_hardware_t snd_m3_playback =
+static const struct snd_pcm_hardware snd_m3_playback =
 {
 	.info =			(SNDRV_PCM_INFO_MMAP |
 				 SNDRV_PCM_INFO_INTERLEAVED |
@@ -1628,7 +1702,7 @@ static snd_pcm_hardware_t snd_m3_playback =
 	.periods_max =		1024,
 };
 
-static snd_pcm_hardware_t snd_m3_capture =
+static const struct snd_pcm_hardware snd_m3_capture =
 {
 	.info =			(SNDRV_PCM_INFO_MMAP |
 				 SNDRV_PCM_INFO_INTERLEAVED |
@@ -1654,10 +1728,10 @@ static snd_pcm_hardware_t snd_m3_capture =
  */
 
 static int
-snd_m3_substream_open(m3_t *chip, snd_pcm_substream_t *subs)
+snd_m3_substream_open(struct snd_m3 *chip, struct snd_pcm_substream *subs)
 {
 	int i;
-	m3_dma_t *s;
+	struct m3_dma *s;
 
 	spin_lock_irq(&chip->reg_lock);
 	for (i = 0; i < chip->num_substreams; i++) {
@@ -1687,9 +1761,9 @@ __found:
 }
 
 static void
-snd_m3_substream_close(m3_t *chip, snd_pcm_substream_t *subs)
+snd_m3_substream_close(struct snd_m3 *chip, struct snd_pcm_substream *subs)
 {
-	m3_dma_t *s = (m3_dma_t*) subs->runtime->private_data;
+	struct m3_dma *s = subs->runtime->private_data;
 
 	if (s == NULL)
 		return; /* not opened properly */
@@ -1709,50 +1783,48 @@ snd_m3_substream_close(m3_t *chip, snd_pcm_substream_t *subs)
 }
 
 static int
-snd_m3_playback_open(snd_pcm_substream_t *subs)
+snd_m3_playback_open(struct snd_pcm_substream *subs)
 {
-	m3_t *chip = snd_pcm_substream_chip(subs);
-	snd_pcm_runtime_t *runtime = subs->runtime;
+	struct snd_m3 *chip = snd_pcm_substream_chip(subs);
+	struct snd_pcm_runtime *runtime = subs->runtime;
 	int err;
 
 	if ((err = snd_m3_substream_open(chip, subs)) < 0)
 		return err;
 
 	runtime->hw = snd_m3_playback;
-	snd_pcm_set_sync(subs);
 
 	return 0;
 }
 
 static int
-snd_m3_playback_close(snd_pcm_substream_t *subs)
+snd_m3_playback_close(struct snd_pcm_substream *subs)
 {
-	m3_t *chip = snd_pcm_substream_chip(subs);
+	struct snd_m3 *chip = snd_pcm_substream_chip(subs);
 
 	snd_m3_substream_close(chip, subs);
 	return 0;
 }
 
 static int
-snd_m3_capture_open(snd_pcm_substream_t *subs)
+snd_m3_capture_open(struct snd_pcm_substream *subs)
 {
-	m3_t *chip = snd_pcm_substream_chip(subs);
-	snd_pcm_runtime_t *runtime = subs->runtime;
+	struct snd_m3 *chip = snd_pcm_substream_chip(subs);
+	struct snd_pcm_runtime *runtime = subs->runtime;
 	int err;
 
 	if ((err = snd_m3_substream_open(chip, subs)) < 0)
 		return err;
 
 	runtime->hw = snd_m3_capture;
-	snd_pcm_set_sync(subs);
 
 	return 0;
 }
 
 static int
-snd_m3_capture_close(snd_pcm_substream_t *subs)
+snd_m3_capture_close(struct snd_pcm_substream *subs)
 {
-	m3_t *chip = snd_pcm_substream_chip(subs);
+	struct snd_m3 *chip = snd_pcm_substream_chip(subs);
 
 	snd_m3_substream_close(chip, subs);
 	return 0;
@@ -1762,7 +1834,7 @@ snd_m3_capture_close(snd_pcm_substream_t *subs)
  * create pcm instance
  */
 
-static snd_pcm_ops_t snd_m3_playback_ops = {
+static const struct snd_pcm_ops snd_m3_playback_ops = {
 	.open =		snd_m3_playback_open,
 	.close =	snd_m3_playback_close,
 	.ioctl =	snd_pcm_lib_ioctl,
@@ -1773,7 +1845,7 @@ static snd_pcm_ops_t snd_m3_playback_ops = {
 	.pointer =	snd_m3_pcm_pointer,
 };
 
-static snd_pcm_ops_t snd_m3_capture_ops = {
+static const struct snd_pcm_ops snd_m3_capture_ops = {
 	.open =		snd_m3_capture_open,
 	.close =	snd_m3_capture_close,
 	.ioctl =	snd_pcm_lib_ioctl,
@@ -1784,10 +1856,10 @@ static snd_pcm_ops_t snd_m3_capture_ops = {
 	.pointer =	snd_m3_pcm_pointer,
 };
 
-static int __devinit
-snd_m3_pcm(m3_t * chip, int device)
+static int
+snd_m3_pcm(struct snd_m3 * chip, int device)
 {
-	snd_pcm_t *pcm;
+	struct snd_pcm *pcm;
 	int err;
 
 	err = snd_pcm_new(chip->card, chip->card->driver, device,
@@ -1818,50 +1890,71 @@ snd_m3_pcm(m3_t * chip, int device)
  * Wait for the ac97 serial bus to be free.
  * return nonzero if the bus is still busy.
  */
-static int snd_m3_ac97_wait(m3_t *chip)
+static int snd_m3_ac97_wait(struct snd_m3 *chip)
 {
 	int i = 10000;
 
 	do {
 		if (! (snd_m3_inb(chip, 0x30) & 1))
 			return 0;
+		cpu_relax();
 	} while (i-- > 0);
 
-	snd_printk("ac97 serial bus busy\n");
+	dev_err(chip->card->dev, "ac97 serial bus busy\n");
 	return 1;
 }
 
 static unsigned short
-snd_m3_ac97_read(ac97_t *ac97, unsigned short reg)
+snd_m3_ac97_read(struct snd_ac97 *ac97, unsigned short reg)
 {
-	m3_t *chip = ac97->private_data;
+	struct snd_m3 *chip = ac97->private_data;
+	unsigned short data = 0xffff;
 
 	if (snd_m3_ac97_wait(chip))
-		return 0xffff;
+		goto fail;
 	snd_m3_outb(chip, 0x80 | (reg & 0x7f), CODEC_COMMAND);
 	if (snd_m3_ac97_wait(chip))
-		return 0xffff;
-	return snd_m3_inw(chip, CODEC_DATA);
+		goto fail;
+	data = snd_m3_inw(chip, CODEC_DATA);
+fail:
+	return data;
 }
 
 static void
-snd_m3_ac97_write(ac97_t *ac97, unsigned short reg, unsigned short val)
+snd_m3_ac97_write(struct snd_ac97 *ac97, unsigned short reg, unsigned short val)
 {
-	m3_t *chip = ac97->private_data;
+	struct snd_m3 *chip = ac97->private_data;
 
 	if (snd_m3_ac97_wait(chip))
 		return;
 	snd_m3_outw(chip, val, CODEC_DATA);
 	snd_m3_outb(chip, reg & 0x7f, CODEC_COMMAND);
+	/*
+	 * Workaround for buggy ES1988 integrated AC'97 codec. It remains silent
+	 * until the MASTER volume or mute is touched (alsactl restore does not
+	 * work).
+	 */
+	if (ac97->id == 0x45838308 && reg == AC97_MASTER) {
+		snd_m3_ac97_wait(chip);
+		snd_m3_outw(chip, val, CODEC_DATA);
+		snd_m3_outb(chip, reg & 0x7f, CODEC_COMMAND);
+	}
 }
 
 
-static void snd_m3_remote_codec_config(int io, int isremote)
+static void snd_m3_remote_codec_config(struct snd_m3 *chip, int isremote)
 {
+	int io = chip->iobase;
+	u16 tmp;
+
 	isremote = isremote ? 1 : 0;
 
-	outw((inw(io + RING_BUS_CTRL_B) & ~SECOND_CODEC_ID_MASK) | isremote,
-	     io + RING_BUS_CTRL_B);
+	tmp = inw(io + RING_BUS_CTRL_B) & ~SECOND_CODEC_ID_MASK;
+	/* enable dock on Dell Latitude C810 */
+	if (chip->pci->subsystem_vendor == 0x1028 &&
+	    chip->pci->subsystem_device == 0x00e5)
+		tmp |= M3I_DOCK_ENABLE;
+	outw(tmp | isremote, io + RING_BUS_CTRL_B);
 	outw((inw(io + SDO_OUT_DEST_CTRL) & ~COMMAND_ADDR_OUT) | isremote,
 	     io + SDO_OUT_DEST_CTRL);
 	outw((inw(io + SDO_IN_DEST_CTRL) & ~STATUS_ADDR_IN) | isremote,
@@ -1871,7 +1964,7 @@ static void snd_m3_remote_codec_config(int io, int isremote)
 /* 
  * hack, returns non zero on err 
  */
-static int snd_m3_try_read_vendor(m3_t *chip)
+static int snd_m3_try_read_vendor(struct snd_m3 *chip)
 {
 	u16 ret;
 
@@ -1888,7 +1981,7 @@ static int snd_m3_try_read_vendor(m3_t *chip)
 	return (ret == 0) || (ret == 0xffff);
 }
 
-static void snd_m3_ac97_reset(m3_t *chip)
+static void snd_m3_ac97_reset(struct snd_m3 *chip)
 {
 	u16 dir;
 	int delay1 = 0, delay2 = 0, i;
@@ -1910,10 +2003,10 @@ static void snd_m3_ac97_reset(m3_t *chip)
 
 	for (i = 0; i < 5; i++) {
 		dir = inw(io + GPIO_DIRECTION);
-		if (! chip->quirk || ! chip->quirk->irda_workaround)
+		if (!chip->irda_workaround)
 			dir |= 0x10; /* assuming pci bus master? */
 
-		snd_m3_remote_codec_config(io, 0);
+		snd_m3_remote_codec_config(chip, 0);
 
 		outw(IO_SRAM_ENABLE, io + RING_BUS_CTRL_A);
 		udelay(20);
@@ -1923,8 +2016,7 @@ static void snd_m3_ac97_reset(m3_t *chip)
 		outw(0, io + GPIO_DATA);
 		outw(dir | GPO_PRIMARY_AC97, io + GPIO_DIRECTION);
 
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout((delay1 * HZ) / 1000);
+		schedule_timeout_uninterruptible(msecs_to_jiffies(delay1));
 
 		outw(GPO_PRIMARY_AC97, io + GPIO_DATA);
 		udelay(5);
@@ -1932,8 +2024,7 @@ static void snd_m3_ac97_reset(m3_t *chip)
 		outw(IO_SRAM_ENABLE | SERIAL_AC_LINK_ENABLE, io + RING_BUS_CTRL_A);
 		outw(~0, io + GPIO_MASK);
 
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout((delay2 * HZ) / 1000);
+		schedule_timeout_uninterruptible(msecs_to_jiffies(delay2));
 
 		if (! snd_m3_try_read_vendor(chip))
 			break;
@@ -1941,7 +2032,8 @@ static void snd_m3_ac97_reset(m3_t *chip)
 		delay1 += 10;
 		delay2 += 100;
 
-		snd_printd("maestro3: retrying codec reset with delays of %d and %d ms\n",
+		dev_dbg(chip->card->dev,
+			"retrying codec reset with delays of %d and %d ms\n",
 			   delay1, delay2);
 	}
 
@@ -1951,18 +2043,21 @@ static void snd_m3_ac97_reset(m3_t *chip)
 	 */
 	tmp = inw(io + RING_BUS_CTRL_A);
 	outw(RAC_SDFS_ENABLE|LAC_SDFS_ENABLE, io + RING_BUS_CTRL_A);
-	big_mdelay(20);
+	msleep(20);
 	outw(tmp, io + RING_BUS_CTRL_A);
-	big_mdelay(50);
+	msleep(50);
 #endif
 }
 
-static int __devinit snd_m3_mixer(m3_t *chip)
+static int snd_m3_mixer(struct snd_m3 *chip)
 {
-	ac97_bus_t *pbus;
-	ac97_template_t ac97;
+	struct snd_ac97_bus *pbus;
+	struct snd_ac97_template ac97;
+#ifndef CONFIG_SND_MAESTRO3_INPUT
+	struct snd_ctl_elem_id elem_id;
+#endif
 	int err;
-	static ac97_bus_ops_t ops = {
+	static struct snd_ac97_bus_ops ops = {
 		.write = snd_m3_ac97_write,
 		.read = snd_m3_ac97_read,
 	};
@@ -1977,141 +2072,22 @@ static int __devinit snd_m3_mixer(m3_t *chip)
 
 	/* seems ac97 PCM needs initialization.. hack hack.. */
 	snd_ac97_write(chip->ac97, AC97_PCM, 0x8000 | (15 << 8) | 15);
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout(HZ / 10);
+	schedule_timeout_uninterruptible(msecs_to_jiffies(100));
 	snd_ac97_write(chip->ac97, AC97_PCM, 0);
+
+#ifndef CONFIG_SND_MAESTRO3_INPUT
+	memset(&elem_id, 0, sizeof(elem_id));
+	elem_id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
+	strcpy(elem_id.name, "Master Playback Switch");
+	chip->master_switch = snd_ctl_find_id(chip->card, &elem_id);
+	memset(&elem_id, 0, sizeof(elem_id));
+	elem_id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
+	strcpy(elem_id.name, "Master Playback Volume");
+	chip->master_volume = snd_ctl_find_id(chip->card, &elem_id);
+#endif
 
 	return 0;
 }
-
-
-/*
- * DSP Code images
- */
-
-static u16 assp_kernel_image[] __devinitdata = {
-    0x7980, 0x0030, 0x7980, 0x03B4, 0x7980, 0x03B4, 0x7980, 0x00FB, 0x7980, 0x00DD, 0x7980, 0x03B4, 
-    0x7980, 0x0332, 0x7980, 0x0287, 0x7980, 0x03B4, 0x7980, 0x03B4, 0x7980, 0x03B4, 0x7980, 0x03B4, 
-    0x7980, 0x031A, 0x7980, 0x03B4, 0x7980, 0x022F, 0x7980, 0x03B4, 0x7980, 0x03B4, 0x7980, 0x03B4, 
-    0x7980, 0x03B4, 0x7980, 0x03B4, 0x7980, 0x0063, 0x7980, 0x006B, 0x7980, 0x03B4, 0x7980, 0x03B4, 
-    0xBF80, 0x2C7C, 0x8806, 0x8804, 0xBE40, 0xBC20, 0xAE09, 0x1000, 0xAE0A, 0x0001, 0x6938, 0xEB08, 
-    0x0053, 0x695A, 0xEB08, 0x00D6, 0x0009, 0x8B88, 0x6980, 0xE388, 0x0036, 0xBE30, 0xBC20, 0x6909, 
-    0xB801, 0x9009, 0xBE41, 0xBE41, 0x6928, 0xEB88, 0x0078, 0xBE41, 0xBE40, 0x7980, 0x0038, 0xBE41, 
-    0xBE41, 0x903A, 0x6938, 0xE308, 0x0056, 0x903A, 0xBE41, 0xBE40, 0xEF00, 0x903A, 0x6939, 0xE308, 
-    0x005E, 0x903A, 0xEF00, 0x690B, 0x660C, 0xEF8C, 0x690A, 0x660C, 0x620B, 0x6609, 0xEF00, 0x6910, 
-    0x660F, 0xEF04, 0xE388, 0x0075, 0x690E, 0x660F, 0x6210, 0x660D, 0xEF00, 0x690E, 0x660D, 0xEF00, 
-    0xAE70, 0x0001, 0xBC20, 0xAE27, 0x0001, 0x6939, 0xEB08, 0x005D, 0x6926, 0xB801, 0x9026, 0x0026, 
-    0x8B88, 0x6980, 0xE388, 0x00CB, 0x9028, 0x0D28, 0x4211, 0xE100, 0x007A, 0x4711, 0xE100, 0x00A0, 
-    0x7A80, 0x0063, 0xB811, 0x660A, 0x6209, 0xE304, 0x007A, 0x0C0B, 0x4005, 0x100A, 0xBA01, 0x9012, 
-    0x0C12, 0x4002, 0x7980, 0x00AF, 0x7A80, 0x006B, 0xBE02, 0x620E, 0x660D, 0xBA10, 0xE344, 0x007A, 
-    0x0C10, 0x4005, 0x100E, 0xBA01, 0x9012, 0x0C12, 0x4002, 0x1003, 0xBA02, 0x9012, 0x0C12, 0x4000, 
-    0x1003, 0xE388, 0x00BA, 0x1004, 0x7980, 0x00BC, 0x1004, 0xBA01, 0x9012, 0x0C12, 0x4001, 0x0C05, 
-    0x4003, 0x0C06, 0x4004, 0x1011, 0xBFB0, 0x01FF, 0x9012, 0x0C12, 0x4006, 0xBC20, 0xEF00, 0xAE26, 
-    0x1028, 0x6970, 0xBFD0, 0x0001, 0x9070, 0xE388, 0x007A, 0xAE28, 0x0000, 0xEF00, 0xAE70, 0x0300, 
-    0x0C70, 0xB00C, 0xAE5A, 0x0000, 0xEF00, 0x7A80, 0x038A, 0x697F, 0xB801, 0x907F, 0x0056, 0x8B88, 
-    0x0CA0, 0xB008, 0xAF71, 0xB000, 0x4E71, 0xE200, 0x00F3, 0xAE56, 0x1057, 0x0056, 0x0CA0, 0xB008, 
-    0x8056, 0x7980, 0x03A1, 0x0810, 0xBFA0, 0x1059, 0xE304, 0x03A1, 0x8056, 0x7980, 0x03A1, 0x7A80, 
-    0x038A, 0xBF01, 0xBE43, 0xBE59, 0x907C, 0x6937, 0xE388, 0x010D, 0xBA01, 0xE308, 0x010C, 0xAE71, 
-    0x0004, 0x0C71, 0x5000, 0x6936, 0x9037, 0xBF0A, 0x109E, 0x8B8A, 0xAF80, 0x8014, 0x4C80, 0xBF0A, 
-    0x0560, 0xF500, 0xBF0A, 0x0520, 0xB900, 0xBB17, 0x90A0, 0x6917, 0xE388, 0x0148, 0x0D17, 0xE100, 
-    0x0127, 0xBF0C, 0x0578, 0xBF0D, 0x057C, 0x7980, 0x012B, 0xBF0C, 0x0538, 0xBF0D, 0x053C, 0x6900, 
-    0xE308, 0x0135, 0x8B8C, 0xBE59, 0xBB07, 0x90A0, 0xBC20, 0x7980, 0x0157, 0x030C, 0x8B8B, 0xB903, 
-    0x8809, 0xBEC6, 0x013E, 0x69AC, 0x90AB, 0x69AD, 0x90AB, 0x0813, 0x660A, 0xE344, 0x0144, 0x0309, 
-    0x830C, 0xBC20, 0x7980, 0x0157, 0x6955, 0xE388, 0x0157, 0x7C38, 0xBF0B, 0x0578, 0xF500, 0xBF0B, 
-    0x0538, 0xB907, 0x8809, 0xBEC6, 0x0156, 0x10AB, 0x90AA, 0x6974, 0xE388, 0x0163, 0xAE72, 0x0540, 
-    0xF500, 0xAE72, 0x0500, 0xAE61, 0x103B, 0x7A80, 0x02F6, 0x6978, 0xE388, 0x0182, 0x8B8C, 0xBF0C, 
-    0x0560, 0xE500, 0x7C40, 0x0814, 0xBA20, 0x8812, 0x733D, 0x7A80, 0x0380, 0x733E, 0x7A80, 0x0380, 
-    0x8B8C, 0xBF0C, 0x056C, 0xE500, 0x7C40, 0x0814, 0xBA2C, 0x8812, 0x733F, 0x7A80, 0x0380, 0x7340, 
-    0x7A80, 0x0380, 0x6975, 0xE388, 0x018E, 0xAE72, 0x0548, 0xF500, 0xAE72, 0x0508, 0xAE61, 0x1041, 
-    0x7A80, 0x02F6, 0x6979, 0xE388, 0x01AD, 0x8B8C, 0xBF0C, 0x0560, 0xE500, 0x7C40, 0x0814, 0xBA18, 
-    0x8812, 0x7343, 0x7A80, 0x0380, 0x7344, 0x7A80, 0x0380, 0x8B8C, 0xBF0C, 0x056C, 0xE500, 0x7C40, 
-    0x0814, 0xBA24, 0x8812, 0x7345, 0x7A80, 0x0380, 0x7346, 0x7A80, 0x0380, 0x6976, 0xE388, 0x01B9, 
-    0xAE72, 0x0558, 0xF500, 0xAE72, 0x0518, 0xAE61, 0x1047, 0x7A80, 0x02F6, 0x697A, 0xE388, 0x01D8, 
-    0x8B8C, 0xBF0C, 0x0560, 0xE500, 0x7C40, 0x0814, 0xBA08, 0x8812, 0x7349, 0x7A80, 0x0380, 0x734A, 
-    0x7A80, 0x0380, 0x8B8C, 0xBF0C, 0x056C, 0xE500, 0x7C40, 0x0814, 0xBA14, 0x8812, 0x734B, 0x7A80, 
-    0x0380, 0x734C, 0x7A80, 0x0380, 0xBC21, 0xAE1C, 0x1090, 0x8B8A, 0xBF0A, 0x0560, 0xE500, 0x7C40, 
-    0x0812, 0xB804, 0x8813, 0x8B8D, 0xBF0D, 0x056C, 0xE500, 0x7C40, 0x0815, 0xB804, 0x8811, 0x7A80, 
-    0x034A, 0x8B8A, 0xBF0A, 0x0560, 0xE500, 0x7C40, 0x731F, 0xB903, 0x8809, 0xBEC6, 0x01F9, 0x548A, 
-    0xBE03, 0x98A0, 0x7320, 0xB903, 0x8809, 0xBEC6, 0x0201, 0x548A, 0xBE03, 0x98A0, 0x1F20, 0x2F1F, 
-    0x9826, 0xBC20, 0x6935, 0xE388, 0x03A1, 0x6933, 0xB801, 0x9033, 0xBFA0, 0x02EE, 0xE308, 0x03A1, 
-    0x9033, 0xBF00, 0x6951, 0xE388, 0x021F, 0x7334, 0xBE80, 0x5760, 0xBE03, 0x9F7E, 0xBE59, 0x9034, 
-    0x697E, 0x0D51, 0x9013, 0xBC20, 0x695C, 0xE388, 0x03A1, 0x735E, 0xBE80, 0x5760, 0xBE03, 0x9F7E, 
-    0xBE59, 0x905E, 0x697E, 0x0D5C, 0x9013, 0x7980, 0x03A1, 0x7A80, 0x038A, 0xBF01, 0xBE43, 0x6977, 
-    0xE388, 0x024E, 0xAE61, 0x104D, 0x0061, 0x8B88, 0x6980, 0xE388, 0x024E, 0x9071, 0x0D71, 0x000B, 
-    0xAFA0, 0x8010, 0xAFA0, 0x8010, 0x0810, 0x660A, 0xE308, 0x0249, 0x0009, 0x0810, 0x660C, 0xE388, 
-    0x024E, 0x800B, 0xBC20, 0x697B, 0xE388, 0x03A1, 0xBF0A, 0x109E, 0x8B8A, 0xAF80, 0x8014, 0x4C80, 
-    0xE100, 0x0266, 0x697C, 0xBF90, 0x0560, 0x9072, 0x0372, 0x697C, 0xBF90, 0x0564, 0x9073, 0x0473, 
-    0x7980, 0x0270, 0x697C, 0xBF90, 0x0520, 0x9072, 0x0372, 0x697C, 0xBF90, 0x0524, 0x9073, 0x0473, 
-    0x697C, 0xB801, 0x907C, 0xBF0A, 0x10FD, 0x8B8A, 0xAF80, 0x8010, 0x734F, 0x548A, 0xBE03, 0x9880, 
-    0xBC21, 0x7326, 0x548B, 0xBE03, 0x618B, 0x988C, 0xBE03, 0x6180, 0x9880, 0x7980, 0x03A1, 0x7A80, 
-    0x038A, 0x0D28, 0x4711, 0xE100, 0x02BE, 0xAF12, 0x4006, 0x6912, 0xBFB0, 0x0C00, 0xE388, 0x02B6, 
-    0xBFA0, 0x0800, 0xE388, 0x02B2, 0x6912, 0xBFB0, 0x0C00, 0xBFA0, 0x0400, 0xE388, 0x02A3, 0x6909, 
-    0x900B, 0x7980, 0x02A5, 0xAF0B, 0x4005, 0x6901, 0x9005, 0x6902, 0x9006, 0x4311, 0xE100, 0x02ED, 
-    0x6911, 0xBFC0, 0x2000, 0x9011, 0x7980, 0x02ED, 0x6909, 0x900B, 0x7980, 0x02B8, 0xAF0B, 0x4005, 
-    0xAF05, 0x4003, 0xAF06, 0x4004, 0x7980, 0x02ED, 0xAF12, 0x4006, 0x6912, 0xBFB0, 0x0C00, 0xE388, 
-    0x02E7, 0xBFA0, 0x0800, 0xE388, 0x02E3, 0x6912, 0xBFB0, 0x0C00, 0xBFA0, 0x0400, 0xE388, 0x02D4, 
-    0x690D, 0x9010, 0x7980, 0x02D6, 0xAF10, 0x4005, 0x6901, 0x9005, 0x6902, 0x9006, 0x4311, 0xE100, 
-    0x02ED, 0x6911, 0xBFC0, 0x2000, 0x9011, 0x7980, 0x02ED, 0x690D, 0x9010, 0x7980, 0x02E9, 0xAF10, 
-    0x4005, 0xAF05, 0x4003, 0xAF06, 0x4004, 0xBC20, 0x6970, 0x9071, 0x7A80, 0x0078, 0x6971, 0x9070, 
-    0x7980, 0x03A1, 0xBC20, 0x0361, 0x8B8B, 0x6980, 0xEF88, 0x0272, 0x0372, 0x7804, 0x9071, 0x0D71, 
-    0x8B8A, 0x000B, 0xB903, 0x8809, 0xBEC6, 0x0309, 0x69A8, 0x90AB, 0x69A8, 0x90AA, 0x0810, 0x660A, 
-    0xE344, 0x030F, 0x0009, 0x0810, 0x660C, 0xE388, 0x0314, 0x800B, 0xBC20, 0x6961, 0xB801, 0x9061, 
-    0x7980, 0x02F7, 0x7A80, 0x038A, 0x5D35, 0x0001, 0x6934, 0xB801, 0x9034, 0xBF0A, 0x109E, 0x8B8A, 
-    0xAF80, 0x8014, 0x4880, 0xAE72, 0x0550, 0xF500, 0xAE72, 0x0510, 0xAE61, 0x1051, 0x7A80, 0x02F6, 
-    0x7980, 0x03A1, 0x7A80, 0x038A, 0x5D35, 0x0002, 0x695E, 0xB801, 0x905E, 0xBF0A, 0x109E, 0x8B8A, 
-    0xAF80, 0x8014, 0x4780, 0xAE72, 0x0558, 0xF500, 0xAE72, 0x0518, 0xAE61, 0x105C, 0x7A80, 0x02F6, 
-    0x7980, 0x03A1, 0x001C, 0x8B88, 0x6980, 0xEF88, 0x901D, 0x0D1D, 0x100F, 0x6610, 0xE38C, 0x0358, 
-    0x690E, 0x6610, 0x620F, 0x660D, 0xBA0F, 0xE301, 0x037A, 0x0410, 0x8B8A, 0xB903, 0x8809, 0xBEC6, 
-    0x036C, 0x6A8C, 0x61AA, 0x98AB, 0x6A8C, 0x61AB, 0x98AD, 0x6A8C, 0x61AD, 0x98A9, 0x6A8C, 0x61A9, 
-    0x98AA, 0x7C04, 0x8B8B, 0x7C04, 0x8B8D, 0x7C04, 0x8B89, 0x7C04, 0x0814, 0x660E, 0xE308, 0x0379, 
-    0x040D, 0x8410, 0xBC21, 0x691C, 0xB801, 0x901C, 0x7980, 0x034A, 0xB903, 0x8809, 0x8B8A, 0xBEC6, 
-    0x0388, 0x54AC, 0xBE03, 0x618C, 0x98AA, 0xEF00, 0xBC20, 0xBE46, 0x0809, 0x906B, 0x080A, 0x906C, 
-    0x080B, 0x906D, 0x081A, 0x9062, 0x081B, 0x9063, 0x081E, 0x9064, 0xBE59, 0x881E, 0x8065, 0x8166, 
-    0x8267, 0x8368, 0x8469, 0x856A, 0xEF00, 0xBC20, 0x696B, 0x8809, 0x696C, 0x880A, 0x696D, 0x880B, 
-    0x6962, 0x881A, 0x6963, 0x881B, 0x6964, 0x881E, 0x0065, 0x0166, 0x0267, 0x0368, 0x0469, 0x056A, 
-    0xBE3A, 
-};
-
-/*
- * Mini sample rate converter code image
- * that is to be loaded at 0x400 on the DSP.
- */
-static u16 assp_minisrc_image[] __devinitdata = {
-
-    0xBF80, 0x101E, 0x906E, 0x006E, 0x8B88, 0x6980, 0xEF88, 0x906F, 0x0D6F, 0x6900, 0xEB08, 0x0412, 
-    0xBC20, 0x696E, 0xB801, 0x906E, 0x7980, 0x0403, 0xB90E, 0x8807, 0xBE43, 0xBF01, 0xBE47, 0xBE41, 
-    0x7A80, 0x002A, 0xBE40, 0x3029, 0xEFCC, 0xBE41, 0x7A80, 0x0028, 0xBE40, 0x3028, 0xEFCC, 0x6907, 
-    0xE308, 0x042A, 0x6909, 0x902C, 0x7980, 0x042C, 0x690D, 0x902C, 0x1009, 0x881A, 0x100A, 0xBA01, 
-    0x881B, 0x100D, 0x881C, 0x100E, 0xBA01, 0x881D, 0xBF80, 0x00ED, 0x881E, 0x050C, 0x0124, 0xB904, 
-    0x9027, 0x6918, 0xE308, 0x04B3, 0x902D, 0x6913, 0xBFA0, 0x7598, 0xF704, 0xAE2D, 0x00FF, 0x8B8D, 
-    0x6919, 0xE308, 0x0463, 0x691A, 0xE308, 0x0456, 0xB907, 0x8809, 0xBEC6, 0x0453, 0x10A9, 0x90AD, 
-    0x7980, 0x047C, 0xB903, 0x8809, 0xBEC6, 0x0460, 0x1889, 0x6C22, 0x90AD, 0x10A9, 0x6E23, 0x6C22, 
-    0x90AD, 0x7980, 0x047C, 0x101A, 0xE308, 0x046F, 0xB903, 0x8809, 0xBEC6, 0x046C, 0x10A9, 0x90A0, 
-    0x90AD, 0x7980, 0x047C, 0xB901, 0x8809, 0xBEC6, 0x047B, 0x1889, 0x6C22, 0x90A0, 0x90AD, 0x10A9, 
-    0x6E23, 0x6C22, 0x90A0, 0x90AD, 0x692D, 0xE308, 0x049C, 0x0124, 0xB703, 0xB902, 0x8818, 0x8B89, 
-    0x022C, 0x108A, 0x7C04, 0x90A0, 0x692B, 0x881F, 0x7E80, 0x055B, 0x692A, 0x8809, 0x8B89, 0x99A0, 
-    0x108A, 0x90A0, 0x692B, 0x881F, 0x7E80, 0x055B, 0x692A, 0x8809, 0x8B89, 0x99AF, 0x7B99, 0x0484, 
-    0x0124, 0x060F, 0x101B, 0x2013, 0x901B, 0xBFA0, 0x7FFF, 0xE344, 0x04AC, 0x901B, 0x8B89, 0x7A80, 
-    0x051A, 0x6927, 0xBA01, 0x9027, 0x7A80, 0x0523, 0x6927, 0xE308, 0x049E, 0x7980, 0x050F, 0x0624, 
-    0x1026, 0x2013, 0x9026, 0xBFA0, 0x7FFF, 0xE304, 0x04C0, 0x8B8D, 0x7A80, 0x051A, 0x7980, 0x04B4, 
-    0x9026, 0x1013, 0x3026, 0x901B, 0x8B8D, 0x7A80, 0x051A, 0x7A80, 0x0523, 0x1027, 0xBA01, 0x9027, 
-    0xE308, 0x04B4, 0x0124, 0x060F, 0x8B89, 0x691A, 0xE308, 0x04EA, 0x6919, 0xE388, 0x04E0, 0xB903, 
-    0x8809, 0xBEC6, 0x04DD, 0x1FA0, 0x2FAE, 0x98A9, 0x7980, 0x050F, 0xB901, 0x8818, 0xB907, 0x8809, 
-    0xBEC6, 0x04E7, 0x10EE, 0x90A9, 0x7980, 0x050F, 0x6919, 0xE308, 0x04FE, 0xB903, 0x8809, 0xBE46, 
-    0xBEC6, 0x04FA, 0x17A0, 0xBE1E, 0x1FAE, 0xBFBF, 0xFF00, 0xBE13, 0xBFDF, 0x8080, 0x99A9, 0xBE47, 
-    0x7980, 0x050F, 0xB901, 0x8809, 0xBEC6, 0x050E, 0x16A0, 0x26A0, 0xBFB7, 0xFF00, 0xBE1E, 0x1EA0, 
-    0x2EAE, 0xBFBF, 0xFF00, 0xBE13, 0xBFDF, 0x8080, 0x99A9, 0x850C, 0x860F, 0x6907, 0xE388, 0x0516, 
-    0x0D07, 0x8510, 0xBE59, 0x881E, 0xBE4A, 0xEF00, 0x101E, 0x901C, 0x101F, 0x901D, 0x10A0, 0x901E, 
-    0x10A0, 0x901F, 0xEF00, 0x101E, 0x301C, 0x9020, 0x731B, 0x5420, 0xBE03, 0x9825, 0x1025, 0x201C, 
-    0x9025, 0x7325, 0x5414, 0xBE03, 0x8B8E, 0x9880, 0x692F, 0xE388, 0x0539, 0xBE59, 0xBB07, 0x6180, 
-    0x9880, 0x8BA0, 0x101F, 0x301D, 0x9021, 0x731B, 0x5421, 0xBE03, 0x982E, 0x102E, 0x201D, 0x902E, 
-    0x732E, 0x5415, 0xBE03, 0x9880, 0x692F, 0xE388, 0x054F, 0xBE59, 0xBB07, 0x6180, 0x9880, 0x8BA0, 
-    0x6918, 0xEF08, 0x7325, 0x5416, 0xBE03, 0x98A0, 0x732E, 0x5417, 0xBE03, 0x98A0, 0xEF00, 0x8BA0, 
-    0xBEC6, 0x056B, 0xBE59, 0xBB04, 0xAA90, 0xBE04, 0xBE1E, 0x99E0, 0x8BE0, 0x69A0, 0x90D0, 0x69A0, 
-    0x90D0, 0x081F, 0xB805, 0x881F, 0x8B90, 0x69A0, 0x90D0, 0x69A0, 0x9090, 0x8BD0, 0x8BD8, 0xBE1F, 
-    0xEF00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 
-    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 
-};
 
 
 /*
@@ -2119,14 +2095,15 @@ static u16 assp_minisrc_image[] __devinitdata = {
  */
 
 #define MINISRC_LPF_LEN 10
-static u16 minisrc_lpf[MINISRC_LPF_LEN] __devinitdata = {
+static const u16 minisrc_lpf[MINISRC_LPF_LEN] = {
 	0X0743, 0X1104, 0X0A4C, 0XF88D, 0X242C,
 	0X1023, 0X1AA9, 0X0B60, 0XEFDD, 0X186F
 };
 
-static void __devinit snd_m3_assp_init(m3_t *chip)
+static void snd_m3_assp_init(struct snd_m3 *chip)
 {
 	unsigned int i;
+	const u16 *data;
 
 	/* zero kernel data */
 	for (i = 0; i < (REV_B_DATA_MEMORY_UNIT_LENGTH * NUM_UNITS_KERNEL_DATA) / 2; i++)
@@ -2144,10 +2121,11 @@ static void __devinit snd_m3_assp_init(m3_t *chip)
 			  KDATA_DMA_XFER0);
 
 	/* write kernel into code memory.. */
-	for (i = 0 ; i < ARRAY_SIZE(assp_kernel_image); i++) {
+	data = (const u16 *)chip->assp_kernel_image->data;
+	for (i = 0 ; i * 2 < chip->assp_kernel_image->size; i++) {
 		snd_m3_assp_write(chip, MEMTYPE_INTERNAL_CODE, 
-				  REV_B_CODE_MEMORY_BEGIN + i, 
-				  assp_kernel_image[i]);
+				  REV_B_CODE_MEMORY_BEGIN + i,
+				  le16_to_cpu(data[i]));
 	}
 
 	/*
@@ -2156,10 +2134,10 @@ static void __devinit snd_m3_assp_init(m3_t *chip)
 	 * drop it there.  It seems that the minisrc doesn't
 	 * need vectors, so we won't bother with them..
 	 */
-	for (i = 0; i < ARRAY_SIZE(assp_minisrc_image); i++) {
+	data = (const u16 *)chip->assp_minisrc_image->data;
+	for (i = 0; i * 2 < chip->assp_minisrc_image->size; i++) {
 		snd_m3_assp_write(chip, MEMTYPE_INTERNAL_CODE, 
-				  0x400 + i, 
-				  assp_minisrc_image[i]);
+				  0x400 + i, le16_to_cpu(data[i]));
 	}
 
 	/*
@@ -2213,7 +2191,7 @@ static void __devinit snd_m3_assp_init(m3_t *chip)
 }
 
 
-static int __devinit snd_m3_assp_client_init(m3_t *chip, m3_dma_t *s, int index)
+static int snd_m3_assp_client_init(struct snd_m3 *chip, struct m3_dma *s, int index)
 {
 	int data_bytes = 2 * ( MINISRC_TMP_BUFFER_SIZE / 2 + 
 			       MINISRC_IN_BUFFER_SIZE / 2 +
@@ -2226,15 +2204,16 @@ static int __devinit snd_m3_assp_client_init(m3_t *chip, m3_dma_t *s, int index)
 	 */
 
 	/*
-	 * align instance address to 256 bytes so that it's
+	 * align instance address to 256 bytes so that its
 	 * shifted list address is aligned.
 	 * list address = (mem address >> 1) >> 7;
 	 */
-	data_bytes = (data_bytes + 255) & ~255;
+	data_bytes = ALIGN(data_bytes, 256);
 	address = 0x1100 + ((data_bytes/2) * index);
 
 	if ((address + (data_bytes/2)) >= 0x1c00) {
-		snd_printk("no memory for %d bytes at ind %d (addr 0x%x)\n",
+		dev_err(chip->card->dev,
+			"no memory for %d bytes at ind %d (addr 0x%x)\n",
 			   data_bytes, index, address);
 		return -ENOMEM;
 	}
@@ -2259,7 +2238,7 @@ static int __devinit snd_m3_assp_client_init(m3_t *chip, m3_dma_t *s, int index)
  * this needs more magic for 4 speaker, but..
  */
 static void
-snd_m3_amp_enable(m3_t *chip, int enable)
+snd_m3_amp_enable(struct snd_m3 *chip, int enable)
 {
 	int io = chip->iobase;
 	u16 gpo, polarity;
@@ -2282,10 +2261,34 @@ snd_m3_amp_enable(m3_t *chip, int enable)
 	outw(0xffff, io + GPIO_MASK);
 }
 
+static void
+snd_m3_hv_init(struct snd_m3 *chip)
+{
+	unsigned long io = chip->iobase;
+	u16 val = GPI_VOL_DOWN | GPI_VOL_UP;
+
+	if (!chip->is_omnibook)
+		return;
+
+	/*
+	 * Volume buttons on some HP OmniBook laptops
+	 * require some GPIO magic to work correctly.
+	 */
+	outw(0xffff, io + GPIO_MASK);
+	outw(0x0000, io + GPIO_DATA);
+
+	outw(~val, io + GPIO_MASK);
+	outw(inw(io + GPIO_DIRECTION) & ~val, io + GPIO_DIRECTION);
+	outw(val, io + GPIO_MASK);
+
+	outw(0xffff, io + GPIO_MASK);
+}
+
 static int
-snd_m3_chip_init(m3_t *chip)
+snd_m3_chip_init(struct snd_m3 *chip)
 {
 	struct pci_dev *pcidev = chip->pci;
+	unsigned long io = chip->iobase;
 	u32 n;
 	u16 w;
 	u8 t; /* makes as much sense as 'n', no? */
@@ -2297,7 +2300,10 @@ snd_m3_chip_init(m3_t *chip)
 	pci_write_config_word(pcidev, PCI_LEGACY_AUDIO_CTRL, w);
 
 	pci_read_config_dword(pcidev, PCI_ALLEGRO_CONFIG, &n);
-	n &= REDUCED_DEBOUNCE;
+	n &= ~(HV_CTRL_ENABLE | REDUCED_DEBOUNCE | HV_BUTTON_FROM_GD);
+	n |= chip->hv_config;
+	/* For some reason we must always use reduced debounce. */
+	n |= REDUCED_DEBOUNCE;
 	n |= PM_CTRL_ENABLE | CLK_DIV_BY_49 | USE_PCI_TIMING;
 	pci_write_config_dword(pcidev, PCI_ALLEGRO_CONFIG, n);
 
@@ -2323,18 +2329,30 @@ snd_m3_chip_init(m3_t *chip)
 	t |= ASSP_0_WS_ENABLE; 
 	outb(t, chip->iobase + ASSP_CONTROL_A);
 
+	snd_m3_assp_init(chip); /* download DSP code before starting ASSP below */
 	outb(RUN_ASSP, chip->iobase + ASSP_CONTROL_B); 
+
+	outb(0x00, io + HARDWARE_VOL_CTRL);
+	outb(0x88, io + SHADOW_MIX_REG_VOICE);
+	outb(0x88, io + HW_VOL_COUNTER_VOICE);
+	outb(0x88, io + SHADOW_MIX_REG_MASTER);
+	outb(0x88, io + HW_VOL_COUNTER_MASTER);
 
 	return 0;
 } 
 
 static void
-snd_m3_enable_ints(m3_t *chip)
+snd_m3_enable_ints(struct snd_m3 *chip)
 {
 	unsigned long io = chip->iobase;
+	unsigned short val;
 
 	/* TODO: MPU401 not supported yet */
-	outw(ASSP_INT_ENABLE /*| MPU401_INT_ENABLE*/, io + HOST_INT_CTRL);
+	val = ASSP_INT_ENABLE /*| MPU401_INT_ENABLE*/;
+	if (chip->hv_config & HV_CTRL_ENABLE)
+		val |= HV_INT_ENABLE;
+	outb(val, chip->iobase + HOST_INT_STATUS);
+	outw(val, io + HOST_INT_CTRL);
 	outb(inb(io + ASSP_CONTROL_C) | ASSP_HOST_INT_ENABLE,
 	     io + ASSP_CONTROL_C);
 }
@@ -2343,10 +2361,16 @@ snd_m3_enable_ints(m3_t *chip)
 /*
  */
 
-static int snd_m3_free(m3_t *chip)
+static int snd_m3_free(struct snd_m3 *chip)
 {
-	m3_dma_t *s;
+	struct m3_dma *s;
 	int i;
+
+	cancel_work_sync(&chip->hwvol_work);
+#ifdef CONFIG_SND_MAESTRO3_INPUT
+	if (chip->input_dev)
+		input_unregister_device(chip->input_dev);
+#endif
 
 	if (chip->substreams) {
 		spin_lock_irq(&chip->reg_lock);
@@ -2360,20 +2384,21 @@ static int snd_m3_free(m3_t *chip)
 		kfree(chip->substreams);
 	}
 	if (chip->iobase) {
-		snd_m3_outw(chip, HOST_INT_CTRL, 0); /* disable ints */
+		outw(0, chip->iobase + HOST_INT_CTRL); /* disable ints */
 	}
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	vfree(chip->suspend_mem);
 #endif
 
-	if (chip->irq >= 0) {
-		synchronize_irq(chip->irq);
-		free_irq(chip->irq, (void *)chip);
-	}
+	if (chip->irq >= 0)
+		free_irq(chip->irq, chip);
 
 	if (chip->iobase)
 		pci_release_regions(chip->pci);
+
+	release_firmware(chip->assp_kernel_image);
+	release_firmware(chip->assp_minisrc_image);
 
 	pci_disable_device(chip->pci);
 	kfree(chip);
@@ -2384,49 +2409,45 @@ static int snd_m3_free(m3_t *chip)
 /*
  * APM support
  */
-#ifdef CONFIG_PM
-static int m3_suspend(snd_card_t *card, unsigned int state)
+#ifdef CONFIG_PM_SLEEP
+static int m3_suspend(struct device *dev)
 {
-	m3_t *chip = card->pm_private_data;
-	int i, index;
+	struct snd_card *card = dev_get_drvdata(dev);
+	struct snd_m3 *chip = card->private_data;
+	int i, dsp_index;
 
 	if (chip->suspend_mem == NULL)
 		return 0;
 
+	chip->in_suspend = 1;
+	cancel_work_sync(&chip->hwvol_work);
+	snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
 	snd_pcm_suspend_all(chip->pcm);
 	snd_ac97_suspend(chip->ac97);
 
-	big_mdelay(10); /* give the assp a chance to idle.. */
+	msleep(10); /* give the assp a chance to idle.. */
 
 	snd_m3_assp_halt(chip);
 
 	/* save dsp image */
-	index = 0;
+	dsp_index = 0;
 	for (i = REV_B_CODE_MEMORY_BEGIN; i <= REV_B_CODE_MEMORY_END; i++)
-		chip->suspend_mem[index++] = 
+		chip->suspend_mem[dsp_index++] =
 			snd_m3_assp_read(chip, MEMTYPE_INTERNAL_CODE, i);
 	for (i = REV_B_DATA_MEMORY_BEGIN ; i <= REV_B_DATA_MEMORY_END; i++)
-		chip->suspend_mem[index++] = 
+		chip->suspend_mem[dsp_index++] =
 			snd_m3_assp_read(chip, MEMTYPE_INTERNAL_DATA, i);
-
-	/* power down apci registers */
-	snd_m3_outw(chip, 0xffff, 0x54);
-	snd_m3_outw(chip, 0xffff, 0x56);
-
-	pci_disable_device(chip->pci);
 	return 0;
 }
 
-static int m3_resume(snd_card_t *card, unsigned int state)
+static int m3_resume(struct device *dev)
 {
-	m3_t *chip = card->pm_private_data;
-	int i, index;
+	struct snd_card *card = dev_get_drvdata(dev);
+	struct snd_m3 *chip = card->private_data;
+	int i, dsp_index;
 
 	if (chip->suspend_mem == NULL)
 		return 0;
-
-	pci_enable_device(chip->pci);
-	pci_set_master(chip->pci);
 
 	/* first lets just bring everything back. .*/
 	snd_m3_outw(chip, 0, 0x54);
@@ -2437,13 +2458,13 @@ static int m3_resume(snd_card_t *card, unsigned int state)
 	snd_m3_ac97_reset(chip);
 
 	/* restore dsp image */
-	index = 0;
+	dsp_index = 0;
 	for (i = REV_B_CODE_MEMORY_BEGIN; i <= REV_B_CODE_MEMORY_END; i++)
 		snd_m3_assp_write(chip, MEMTYPE_INTERNAL_CODE, i, 
-				  chip->suspend_mem[index++]);
+				  chip->suspend_mem[dsp_index++]);
 	for (i = REV_B_DATA_MEMORY_BEGIN ; i <= REV_B_DATA_MEMORY_END; i++)
 		snd_m3_assp_write(chip, MEMTYPE_INTERNAL_DATA, i, 
-				  chip->suspend_mem[index++]);
+				  chip->suspend_mem[dsp_index++]);
 
 	/* tell the dma engine to restart itself */
 	snd_m3_assp_write(chip, MEMTYPE_INTERNAL_DATA, 
@@ -2456,31 +2477,74 @@ static int m3_resume(snd_card_t *card, unsigned int state)
 	snd_m3_enable_ints(chip);
 	snd_m3_amp_enable(chip, 1);
 
+	snd_m3_hv_init(chip);
+
+	snd_power_change_state(card, SNDRV_CTL_POWER_D0);
+	chip->in_suspend = 0;
 	return 0;
 }
-#endif /* CONFIG_PM */
 
+static SIMPLE_DEV_PM_OPS(m3_pm, m3_suspend, m3_resume);
+#define M3_PM_OPS	&m3_pm
+#else
+#define M3_PM_OPS	NULL
+#endif /* CONFIG_PM_SLEEP */
+
+#ifdef CONFIG_SND_MAESTRO3_INPUT
+static int snd_m3_input_register(struct snd_m3 *chip)
+{
+	struct input_dev *input_dev;
+	int err;
+
+	input_dev = input_allocate_device();
+	if (!input_dev)
+		return -ENOMEM;
+
+	snprintf(chip->phys, sizeof(chip->phys), "pci-%s/input0",
+		 pci_name(chip->pci));
+
+	input_dev->name = chip->card->driver;
+	input_dev->phys = chip->phys;
+	input_dev->id.bustype = BUS_PCI;
+	input_dev->id.vendor  = chip->pci->vendor;
+	input_dev->id.product = chip->pci->device;
+	input_dev->dev.parent = &chip->pci->dev;
+
+	__set_bit(EV_KEY, input_dev->evbit);
+	__set_bit(KEY_MUTE, input_dev->keybit);
+	__set_bit(KEY_VOLUMEDOWN, input_dev->keybit);
+	__set_bit(KEY_VOLUMEUP, input_dev->keybit);
+
+	err = input_register_device(input_dev);
+	if (err) {
+		input_free_device(input_dev);
+		return err;
+	}
+
+	chip->input_dev = input_dev;
+	return 0;
+}
+#endif /* CONFIG_INPUT */
 
 /*
  */
 
-static int snd_m3_dev_free(snd_device_t *device)
+static int snd_m3_dev_free(struct snd_device *device)
 {
-	m3_t *chip = device->device_data;
+	struct snd_m3 *chip = device->device_data;
 	return snd_m3_free(chip);
 }
 
-static int __devinit
-snd_m3_create(snd_card_t *card, struct pci_dev *pci,
+static int
+snd_m3_create(struct snd_card *card, struct pci_dev *pci,
 	      int enable_amp,
 	      int amp_gpio,
-	      m3_t **chip_ret)
+	      struct snd_m3 **chip_ret)
 {
-	m3_t *chip;
+	struct snd_m3 *chip;
 	int i, err;
-	struct m3_quirk *quirk;
-	u16 subsystem_vendor, subsystem_device;
-	static snd_device_ops_t ops = {
+	const struct snd_pci_quirk *quirk;
+	static struct snd_device_ops ops = {
 		.dev_free =	snd_m3_dev_free,
 	};
 
@@ -2490,20 +2554,22 @@ snd_m3_create(snd_card_t *card, struct pci_dev *pci,
 		return -EIO;
 
 	/* check, if we can restrict PCI DMA transfers to 28 bits */
-	if (pci_set_dma_mask(pci, 0x0fffffff) < 0 ||
-	    pci_set_consistent_dma_mask(pci, 0x0fffffff) < 0) {
-		snd_printk("architecture does not support 28bit PCI busmaster DMA\n");
+	if (dma_set_mask(&pci->dev, DMA_BIT_MASK(28)) < 0 ||
+	    dma_set_coherent_mask(&pci->dev, DMA_BIT_MASK(28)) < 0) {
+		dev_err(card->dev,
+			"architecture does not support 28bit PCI busmaster DMA\n");
 		pci_disable_device(pci);
 		return -ENXIO;
 	}
 
-	chip = kcalloc(1, sizeof(*chip), GFP_KERNEL);
+	chip = kzalloc(sizeof(*chip), GFP_KERNEL);
 	if (chip == NULL) {
 		pci_disable_device(pci);
 		return -ENOMEM;
 	}
 
 	spin_lock_init(&chip->reg_lock);
+
 	switch (pci->device) {
 	case PCI_DEVICE_ID_ESS_ALLEGRO:
 	case PCI_DEVICE_ID_ESS_ALLEGRO_1:
@@ -2516,42 +2582,58 @@ snd_m3_create(snd_card_t *card, struct pci_dev *pci,
 	chip->card = card;
 	chip->pci = pci;
 	chip->irq = -1;
-
-	pci_read_config_word(pci, PCI_SUBSYSTEM_VENDOR_ID, &subsystem_vendor);
-	pci_read_config_word(pci, PCI_SUBSYSTEM_ID, &subsystem_device);
-
-	for (quirk = m3_quirk_list; quirk->vendor; quirk++) {
-		if (subsystem_vendor == quirk->vendor &&
-		    subsystem_device == quirk->device) {
-			printk(KERN_INFO "maestro3: enabled hack for '%s'\n", quirk->name);
-			chip->quirk = quirk;
-			break;
-		}
-	}
+	INIT_WORK(&chip->hwvol_work, snd_m3_update_hw_volume);
 
 	chip->external_amp = enable_amp;
 	if (amp_gpio >= 0 && amp_gpio <= 0x0f)
 		chip->amp_gpio = amp_gpio;
-	else if (chip->quirk && chip->quirk->amp_gpio >= 0)
-		chip->amp_gpio = chip->quirk->amp_gpio;
-	else if (chip->allegro_flag)
-		chip->amp_gpio = GPO_EXT_AMP_ALLEGRO;
-	else /* presumably this is for all 'maestro3's.. */
-		chip->amp_gpio = GPO_EXT_AMP_M3;
+	else {
+		quirk = snd_pci_quirk_lookup(pci, m3_amp_quirk_list);
+		if (quirk) {
+			dev_info(card->dev, "set amp-gpio for '%s'\n",
+				 snd_pci_quirk_name(quirk));
+			chip->amp_gpio = quirk->value;
+		} else if (chip->allegro_flag)
+			chip->amp_gpio = GPO_EXT_AMP_ALLEGRO;
+		else /* presumably this is for all 'maestro3's.. */
+			chip->amp_gpio = GPO_EXT_AMP_M3;
+	}
+
+	quirk = snd_pci_quirk_lookup(pci, m3_irda_quirk_list);
+	if (quirk) {
+		dev_info(card->dev, "enabled irda workaround for '%s'\n",
+			 snd_pci_quirk_name(quirk));
+		chip->irda_workaround = 1;
+	}
+	quirk = snd_pci_quirk_lookup(pci, m3_hv_quirk_list);
+	if (quirk)
+		chip->hv_config = quirk->value;
+	if (snd_pci_quirk_lookup(pci, m3_omnibook_quirk_list))
+		chip->is_omnibook = 1;
 
 	chip->num_substreams = NR_DSPS;
-	chip->substreams = kmalloc(sizeof(m3_dma_t) * chip->num_substreams, GFP_KERNEL);
+	chip->substreams = kcalloc(chip->num_substreams, sizeof(struct m3_dma),
+				   GFP_KERNEL);
 	if (chip->substreams == NULL) {
 		kfree(chip);
 		pci_disable_device(pci);
 		return -ENOMEM;
 	}
-	memset(chip->substreams, 0, sizeof(m3_dma_t) * chip->num_substreams);
 
-	if ((err = pci_request_regions(pci, card->driver)) < 0) {
-		snd_m3_free(chip);
-		return err;
-	}
+	err = request_firmware(&chip->assp_kernel_image,
+			       "ess/maestro3_assp_kernel.fw", &pci->dev);
+	if (err < 0)
+		goto free_chip;
+
+	err = request_firmware(&chip->assp_minisrc_image,
+			       "ess/maestro3_assp_minisrc.fw", &pci->dev);
+	if (err < 0)
+		goto free_chip;
+
+	err = pci_request_regions(pci, card->driver);
+	if (err < 0)
+		goto free_chip;
+
 	chip->iobase = pci_resource_start(pci, 0);
 	
 	/* just to be sure */
@@ -2562,61 +2644,70 @@ snd_m3_create(snd_card_t *card, struct pci_dev *pci,
 
 	snd_m3_ac97_reset(chip);
 
-	snd_m3_assp_init(chip);
 	snd_m3_amp_enable(chip, 1);
 
-	if (request_irq(pci->irq, snd_m3_interrupt, SA_INTERRUPT|SA_SHIRQ,
-			card->driver, (void *)chip)) {
-		snd_printk("unable to grab IRQ %d\n", pci->irq);
-		snd_m3_free(chip);
-		return -ENOMEM;
+	snd_m3_hv_init(chip);
+
+	if (request_irq(pci->irq, snd_m3_interrupt, IRQF_SHARED,
+			KBUILD_MODNAME, chip)) {
+		dev_err(card->dev, "unable to grab IRQ %d\n", pci->irq);
+		err = -ENOMEM;
+		goto free_chip;
 	}
 	chip->irq = pci->irq;
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 	chip->suspend_mem = vmalloc(sizeof(u16) * (REV_B_CODE_MEMORY_LENGTH + REV_B_DATA_MEMORY_LENGTH));
 	if (chip->suspend_mem == NULL)
-		snd_printk(KERN_WARNING "can't allocate apm buffer\n");
-	else
-		snd_card_set_pm_callback(card, m3_suspend, m3_resume, chip);
+		dev_warn(card->dev, "can't allocate apm buffer\n");
 #endif
 
-	if ((err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &ops)) < 0) {
-		snd_m3_free(chip);
-		return err;
-	}
+	err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &ops);
+	if (err < 0)
+		goto free_chip;
 
 	if ((err = snd_m3_mixer(chip)) < 0)
 		return err;
 
 	for (i = 0; i < chip->num_substreams; i++) {
-		m3_dma_t *s = &chip->substreams[i];
-		s->chip = chip;
+		struct m3_dma *s = &chip->substreams[i];
 		if ((err = snd_m3_assp_client_init(chip, s, i)) < 0)
 			return err;
 	}
 
 	if ((err = snd_m3_pcm(chip, 0)) < 0)
 		return err;
-    
+
+#ifdef CONFIG_SND_MAESTRO3_INPUT
+	if (chip->hv_config & HV_CTRL_ENABLE) {
+		err = snd_m3_input_register(chip);
+		if (err)
+			dev_warn(card->dev,
+				 "Input device registration failed with error %i",
+				 err);
+	}
+#endif
+
 	snd_m3_enable_ints(chip);
 	snd_m3_assp_continue(chip);
-
-	snd_card_set_dev(card, &pci->dev);
 
 	*chip_ret = chip;
 
 	return 0; 
+
+free_chip:
+	snd_m3_free(chip);
+	return err;
 }
 
 /*
  */
-static int __devinit
+static int
 snd_m3_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 {
 	static int dev;
-	snd_card_t *card;
-	m3_t *chip;
+	struct snd_card *card;
+	struct snd_m3 *chip;
 	int err;
 
 	/* don't pick up modems */
@@ -2630,9 +2721,10 @@ snd_m3_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 		return -ENOENT;
 	}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_new(&pci->dev, index[dev], id[dev], THIS_MODULE,
+			   0, &card);
+	if (err < 0)
+		return err;
 
 	switch (pci->device) {
 	case PCI_DEVICE_ID_ESS_ALLEGRO:
@@ -2648,60 +2740,52 @@ snd_m3_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 		break;
 	}
 
-	if ((err = snd_m3_create(card, pci,
-				 external_amp[dev],
-				 amp_gpio[dev],
-				 &chip)) < 0) {
-		snd_card_free(card);
-		return err;
-	}
+	err = snd_m3_create(card, pci, external_amp[dev], amp_gpio[dev], &chip);
+	if (err < 0)
+		goto free_card;
+
+	card->private_data = chip;
 
 	sprintf(card->shortname, "ESS %s PCI", card->driver);
 	sprintf(card->longname, "%s at 0x%lx, irq %d",
 		card->shortname, chip->iobase, chip->irq);
 
-	if ((err = snd_card_register(card)) < 0) {
-		snd_card_free(card);
-		return err;
-	}
+	err = snd_card_register(card);
+	if (err < 0)
+		goto free_card;
 
 #if 0 /* TODO: not supported yet */
-	/* TODO enable midi irq and i/o */
+	/* TODO enable MIDI IRQ and I/O */
 	err = snd_mpu401_uart_new(chip->card, 0, MPU401_HW_MPU401,
-				  chip->iobase + MPU401_DATA_PORT, 1,
-				  chip->irq, 0, &chip->rmidi);
+				  chip->iobase + MPU401_DATA_PORT,
+				  MPU401_INFO_INTEGRATED | MPU401_INFO_IRQ_HOOK,
+				  -1, &chip->rmidi);
 	if (err < 0)
-		printk(KERN_WARNING "maestro3: no midi support.\n");
+		dev_warn(card->dev, "no MIDI support.\n");
 #endif
 
 	pci_set_drvdata(pci, card);
 	dev++;
 	return 0;
+
+free_card:
+	snd_card_free(card);
+	return err;
 }
 
-static void __devexit snd_m3_remove(struct pci_dev *pci)
+static void snd_m3_remove(struct pci_dev *pci)
 {
 	snd_card_free(pci_get_drvdata(pci));
-	pci_set_drvdata(pci, NULL);
 }
 
-static struct pci_driver driver = {
-	.name = "Maestro3",
+static struct pci_driver m3_driver = {
+	.name = KBUILD_MODNAME,
 	.id_table = snd_m3_ids,
 	.probe = snd_m3_probe,
-	.remove = __devexit_p(snd_m3_remove),
-	SND_PCI_PM_CALLBACKS
+	.remove = snd_m3_remove,
+	.driver = {
+		.pm = M3_PM_OPS,
+	},
 };
 	
-static int __init alsa_card_m3_init(void)
-{
-	return pci_module_init(&driver);
-}
-
-static void __exit alsa_card_m3_exit(void)
-{
-	pci_unregister_driver(&driver);
-}
-
-module_init(alsa_card_m3_init)
-module_exit(alsa_card_m3_exit)
+module_pci_driver(m3_driver);

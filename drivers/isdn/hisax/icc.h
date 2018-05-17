@@ -4,12 +4,12 @@
  *
  * Author       Matt Henderson & Guy Ellis
  * Copyright    by Traverse Technologies Pty Ltd, www.travers.com.au
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
- * 1999.7.14 Initial implementation of routines for Siemens ISDN 
- * Communication Controller PEB 2070 based on the ISAC routines 
+ * 1999.7.14 Initial implementation of routines for Siemens ISDN
+ * Communication Controller PEB 2070 based on the ISAC routines
  * written by Karsten Keil.
  */
 
@@ -65,7 +65,7 @@
 #define ICC_IND_AIL    0xE
 #define ICC_IND_DC     0xF
 
-extern void __init ICCVersion(struct IsdnCardState *cs, char *s);
+extern void ICCVersion(struct IsdnCardState *cs, char *s);
 extern void initicc(struct IsdnCardState *cs);
 extern void icc_interrupt(struct IsdnCardState *cs, u_char val);
 extern void clear_pending_icc_ints(struct IsdnCardState *cs);

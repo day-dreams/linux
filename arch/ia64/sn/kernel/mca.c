@@ -3,13 +3,14 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (c) 2000-2004 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2006 Silicon Graphics, Inc.  All Rights Reserved.
  */
 
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/timer.h>
 #include <linux/vmalloc.h>
+#include <linux/mutex.h>
 #include <asm/mca.h>
 #include <asm/sal.h>
 #include <asm/sn/sn_sal.h>
@@ -27,7 +28,7 @@ void sn_init_cpei_timer(void);
 /* Printing oemdata from mca uses data that is not passed through SAL, it is
  * global.  Only one user at a time.
  */
-static DECLARE_MUTEX(sn_oemdata_mutex);
+static DEFINE_MUTEX(sn_oemdata_mutex);
 static u8 **sn_oemdata;
 static u64 *sn_oemdata_size, sn_oemdata_bufsize;
 
@@ -37,6 +38,11 @@ static u64 *sn_oemdata_size, sn_oemdata_bufsize;
  * This function is the callback routine that SAL calls to log error
  * info for platform errors.  buf is appended to sn_oemdata, resizing as
  * required.
+ * Note: this is a SAL to OS callback, running under the same rules as the SAL
+ * code.  SAL calls are run with preempt disabled so this routine must not
+ * sleep.  vmalloc can sleep so print_hook cannot resize the output buffer
+ * itself, instead it must set the required size and return to let the caller
+ * resize the buffer then redrive the SAL call.
  */
 static int print_hook(const char *fmt, ...)
 {
@@ -47,18 +53,8 @@ static int print_hook(const char *fmt, ...)
 	vsnprintf(buf, sizeof(buf), fmt, args);
 	va_end(args);
 	len = strlen(buf);
-	while (*sn_oemdata_size + len + 1 > sn_oemdata_bufsize) {
-		u8 *newbuf = vmalloc(sn_oemdata_bufsize += 1000);
-		if (!newbuf) {
-			printk(KERN_ERR "%s: unable to extend sn_oemdata\n",
-			       __FUNCTION__);
-			return 0;
-		}
-		memcpy(newbuf, *sn_oemdata, *sn_oemdata_size);
-		vfree(*sn_oemdata);
-		*sn_oemdata = newbuf;
-	}
-	memcpy(*sn_oemdata + *sn_oemdata_size, buf, len + 1);
+	if (*sn_oemdata_size + len <= sn_oemdata_bufsize)
+		memcpy(*sn_oemdata + *sn_oemdata_size, buf, len);
 	*sn_oemdata_size += len;
 	return 0;
 }
@@ -76,7 +72,7 @@ static void sn_cpei_handler(int irq, void *devid, struct pt_regs *regs)
 	ia64_sn_plat_cpei_handler();
 }
 
-static void sn_cpei_timer_handler(unsigned long dummy)
+static void sn_cpei_timer_handler(struct timer_list *unused)
 {
 	sn_cpei_handler(-1, NULL, NULL);
 	mod_timer(&sn_cpei_timer, jiffies + CPEI_INTERVAL);
@@ -84,9 +80,8 @@ static void sn_cpei_timer_handler(unsigned long dummy)
 
 void sn_init_cpei_timer(void)
 {
-	init_timer(&sn_cpei_timer);
+	timer_setup(&sn_cpei_timer, sn_cpei_timer_handler, 0);
 	sn_cpei_timer.expires = jiffies + CPEI_INTERVAL;
-	sn_cpei_timer.function = sn_cpei_timer_handler;
 	add_timer(&sn_cpei_timer);
 }
 
@@ -94,12 +89,26 @@ static int
 sn_platform_plat_specific_err_print(const u8 * sect_header, u8 ** oemdata,
 				    u64 * oemdata_size)
 {
-	down(&sn_oemdata_mutex);
+	mutex_lock(&sn_oemdata_mutex);
 	sn_oemdata = oemdata;
 	sn_oemdata_size = oemdata_size;
 	sn_oemdata_bufsize = 0;
-	ia64_sn_plat_specific_err_print(print_hook, (char *)sect_header);
-	up(&sn_oemdata_mutex);
+	*sn_oemdata_size = PAGE_SIZE;	/* first guess at how much data will be generated */
+	while (*sn_oemdata_size > sn_oemdata_bufsize) {
+		u8 *newbuf = vmalloc(*sn_oemdata_size);
+		if (!newbuf) {
+			mutex_unlock(&sn_oemdata_mutex);
+			printk(KERN_ERR "%s: unable to extend sn_oemdata\n",
+			       __func__);
+			return 1;
+		}
+		vfree(*sn_oemdata);
+		*sn_oemdata = newbuf;
+		sn_oemdata_bufsize = *sn_oemdata_size;
+		*sn_oemdata_size = 0;
+		ia64_sn_plat_specific_err_print(print_hook, (char *)sect_header);
+	}
+	mutex_unlock(&sn_oemdata_mutex);
 	return 0;
 }
 
@@ -128,8 +137,8 @@ int sn_salinfo_platform_oemdata(const u8 *sect_header, u8 **oemdata, u64 *oemdat
 
 static int __init sn_salinfo_init(void)
 {
-	salinfo_platform_oemdata = &sn_salinfo_platform_oemdata;
+	if (ia64_platform_is("sn2"))
+		salinfo_platform_oemdata = &sn_salinfo_platform_oemdata;
 	return 0;
 }
-
-module_init(sn_salinfo_init)
+device_initcall(sn_salinfo_init);

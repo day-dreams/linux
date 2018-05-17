@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/frv/mm/fault.c
  *
@@ -19,10 +20,9 @@
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
 #include <linux/hardirq.h>
+#include <linux/uaccess.h>
 
-#include <asm/system.h>
 #include <asm/pgtable.h>
-#include <asm/uaccess.h>
 #include <asm/gdb-stub.h>
 
 /*****************************************************************************/
@@ -34,12 +34,13 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
 {
 	struct vm_area_struct *vma;
 	struct mm_struct *mm;
-	unsigned long _pme, lrai, lrad, fixup;
+	unsigned long _pme, lrai, lrad;
+	unsigned long flags = 0;
 	siginfo_t info;
 	pgd_t *pge;
 	pud_t *pue;
 	pte_t *pte;
-	int write;
+	int fault;
 
 #if 0
 	const char *atxc[16] = {
@@ -78,8 +79,11 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-	if (in_interrupt() || !mm)
+	if (faulthandler_disabled() || !mm)
 		goto no_context;
+
+	if (user_mode(__frame))
+		flags |= FAULT_FLAG_USER;
 
 	down_read(&mm->mmap_sem);
 
@@ -129,7 +133,6 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
  */
  good_area:
 	info.si_code = SEGV_ACCERR;
-	write = 0;
 	switch (esr0 & ESR0_ATXC) {
 	default:
 		/* handle write to write protected page */
@@ -140,7 +143,7 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
 #endif
 		if (!(vma->vm_flags & VM_WRITE))
 			goto bad_area;
-		write = 1;
+		flags |= FAULT_FLAG_WRITE;
 		break;
 
 		 /* handle read from protected page */
@@ -162,18 +165,20 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
-	switch (handle_mm_fault(mm, vma, ear0, write)) {
-	case 1:
-		current->min_flt++;
-		break;
-	case 2:
-		current->maj_flt++;
-		break;
-	case 0:
-		goto do_sigbus;
-	default:
-		goto out_of_memory;
+	fault = handle_mm_fault(vma, ear0, flags);
+	if (unlikely(fault & VM_FAULT_ERROR)) {
+		if (fault & VM_FAULT_OOM)
+			goto out_of_memory;
+		else if (fault & VM_FAULT_SIGSEGV)
+			goto bad_area;
+		else if (fault & VM_FAULT_SIGBUS)
+			goto do_sigbus;
+		BUG();
 	}
+	if (fault & VM_FAULT_MAJOR)
+		current->maj_flt++;
+	else
+		current->min_flt++;
 
 	up_read(&mm->mmap_sem);
 	return;
@@ -197,10 +202,8 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
 
  no_context:
 	/* are we prepared to handle this kernel fault? */
-	if ((fixup = search_exception_table(__frame->pc)) != 0) {
-		__frame->pc = fixup;
+	if (fixup_exception(__frame))
 		return;
-	}
 
 /*
  * Oops. The kernel tried to access some bad page. We'll have to
@@ -256,10 +259,10 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
  */
  out_of_memory:
 	up_read(&mm->mmap_sem);
-	printk("VM: killing process %s\n", current->comm);
-	if (user_mode(__frame))
-		do_exit(SIGKILL);
-	goto no_context;
+	if (!user_mode(__frame))
+		goto no_context;
+	pagefault_out_of_memory();
+	return;
 
  do_sigbus:
 	up_read(&mm->mmap_sem);

@@ -1,35 +1,52 @@
 /*
- * $Id: parkbd.c,v 1.10 2002/03/13 10:09:20 vojtech Exp $
- *
- *  Copyright (c) 1999-2001 Vojtech Pavlik
- */
-
-/*
  *  Parallel port to Keyboard port adapter driver for Linux
+ *
+ *  Copyright (c) 1999-2004 Vojtech Pavlik
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published by
+ * the Free Software Foundation.
+ */
+
+/*
+ * To connect an AT or XT keyboard to the parallel port, a fairly simple adapter
+ * can be made:
+ * 
+ *  Parallel port            Keyboard port
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ *     +5V --------------------- +5V (4)
+ *  
+ *                 ______
+ *     +5V -------|______|--.
+ *                          |
+ *     ACK (10) ------------|
+ *                          |--- KBD CLOCK (5)
+ *     STROBE (1) ---|<|----'
+ *     
+ *                 ______
+ *     +5V -------|______|--.
+ *                          |
+ *     BUSY (11) -----------|
+ *                          |--- KBD DATA (1)
+ *     AUTOFD (14) --|<|----'
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
+ *     GND (18-25) ------------- GND (3)
+ *     
+ * The diodes can be fairly any type, and the resistors should be somewhere
+ * around 5 kOhm, but the adapter will likely work without the resistors,
+ * too.
  *
- * Should you need to contact me, the author, you can do so either by
- * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
- * Vojtech Pavlik, Simunkova 1594, Prague 8, 182 00 Czech Republic
+ * The +5V source can be taken either from USB, from mouse or keyboard ports,
+ * or from a joystick port. Unfortunately, the parallel port of a PC doesn't
+ * have a +5V pin, and feeding the keyboard from signal pins is out of question
+ * with 300 mA power reqirement of a typical AT keyboard.
  */
 
 #include <linux/module.h>
 #include <linux/parport.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/serio.h>
 
@@ -86,7 +103,7 @@ static int parkbd_write(struct serio *port, unsigned char c)
 	return 0;
 }
 
-static void parkbd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static void parkbd_interrupt(void *dev_id)
 {
 
 	if (parkbd_writing) {
@@ -118,25 +135,22 @@ static void parkbd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		parkbd_buffer |= (parkbd_readlines() >> 1) << parkbd_counter++;
 
 		if (parkbd_counter == parkbd_mode + 10)
-			serio_interrupt(parkbd_port, (parkbd_buffer >> (2 - parkbd_mode)) & 0xff, 0, regs);
+			serio_interrupt(parkbd_port, (parkbd_buffer >> (2 - parkbd_mode)) & 0xff, 0);
 	}
 
 	parkbd_last = jiffies;
 }
 
-static int parkbd_getport(void)
+static int parkbd_getport(struct parport *pp)
 {
-	struct parport *pp;
+	struct pardev_cb parkbd_parport_cb;
 
-	pp = parport_find_number(parkbd_pp_no);
+	memset(&parkbd_parport_cb, 0, sizeof(parkbd_parport_cb));
+	parkbd_parport_cb.irq_func = parkbd_interrupt;
+	parkbd_parport_cb.flags = PARPORT_FLAG_EXCL;
 
-	if (pp == NULL) {
-		printk(KERN_ERR "parkbd: no such parport\n");
-		return -ENODEV;
-	}
-
-	parkbd_dev = parport_register_device(pp, "parkbd", NULL, NULL, parkbd_interrupt, PARPORT_DEV_EXCL, NULL);
-	parport_put_port(pp);
+	parkbd_dev = parport_register_dev_model(pp, "parkbd",
+						&parkbd_parport_cb, 0);
 
 	if (!parkbd_dev)
 		return -ENODEV;
@@ -151,14 +165,13 @@ static int parkbd_getport(void)
 	return 0;
 }
 
-static struct serio * __init parkbd_allocate_serio(void)
+static struct serio *parkbd_allocate_serio(void)
 {
 	struct serio *serio;
 
-	serio = kmalloc(sizeof(struct serio), GFP_KERNEL);
+	serio = kzalloc(sizeof(struct serio), GFP_KERNEL);
 	if (serio) {
-		memset(serio, 0, sizeof(struct serio));
-		serio->type = parkbd_mode;
+		serio->id.type = parkbd_mode;
 		serio->write = parkbd_write,
 		strlcpy(serio->name, "PARKBD AT/XT keyboard adapter", sizeof(serio->name));
 		snprintf(serio->phys, sizeof(serio->phys), "%s/serio0", parkbd_dev->port->name);
@@ -167,18 +180,21 @@ static struct serio * __init parkbd_allocate_serio(void)
 	return serio;
 }
 
-int __init parkbd_init(void)
+static void parkbd_attach(struct parport *pp)
 {
-	int err;
+	if (pp->number != parkbd_pp_no) {
+		pr_debug("Not using parport%d.\n", pp->number);
+		return;
+	}
 
-	err = parkbd_getport();
-	if (err)
-		return err;
+	if (parkbd_getport(pp))
+		return;
 
 	parkbd_port = parkbd_allocate_serio();
 	if (!parkbd_port) {
 		parport_release(parkbd_dev);
-		return -ENOMEM;
+		parport_unregister_device(parkbd_dev);
+		return;
 	}
 
 	parkbd_writelines(3);
@@ -188,14 +204,35 @@ int __init parkbd_init(void)
 	printk(KERN_INFO "serio: PARKBD %s adapter on %s\n",
                         parkbd_mode ? "AT" : "XT", parkbd_dev->port->name);
 
-	return 0;
+	return;
 }
 
-void __exit parkbd_exit(void)
+static void parkbd_detach(struct parport *port)
 {
+	if (!parkbd_port || port->number != parkbd_pp_no)
+		return;
+
 	parport_release(parkbd_dev);
 	serio_unregister_port(parkbd_port);
 	parport_unregister_device(parkbd_dev);
+	parkbd_port = NULL;
+}
+
+static struct parport_driver parkbd_parport_driver = {
+	.name = "parkbd",
+	.match_port = parkbd_attach,
+	.detach = parkbd_detach,
+	.devmodel = true,
+};
+
+static int __init parkbd_init(void)
+{
+	return parport_register_driver(&parkbd_parport_driver);
+}
+
+static void __exit parkbd_exit(void)
+{
+	parport_unregister_driver(&parkbd_parport_driver);
 }
 
 module_init(parkbd_init);

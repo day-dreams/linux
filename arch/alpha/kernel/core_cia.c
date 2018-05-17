@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/arch/alpha/kernel/core_cia.c
  *
@@ -23,6 +24,7 @@
 #include <linux/bootmem.h>
 
 #include <asm/ptrace.h>
+#include <asm/mce.h>
 
 #include "proto.h"
 #include "pci_impl.h"
@@ -1192,8 +1194,7 @@ cia_decode_mchk(unsigned long la_ptr)
 }
 
 void
-cia_machine_check(unsigned long vector, unsigned long la_ptr,
-		  struct pt_regs * regs)
+cia_machine_check(unsigned long vector, unsigned long la_ptr)
 {
 	int expected;
 
@@ -1208,5 +1209,5 @@ cia_machine_check(unsigned long vector, unsigned long la_ptr,
 	expected = mcheck_expected(0);
 	if (!expected && vector == 0x660)
 		expected = cia_decode_mchk(la_ptr);
-	process_mcheck_info(vector, la_ptr, regs, "CIA", expected);
+	process_mcheck_info(vector, la_ptr, "CIA", expected);
 }

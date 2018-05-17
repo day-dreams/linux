@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/alpha/boot/main.c
  *
@@ -6,11 +7,11 @@
  * This file is the bootloader for the Linux/AXP kernel
  */
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/version.h>
+#include <generated/utsrelease.h>
 #include <linux/mm.h>
 
-#include <asm/system.h>
 #include <asm/console.h>
 #include <asm/hwrpb.h>
 #include <asm/pgtable.h>
@@ -19,7 +20,6 @@
 
 #include "ksize.h"
 
-extern int vsprintf(char *, const char *, va_list);
 extern unsigned long switch_to_osf_pal(unsigned long nr,
 	struct pcb_struct * pcb_va, struct pcb_struct * pcb_pa,
 	unsigned long *vptb);
@@ -132,7 +132,7 @@ static inline long load(long dev, unsigned long addr, unsigned long count)
 	if (result)
 		srm_printk("Boot file specification (%s) not implemented\n",
 		       bootfile);
-	return callback_read(dev, count, addr, boot_size/512 + 1);
+	return callback_read(dev, count, (void *)addr, boot_size/512 + 1);
 }
 
 /*

@@ -13,7 +13,6 @@
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
 #include <linux/errno.h>
@@ -21,128 +20,17 @@
 #include <linux/ptrace.h>
 #include <linux/unistd.h>
 #include <linux/personality.h>
-#include <linux/suspend.h>
+#include <linux/tracehook.h>
 #include <asm/ucontext.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/cacheflush.h>
 
 #define DEBUG_SIG 0
-
-#define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
 
 struct fdpic_func_descriptor {
 	unsigned long	text;
 	unsigned long	GOT;
 };
-
-asmlinkage int do_signal(struct pt_regs *regs, sigset_t *oldset);
-
-/*
- * Atomically swap in the new signal mask, and wait for a signal.
- */
-asmlinkage int sys_sigsuspend(int history0, int history1, old_sigset_t mask)
-{
-	sigset_t saveset;
-
-	mask &= _BLOCKABLE;
-	spin_lock_irq(&current->sighand->siglock);
-	saveset = current->blocked;
-	siginitset(&current->blocked, mask);
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
-
-	__frame->gr8 = -EINTR;
-	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule();
-		if (do_signal(__frame, &saveset))
-			/* return the signal number as the return value of this function
-			 * - this is an utterly evil hack. syscalls should not invoke do_signal()
-			 *   as entry.S sets regs->gr8 to the return value of the system call
-			 * - we can't just use sigpending() as we'd have to discard SIG_IGN signals
-			 *   and call waitpid() if SIGCHLD needed discarding
-			 * - this only works on the i386 because it passes arguments to the signal
-			 *   handler on the stack, and the return value in EAX is effectively
-			 *   discarded
-			 */
-			return __frame->gr8;
-	}
-}
-
-asmlinkage int sys_rt_sigsuspend(sigset_t __user *unewset, size_t sigsetsize)
-{
-	sigset_t saveset, newset;
-
-	/* XXX: Don't preclude handling different sized sigset_t's.  */
-	if (sigsetsize != sizeof(sigset_t))
-		return -EINVAL;
-
-	if (copy_from_user(&newset, unewset, sizeof(newset)))
-		return -EFAULT;
-	sigdelsetmask(&newset, ~_BLOCKABLE);
-
-	spin_lock_irq(&current->sighand->siglock);
-	saveset = current->blocked;
-	current->blocked = newset;
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
-
-	__frame->gr8 = -EINTR;
-	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule();
-		if (do_signal(__frame, &saveset))
-			/* return the signal number as the return value of this function
-			 * - this is an utterly evil hack. syscalls should not invoke do_signal()
-			 *   as entry.S sets regs->gr8 to the return value of the system call
-			 * - we can't just use sigpending() as we'd have to discard SIG_IGN signals
-			 *   and call waitpid() if SIGCHLD needed discarding
-			 * - this only works on the i386 because it passes arguments to the signal
-			 *   handler on the stack, and the return value in EAX is effectively
-			 *   discarded
-			 */
-			return __frame->gr8;
-	}
-}
-
-asmlinkage int sys_sigaction(int sig,
-			     const struct old_sigaction __user *act,
-			     struct old_sigaction __user *oact)
-{
-	struct k_sigaction new_ka, old_ka;
-	int ret;
-
-	if (act) {
-		old_sigset_t mask;
-		if (verify_area(VERIFY_READ, act, sizeof(*act)) ||
-		    __get_user(new_ka.sa.sa_handler, &act->sa_handler) ||
-		    __get_user(new_ka.sa.sa_restorer, &act->sa_restorer))
-			return -EFAULT;
-		__get_user(new_ka.sa.sa_flags, &act->sa_flags);
-		__get_user(mask, &act->sa_mask);
-		siginitset(&new_ka.sa.sa_mask, mask);
-	}
-
-	ret = do_sigaction(sig, act ? &new_ka : NULL, oact ? &old_ka : NULL);
-
-	if (!ret && oact) {
-		if (verify_area(VERIFY_WRITE, oact, sizeof(*oact)) ||
-		    __put_user(old_ka.sa.sa_handler, &oact->sa_handler) ||
-		    __put_user(old_ka.sa.sa_restorer, &oact->sa_restorer))
-			return -EFAULT;
-		__put_user(old_ka.sa.sa_flags, &oact->sa_flags);
-		__put_user(old_ka.sa.sa_mask.sig[0], &oact->sa_mask);
-	}
-
-	return ret;
-}
-
-asmlinkage
-int sys_sigaltstack(const stack_t __user *uss, stack_t __user *uoss)
-{
-	return do_sigaltstack(uss, uoss, __frame->sp);
-}
-
 
 /*
  * Do a signal return; undo the signal stack.
@@ -150,7 +38,7 @@ int sys_sigaltstack(const stack_t __user *uss, stack_t __user *uoss)
 
 struct sigframe
 {
-	void (*pretcode)(void);
+	__sigrestore_t pretcode;
 	int sig;
 	struct sigcontext sc;
 	unsigned long extramask[_NSIG_WORDS-1];
@@ -159,10 +47,10 @@ struct sigframe
 
 struct rt_sigframe
 {
-	void (*pretcode)(void);
+	__sigrestore_t pretcode;
 	int sig;
-	struct siginfo *pinfo;
-	void *puc;
+	struct siginfo __user *pinfo;
+	void __user *puc;
 	struct siginfo info;
 	struct ucontext uc;
 	uint32_t retcode[2];
@@ -172,6 +60,9 @@ static int restore_sigcontext(struct sigcontext __user *sc, int *_gr8)
 {
 	struct user_context *user = current->thread.user;
 	unsigned long tbr, psr;
+
+	/* Always make any pending restarted system calls return -EINTR */
+	current->restart_block.fn = do_no_restart_syscall;
 
 	tbr = user->i.tbr;
 	psr = user->i.psr;
@@ -197,7 +88,7 @@ asmlinkage int sys_sigreturn(void)
 	sigset_t set;
 	int gr8;
 
-	if (verify_area(VERIFY_READ, frame, sizeof(*frame)))
+	if (!access_ok(VERIFY_READ, frame, sizeof(*frame)))
 		goto badframe;
 	if (__get_user(set.sig[0], &frame->sc.sc_oldmask))
 		goto badframe;
@@ -206,11 +97,7 @@ asmlinkage int sys_sigreturn(void)
 	    __copy_from_user(&set.sig[1], &frame->extramask, sizeof(frame->extramask)))
 		goto badframe;
 
-	sigdelsetmask(&set, ~_BLOCKABLE);
-	spin_lock_irq(&current->sighand->siglock);
-	current->blocked = set;
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
+	set_current_blocked(&set);
 
 	if (restore_sigcontext(&frame->sc, &gr8))
 		goto badframe;
@@ -225,24 +112,19 @@ asmlinkage int sys_rt_sigreturn(void)
 {
 	struct rt_sigframe __user *frame = (struct rt_sigframe __user *) __frame->sp;
 	sigset_t set;
-	stack_t st;
 	int gr8;
 
-	if (verify_area(VERIFY_READ, frame, sizeof(*frame)))
+	if (!access_ok(VERIFY_READ, frame, sizeof(*frame)))
 		goto badframe;
 	if (__copy_from_user(&set, &frame->uc.uc_sigmask, sizeof(set)))
 		goto badframe;
 
-	sigdelsetmask(&set, ~_BLOCKABLE);
-	spin_lock_irq(&current->sighand->siglock);
-	current->blocked = set;
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
+	set_current_blocked(&set);
 
 	if (restore_sigcontext(&frame->uc.uc_mcontext, &gr8))
 		goto badframe;
 
-	if (do_sigaltstack(&frame->uc.uc_stack, NULL, __frame->sp) == -EFAULT)
+	if (restore_altstack(&frame->uc.uc_stack))
 		goto badframe;
 
 	return gr8;
@@ -276,199 +158,167 @@ static int setup_sigcontext(struct sigcontext __user *sc, unsigned long mask)
 /*
  * Determine which stack to use..
  */
-static inline void __user *get_sigframe(struct k_sigaction *ka,
-					struct pt_regs *regs,
+static inline void __user *get_sigframe(struct ksignal *ksig,
 					size_t frame_size)
 {
-	unsigned long sp;
-
-	/* Default to using normal stack */
-	sp = regs->sp;
-
-	/* This is the X/Open sanctioned signal stack switching.  */
-	if (ka->sa.sa_flags & SA_ONSTACK) {
-		if (! on_sig_stack(sp))
-			sp = current->sas_ss_sp + current->sas_ss_size;
-	}
+	unsigned long sp = sigsp(__frame->sp, ksig);
 
 	return (void __user *) ((sp - frame_size) & ~7UL);
+
 } /* end get_sigframe() */
 
 /*****************************************************************************/
 /*
  *
  */
-static void setup_frame(int sig, struct k_sigaction *ka, sigset_t *set, struct pt_regs * regs)
+static int setup_frame(struct ksignal *ksig, sigset_t *set)
 {
 	struct sigframe __user *frame;
-	int rsig;
+	int sig = ksig->sig;
 
-	frame = get_sigframe(ka, regs, sizeof(*frame));
+	frame = get_sigframe(ksig, sizeof(*frame));
 
 	if (!access_ok(VERIFY_WRITE, frame, sizeof(*frame)))
-		goto give_sigsegv;
+		return -EFAULT;
 
-	rsig = sig;
-	if (sig < 32 &&
-	    __current_thread_info->exec_domain &&
-	    __current_thread_info->exec_domain->signal_invmap)
-		rsig = __current_thread_info->exec_domain->signal_invmap[sig];
-
-	if (__put_user(rsig, &frame->sig) < 0)
-		goto give_sigsegv;
+	if (__put_user(sig, &frame->sig) < 0)
+		return -EFAULT;
 
 	if (setup_sigcontext(&frame->sc, set->sig[0]))
-		goto give_sigsegv;
+		return -EFAULT;
 
 	if (_NSIG_WORDS > 1) {
 		if (__copy_to_user(frame->extramask, &set->sig[1],
 				   sizeof(frame->extramask)))
-			goto give_sigsegv;
+			return -EFAULT;
 	}
 
 	/* Set up to return from userspace.  If provided, use a stub
 	 * already in userspace.  */
-	if (ka->sa.sa_flags & SA_RESTORER) {
-		if (__put_user(ka->sa.sa_restorer, &frame->pretcode) < 0)
-			goto give_sigsegv;
+	if (ksig->ka.sa.sa_flags & SA_RESTORER) {
+		if (__put_user(ksig->ka.sa.sa_restorer, &frame->pretcode) < 0)
+			return -EFAULT;
 	}
 	else {
 		/* Set up the following code on the stack:
 		 *	setlos	#__NR_sigreturn,gr7
 		 *	tira	gr0,0
 		 */
-		if (__put_user((void (*)(void))frame->retcode, &frame->pretcode) ||
+		if (__put_user((__sigrestore_t)frame->retcode, &frame->pretcode) ||
 		    __put_user(0x8efc0000|__NR_sigreturn, &frame->retcode[0]) ||
 		    __put_user(0xc0700000, &frame->retcode[1]))
-			goto give_sigsegv;
+			return -EFAULT;
 
 		flush_icache_range((unsigned long) frame->retcode,
 				   (unsigned long) (frame->retcode + 2));
 	}
 
-	/* set up registers for signal handler */
-	regs->sp   = (unsigned long) frame;
-	regs->lr   = (unsigned long) &frame->retcode;
-	regs->gr8  = sig;
-
-	if (get_personality & FDPIC_FUNCPTRS) {
+	/* Set up registers for the signal handler */
+	if (current->personality & FDPIC_FUNCPTRS) {
 		struct fdpic_func_descriptor __user *funcptr =
-			(struct fdpic_func_descriptor *) ka->sa.sa_handler;
-		__get_user(regs->pc, &funcptr->text);
-		__get_user(regs->gr15, &funcptr->GOT);
+			(struct fdpic_func_descriptor __user *) ksig->ka.sa.sa_handler;
+		struct fdpic_func_descriptor desc;
+		if (copy_from_user(&desc, funcptr, sizeof(desc)))
+			return -EFAULT;
+		__frame->pc = desc.text;
+		__frame->gr15 = desc.GOT;
 	} else {
-		regs->pc   = (unsigned long) ka->sa.sa_handler;
-		regs->gr15 = 0;
+		__frame->pc   = (unsigned long) ksig->ka.sa.sa_handler;
+		__frame->gr15 = 0;
 	}
 
-	set_fs(USER_DS);
+	__frame->sp   = (unsigned long) frame;
+	__frame->lr   = (unsigned long) &frame->retcode;
+	__frame->gr8  = sig;
 
 #if DEBUG_SIG
 	printk("SIG deliver %d (%s:%d): sp=%p pc=%lx ra=%p\n",
-		sig, current->comm, current->pid, frame, regs->pc, frame->pretcode);
+	       sig, current->comm, current->pid, frame, __frame->pc,
+	       frame->pretcode);
 #endif
 
-	return;
-
-give_sigsegv:
-	if (sig == SIGSEGV)
-		ka->sa.sa_handler = SIG_DFL;
-
-	force_sig(SIGSEGV, current);
+	return 0;
 } /* end setup_frame() */
 
 /*****************************************************************************/
 /*
  *
  */
-static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
-			   sigset_t *set, struct pt_regs * regs)
+static int setup_rt_frame(struct ksignal *ksig, sigset_t *set)
 {
 	struct rt_sigframe __user *frame;
-	int rsig;
+	int sig = ksig->sig;
 
-	frame = get_sigframe(ka, regs, sizeof(*frame));
+	frame = get_sigframe(ksig, sizeof(*frame));
 
 	if (!access_ok(VERIFY_WRITE, frame, sizeof(*frame)))
-		goto give_sigsegv;
+		return -EFAULT;
 
-	rsig = sig;
-	if (sig < 32 &&
-	    __current_thread_info->exec_domain &&
-	    __current_thread_info->exec_domain->signal_invmap)
-		rsig = __current_thread_info->exec_domain->signal_invmap[sig];
-
-	if (__put_user(rsig,		&frame->sig) ||
+	if (__put_user(sig,		&frame->sig) ||
 	    __put_user(&frame->info,	&frame->pinfo) ||
 	    __put_user(&frame->uc,	&frame->puc))
-		goto give_sigsegv;
+		return -EFAULT;
 
-	if (copy_siginfo_to_user(&frame->info, info))
-		goto give_sigsegv;
+	if (copy_siginfo_to_user(&frame->info, &ksig->info))
+		return -EFAULT;
 
 	/* Create the ucontext.  */
 	if (__put_user(0, &frame->uc.uc_flags) ||
-	    __put_user(0, &frame->uc.uc_link) ||
-	    __put_user((void*)current->sas_ss_sp, &frame->uc.uc_stack.ss_sp) ||
-	    __put_user(sas_ss_flags(regs->sp), &frame->uc.uc_stack.ss_flags) ||
-	    __put_user(current->sas_ss_size, &frame->uc.uc_stack.ss_size))
-		goto give_sigsegv;
+	    __put_user(NULL, &frame->uc.uc_link) ||
+	    __save_altstack(&frame->uc.uc_stack, __frame->sp))
+		return -EFAULT;
 
 	if (setup_sigcontext(&frame->uc.uc_mcontext, set->sig[0]))
-		goto give_sigsegv;
+		return -EFAULT;
 
 	if (__copy_to_user(&frame->uc.uc_sigmask, set, sizeof(*set)))
-		goto give_sigsegv;
+		return -EFAULT;
 
 	/* Set up to return from userspace.  If provided, use a stub
 	 * already in userspace.  */
-	if (ka->sa.sa_flags & SA_RESTORER) {
-		if (__put_user(ka->sa.sa_restorer, &frame->pretcode))
-			goto give_sigsegv;
+	if (ksig->ka.sa.sa_flags & SA_RESTORER) {
+		if (__put_user(ksig->ka.sa.sa_restorer, &frame->pretcode))
+			return -EFAULT;
 	}
 	else {
 		/* Set up the following code on the stack:
 		 *	setlos	#__NR_sigreturn,gr7
 		 *	tira	gr0,0
 		 */
-		if (__put_user((void (*)(void))frame->retcode, &frame->pretcode) ||
+		if (__put_user((__sigrestore_t)frame->retcode, &frame->pretcode) ||
 		    __put_user(0x8efc0000|__NR_rt_sigreturn, &frame->retcode[0]) ||
 		    __put_user(0xc0700000, &frame->retcode[1]))
-			goto give_sigsegv;
+			return -EFAULT;
 
 		flush_icache_range((unsigned long) frame->retcode,
 				   (unsigned long) (frame->retcode + 2));
 	}
 
 	/* Set up registers for signal handler */
-	regs->sp  = (unsigned long) frame;
-	regs->lr   = (unsigned long) &frame->retcode;
-	regs->gr8 = sig;
-	regs->gr9 = (unsigned long) &frame->info;
-
-	if (get_personality & FDPIC_FUNCPTRS) {
-		struct fdpic_func_descriptor *funcptr =
-			(struct fdpic_func_descriptor __user *) ka->sa.sa_handler;
-		__get_user(regs->pc, &funcptr->text);
-		__get_user(regs->gr15, &funcptr->GOT);
+	if (current->personality & FDPIC_FUNCPTRS) {
+		struct fdpic_func_descriptor __user *funcptr =
+			(struct fdpic_func_descriptor __user *) ksig->ka.sa.sa_handler;
+		struct fdpic_func_descriptor desc;
+		if (copy_from_user(&desc, funcptr, sizeof(desc)))
+			return -EFAULT;
+		__frame->pc = desc.text;
+		__frame->gr15 = desc.GOT;
 	} else {
-		regs->pc   = (unsigned long) ka->sa.sa_handler;
-		regs->gr15 = 0;
+		__frame->pc   = (unsigned long) ksig->ka.sa.sa_handler;
+		__frame->gr15 = 0;
 	}
 
-	set_fs(USER_DS);
+	__frame->sp  = (unsigned long) frame;
+	__frame->lr  = (unsigned long) &frame->retcode;
+	__frame->gr8 = sig;
+	__frame->gr9 = (unsigned long) &frame->info;
 
 #if DEBUG_SIG
 	printk("SIG deliver %d (%s:%d): sp=%p pc=%lx ra=%p\n",
-		sig, current->comm, current->pid, frame, regs->pc, frame->pretcode);
+	       sig, current->comm, current->pid, frame, __frame->pc,
+	       frame->pretcode);
 #endif
-
-	return;
-
-give_sigsegv:
-	if (sig == SIGSEGV)
-		ka->sa.sa_handler = SIG_DFL;
-	force_sig(SIGSEGV, current);
+	return 0;
 
 } /* end setup_rt_frame() */
 
@@ -476,44 +326,41 @@ give_sigsegv:
 /*
  * OK, we're invoking a handler
  */
-static void handle_signal(unsigned long sig, siginfo_t *info,
-			  struct k_sigaction *ka, sigset_t *oldset,
-			  struct pt_regs *regs)
+static void handle_signal(struct ksignal *ksig)
 {
+	sigset_t *oldset = sigmask_to_save();
+	int ret;
+
 	/* Are we from a system call? */
-	if (in_syscall(regs)) {
+	if (__frame->syscallno != -1) {
 		/* If so, check system call restarting.. */
-		switch (regs->gr8) {
+		switch (__frame->gr8) {
 		case -ERESTART_RESTARTBLOCK:
 		case -ERESTARTNOHAND:
-			regs->gr8 = -EINTR;
+			__frame->gr8 = -EINTR;
 			break;
 
 		case -ERESTARTSYS:
-			if (!(ka->sa.sa_flags & SA_RESTART)) {
-				regs->gr8 = -EINTR;
+			if (!(ksig->ka.sa.sa_flags & SA_RESTART)) {
+				__frame->gr8 = -EINTR;
 				break;
 			}
+
 			/* fallthrough */
 		case -ERESTARTNOINTR:
-			regs->gr8 = regs->orig_gr8;
-			regs->pc -= 4;
+			__frame->gr8 = __frame->orig_gr8;
+			__frame->pc -= 4;
 		}
+		__frame->syscallno = -1;
 	}
 
 	/* Set up the stack frame */
-	if (ka->sa.sa_flags & SA_SIGINFO)
-		setup_rt_frame(sig, ka, info, oldset, regs);
+	if (ksig->ka.sa.sa_flags & SA_SIGINFO)
+		ret = setup_rt_frame(ksig, oldset);
 	else
-		setup_frame(sig, ka, oldset, regs);
+		ret = setup_frame(ksig, oldset);
 
-	if (!(ka->sa.sa_flags & SA_NODEFER)) {
-		spin_lock_irq(&current->sighand->siglock);
-		sigorsets(&current->blocked, &current->blocked, &ka->sa.sa_mask);
-		sigaddset(&current->blocked, sig);
-		recalc_sigpending();
-		spin_unlock_irq(&current->sighand->siglock);
-	}
+	signal_setup_done(ret, ksig, test_thread_flag(TIF_SINGLESTEP));
 } /* end handle_signal() */
 
 /*****************************************************************************/
@@ -522,59 +369,43 @@ static void handle_signal(unsigned long sig, siginfo_t *info,
  * want to handle. Thus you cannot kill init even with a SIGKILL even by
  * mistake.
  */
-int do_signal(struct pt_regs *regs, sigset_t *oldset)
+static void do_signal(void)
 {
-	struct k_sigaction ka;
-	siginfo_t info;
-	int signr;
+	struct ksignal ksig;
 
-	/*
-	 * We want the common case to go fast, which
-	 * is why we may in certain cases get here from
-	 * kernel mode. Just return without doing anything
-	 * if so.
-	 */
-	if (!user_mode(regs))
-		return 1;
-
-	if (current->flags & PF_FREEZE) {
-		refrigerator(0);
-		goto no_signal;
+	if (get_signal(&ksig)) {
+		handle_signal(&ksig);
+		return;
 	}
 
-	if (!oldset)
-		oldset = &current->blocked;
-
-	signr = get_signal_to_deliver(&info, &ka, regs, NULL);
-	if (signr > 0) {
-		handle_signal(signr, &info, &ka, oldset, regs);
-		return 1;
-	}
-
- no_signal:
 	/* Did we come from a system call? */
-	if (regs->syscallno >= 0) {
+	if (__frame->syscallno != -1) {
 		/* Restart the system call - no handlers present */
-		if (regs->gr8 == -ERESTARTNOHAND ||
-		    regs->gr8 == -ERESTARTSYS ||
-		    regs->gr8 == -ERESTARTNOINTR) {
-			regs->gr8 = regs->orig_gr8;
-			regs->pc -= 4;
-		}
+		switch (__frame->gr8) {
+		case -ERESTARTNOHAND:
+		case -ERESTARTSYS:
+		case -ERESTARTNOINTR:
+			__frame->gr8 = __frame->orig_gr8;
+			__frame->pc -= 4;
+			break;
 
-		if (regs->gr8 == -ERESTART_RESTARTBLOCK){
-			regs->gr8 = __NR_restart_syscall;
-			regs->pc -= 4;
+		case -ERESTART_RESTARTBLOCK:
+			__frame->gr7 = __NR_restart_syscall;
+			__frame->pc -= 4;
+			break;
 		}
+		__frame->syscallno = -1;
 	}
 
-	return 0;
+	/* if there's no signal to deliver, we just put the saved sigmask
+	 * back */
+	restore_saved_sigmask();
 } /* end do_signal() */
 
 /*****************************************************************************/
 /*
  * notification of userspace execution resumption
- * - triggered by current->work.notify_resume
+ * - triggered by the TIF_WORK_MASK flags
  */
 asmlinkage void do_notify_resume(__u32 thread_info_flags)
 {
@@ -584,6 +415,12 @@ asmlinkage void do_notify_resume(__u32 thread_info_flags)
 
 	/* deal with pending signal delivery */
 	if (thread_info_flags & _TIF_SIGPENDING)
-		do_signal(__frame, NULL);
+		do_signal();
+
+	/* deal with notification on about to resume userspace execution */
+	if (thread_info_flags & _TIF_NOTIFY_RESUME) {
+		clear_thread_flag(TIF_NOTIFY_RESUME);
+		tracehook_notify_resume(__frame);
+	}
 
 } /* end do_notify_resume() */

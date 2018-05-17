@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  linux/arch/m32r/boot/compressed/head.S
  *
@@ -7,7 +8,6 @@
  */
 
 	.text
-#include <linux/config.h>
 #include <linux/linkage.h>
 #include <asm/addrspace.h>
 #include <asm/page.h>
@@ -138,6 +138,16 @@ startup:
 	ldi	r0, -1
 	ldi	r1, 0xd0	; invalidate i-cache, copy back d-cache
 	stb	r1, @r0
+#elif defined(CONFIG_CHIP_M32102)
+	/* Cache flush */
+	ldi	r0, -2
+	ldi	r1, 0x0100	; invalidate
+	stb	r1, @r0
+#elif defined(CONFIG_CHIP_M32104)
+	/* Cache flush */
+	ldi	r0, -2
+	ldi	r1, 0x0700	; invalidate i-cache, copy back d-cache
+	sth	r1, @r0
 #else
 #error "put your cache flush function, please"
 #endif

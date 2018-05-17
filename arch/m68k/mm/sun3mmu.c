@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/arch/m68k/mm/sun3mmu.c
  *
@@ -18,10 +19,9 @@
 #include <linux/bootmem.h>
 
 #include <asm/setup.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/machdep.h>
 #include <asm/io.h>
 
@@ -30,10 +30,6 @@ extern void mmu_emu_init (unsigned long bootmem_end);
 const char bad_pmd_string[] = "Bad pmd in pte_alloc: %08lx\n";
 
 extern unsigned long num_pages;
-
-void free_initmem(void)
-{
-}
 
 /* For the sun3 we try to follow the i386 paging_init() more closely */
 /* start_mem and end_mem have PAGE_OFFSET added already */
@@ -46,15 +42,10 @@ void __init paging_init(void)
 	unsigned long address;
 	unsigned long next_pgtable;
 	unsigned long bootmem_end;
-	unsigned long zones_size[3] = {0, 0, 0};
+	unsigned long zones_size[MAX_NR_ZONES] = { 0, };
 	unsigned long size;
 
-
-#ifdef TEST_VERIFY_AREA
-	wp_works_ok = 0;
-#endif
 	empty_zero_page = alloc_bootmem_pages(PAGE_SIZE);
-	memset(empty_zero_page, 0, PAGE_SIZE);
 
 	address = PAGE_OFFSET;
 	pg_dir = swapper_pg_dir;
@@ -92,10 +83,13 @@ void __init paging_init(void)
 	current->mm = NULL;
 
 	/* memory sizing is a hack stolen from motorola.c..  hope it works for us */
-	zones_size[0] = ((unsigned long)high_memory - PAGE_OFFSET) >> PAGE_SHIFT;
-	zones_size[1] = 0;
+	zones_size[ZONE_DMA] = ((unsigned long)high_memory - PAGE_OFFSET) >> PAGE_SHIFT;
 
-	free_area_init(zones_size);
+	/* I really wish I knew why the following change made things better...  -- Sam */
+/*	free_area_init(zones_size); */
+	free_area_init_node(0, zones_size,
+			    (__pa(PAGE_OFFSET) >> PAGE_SHIFT) + 1, NULL);
+
 
 }
 

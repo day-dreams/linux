@@ -6,13 +6,12 @@
  * 
  * This driver is based on sgicons.c and cons_newport.
  * 
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  * Copyright (C) 1997 Miguel de Icaza (miguel@nuclecu.unam.mx)
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
-#include <linux/tty.h>
 #include <linux/kd.h>
 #include <linux/selection.h>
 #include <linux/console.h>
@@ -22,18 +21,15 @@
 #include <linux/slab.h>
 
 #include <asm/io.h>
-#include <asm/uaccess.h>
-#include <asm/system.h>
+#include <linux/uaccess.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
+#include <asm/gio_device.h>
+
 #include <video/newport.h>
 
 #include <linux/linux_logo.h>
 #include <linux/font.h>
-
-
-extern struct font_desc font_vga_8x16;
-extern unsigned long sgi_gfxaddr;
 
 #define FONT_DATA ((unsigned char *)font_vga_8x16.data)
 
@@ -52,6 +48,7 @@ static int topscan;
 static int xcurs_correction = 29;
 static int newport_xsize;
 static int newport_ysize;
+static int newport_has_init;
 
 static int newport_set_def_font(int unit, struct console_font *op);
 
@@ -99,13 +96,18 @@ static inline void newport_init_cmap(void)
 	}
 }
 
-static void newport_show_logo(void)
+static const struct linux_logo *newport_show_logo(void)
 {
 #ifdef CONFIG_LOGO_SGI_CLUT224
 	const struct linux_logo *logo = fb_find_logo(8);
-	const unsigned char *clut = logo->clut;
-	const unsigned char *data = logo->data;
+	const unsigned char *clut;
+	const unsigned char *data;
 	unsigned long i;
+
+	if (!logo)
+		return NULL;
+	clut = logo->clut;
+	data = logo->data;
 
 	for (i = 0; i < logo->clutsize; i++) {
 		newport_bfwait(npregs);
@@ -124,6 +126,8 @@ static void newport_show_logo(void)
 
 	for (i = 0; i < logo->width*logo->height; i++)
 		npregs->go.hostrw0 = *data++ << 24;
+
+	return logo;
 #endif /* CONFIG_LOGO_SGI_CLUT224 */
 }
 
@@ -150,7 +154,7 @@ static inline void newport_clear_lines(int ystart, int yend, int ci)
 	newport_clear_screen(0, ystart, 1280 + 63, yend, ci);
 }
 
-void newport_reset(void)
+static void newport_reset(void)
 {
 	unsigned short treg;
 	int i;
@@ -194,7 +198,7 @@ void newport_reset(void)
  * calculate the actual screen size by reading
  * the video timing out of the VC2
  */
-void newport_get_screensize(void)
+static void newport_get_screensize(void)
 {
 	int i, cols;
 	unsigned short ventry, treg;
@@ -210,7 +214,7 @@ void newport_get_screensize(void)
 	}
 
 	newport_xsize = newport_ysize = 0;
-	for (i = 0; linetable[i + 1] && (i < sizeof(linetable)); i += 2) {
+	for (i = 0; i < ARRAY_SIZE(linetable) - 1 && linetable[i + 1]; i += 2) {
 		cols = 0;
 		newport_vc2_set(npregs, VC2_IREG_RADDR, linetable[i]);
 		npregs->set.dcbmode = (NPORT_DMODE_AVC2 | VC2_REGADDR_RAM |
@@ -284,15 +288,20 @@ static void newport_get_revisions(void)
 		xcurs_correction = 21;
 }
 
-/* Can't be __init, take_over_console may call it later */
+static void newport_exit(void)
+{
+	int i;
+
+	/* free memory used by user font */
+	for (i = 0; i < MAX_NR_CONSOLES; i++)
+		newport_set_def_font(i, NULL);
+}
+
+/* Can't be __init, do_take_over_console may call it later */
 static const char *newport_startup(void)
 {
 	int i;
 
-	if (!sgi_gfxaddr)
-		return NULL;
-	npregs = (struct newport_regs *)	/* ioremap cannot fail */
-		 ioremap(sgi_gfxaddr, sizeof(struct newport_regs));
 	npregs->cset.config = NPORT_CFG_GD0;
 
 	if (newport_wait(npregs))
@@ -308,28 +317,34 @@ static const char *newport_startup(void)
 	newport_reset();
 	newport_get_revisions();
 	newport_get_screensize();
+	newport_has_init = 1;
 
 	return "SGI Newport";
 
 out_unmap:
-	iounmap((void *)npregs);
 	return NULL;
 }
 
 static void newport_init(struct vc_data *vc, int init)
 {
-	vc->vc_cols = newport_xsize / 8;
-	vc->vc_rows = newport_ysize / 16;
+	int cols, rows;
+
+	cols = newport_xsize / 8;
+	rows = newport_ysize / 16;
 	vc->vc_can_do_color = 1;
+	if (init) {
+		vc->vc_cols = cols;
+		vc->vc_rows = rows;
+	} else
+		vc_resize(vc, cols, rows);
 }
 
 static void newport_deinit(struct vc_data *c)
 {
-	int i;
-
-	/* free memory used by user font */
-	for (i = 0; i < MAX_NR_CONSOLES; i++)
-		newport_set_def_font(i, NULL);
+	if (!con_is_bound(&newport_con) && newport_has_init) {
+		newport_exit();
+		newport_has_init = 0;
+	}
 }
 
 static void newport_clear(struct vc_data *vc, int sy, int sx, int height,
@@ -456,9 +471,10 @@ static int newport_switch(struct vc_data *vc)
 	npregs->cset.topscan = 0x3ff;
 
 	if (!logo_drawn) {
-		newport_show_logo();
-		logo_drawn = 1;
-		logo_active = 1;
+		if (newport_show_logo()) {
+			logo_drawn = 1;
+			logo_active = 1;
+		}
 	}
 
 	return 1;
@@ -558,19 +574,8 @@ static int newport_font_set(struct vc_data *vc, struct console_font *font, unsig
 	return newport_set_font(vc->vc_num, font);
 }
 
-static int newport_set_palette(struct vc_data *vc, unsigned char *table)
-{
-	return -EINVAL;
-}
-
-static int newport_scrolldelta(struct vc_data *vc, int lines)
-{
-	/* there is (nearly) no off-screen memory, so we can't scroll back */
-	return 0;
-}
-
-static int newport_scroll(struct vc_data *vc, int t, int b, int dir,
-			  int lines)
+static bool newport_scroll(struct vc_data *vc, unsigned int t, unsigned int b,
+		enum con_scroll dir, unsigned int lines)
 {
 	int count, x, y;
 	unsigned short *s, *d;
@@ -590,7 +595,7 @@ static int newport_scroll(struct vc_data *vc, int t, int b, int dir,
 					    (vc->vc_color & 0xf0) >> 4);
 		}
 		npregs->cset.topscan = (topscan - 1) & 0x3ff;
-		return 0;
+		return false;
 	}
 
 	count = (b - t - lines) * vc->vc_cols;
@@ -665,37 +670,7 @@ static int newport_scroll(struct vc_data *vc, int t, int b, int dir,
 			}
 		}
 	}
-	return 1;
-}
-
-static void newport_bmove(struct vc_data *vc, int sy, int sx, int dy,
-			  int dx, int h, int w)
-{
-	short xs, ys, xe, ye, xoffs, yoffs, tmp;
-
-	xs = sx << 3;
-	xe = ((sx + w) << 3) - 1;
-	/*
-	 * as bmove is only used to move stuff around in the same line
-	 * (h == 1), we don't care about wrap arounds caused by topscan != 0
-	 */
-	ys = ((sy << 4) + topscan) & 0x3ff;
-	ye = (((sy + h) << 4) - 1 + topscan) & 0x3ff;
-	xoffs = (dx - sx) << 3;
-	yoffs = (dy - sy) << 4;
-	if (xoffs > 0) {
-		/* move to the right, exchange starting points */
-		tmp = xe;
-		xe = xs;
-		xs = tmp;
-	}
-	newport_wait(npregs);
-	npregs->set.drawmode0 = (NPORT_DMODE0_S2S | NPORT_DMODE0_BLOCK |
-				 NPORT_DMODE0_DOSETUP | NPORT_DMODE0_STOPX
-				 | NPORT_DMODE0_STOPY);
-	npregs->set.xystarti = (xs << 16) | ys;
-	npregs->set.xyendi = (xe << 16) | ye;
-	npregs->go.xymove = (xoffs << 16) | yoffs;
+	return true;
 }
 
 static int newport_dummy(struct vc_data *c)
@@ -715,31 +690,69 @@ const struct consw newport_con = {
 	.con_putcs	  = newport_putcs,
 	.con_cursor	  = newport_cursor,
 	.con_scroll	  = newport_scroll,
-	.con_bmove 	  = newport_bmove,
 	.con_switch	  = newport_switch,
 	.con_blank	  = newport_blank,
 	.con_font_set	  = newport_font_set,
 	.con_font_default = newport_font_default,
-	.con_set_palette  = newport_set_palette,
-	.con_scrolldelta  = newport_scrolldelta,
 	.con_set_origin	  = DUMMY,
 	.con_save_screen  = DUMMY
 };
 
-#ifdef MODULE
-static int __init newport_console_init(void)
+static int newport_probe(struct gio_device *dev,
+			 const struct gio_device_id *id)
 {
-	return take_over_console(&newport_con, 0, MAX_NR_CONSOLES - 1, 1);
+	unsigned long newport_addr;
+	int err;
+
+	if (!dev->resource.start)
+		return -EINVAL;
+
+	if (npregs)
+		return -EBUSY; /* we only support one Newport as console */
+
+	newport_addr = dev->resource.start + 0xF0000;
+	if (!request_mem_region(newport_addr, 0x10000, "Newport"))
+		return -ENODEV;
+
+	npregs = (struct newport_regs *)/* ioremap cannot fail */
+		ioremap(newport_addr, sizeof(struct newport_regs));
+	console_lock();
+	err = do_take_over_console(&newport_con, 0, MAX_NR_CONSOLES - 1, 1);
+	console_unlock();
+	return err;
 }
 
-static void __exit newport_console_exit(void)
+static void newport_remove(struct gio_device *dev)
 {
 	give_up_console(&newport_con);
 	iounmap((void *)npregs);
 }
 
+static struct gio_device_id newport_ids[] = {
+	{ .id = 0x7e },
+	{ .id = 0xff }
+};
+
+MODULE_ALIAS("gio:7e");
+
+static struct gio_driver newport_driver = {
+	.name = "newport",
+	.id_table = newport_ids,
+	.probe = newport_probe,
+	.remove = newport_remove,
+};
+
+int __init newport_console_init(void)
+{
+	return gio_register_driver(&newport_driver);
+}
+
+void __exit newport_console_exit(void)
+{
+	gio_unregister_driver(&newport_driver);
+}
+
 module_init(newport_console_init);
 module_exit(newport_console_exit);
-#endif
 
 MODULE_LICENSE("GPL");

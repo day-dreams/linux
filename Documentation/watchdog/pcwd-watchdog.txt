@@ -1,3 +1,5 @@
+Last reviewed: 10/05/2007
+
                      Berkshire Products PC Watchdog Card
                    Support for ISA Cards  Revision A and C
            Documentation and Driver by Ken Hollis <kenji@bitgate.com>
@@ -14,86 +16,17 @@
 
  The Watchdog Driver will automatically find your watchdog card, and will
  attach a running driver for use with that card.  After the watchdog
- drivers have initialized, you can then talk to the card using the PC
- Watchdog program, available from http://ftp.bitgate.com/pcwd/.
+ drivers have initialized, you can then talk to the card using a PC
+ Watchdog program.
 
  I suggest putting a "watchdog -d" before the beginning of an fsck, and
  a "watchdog -e -t 1" immediately after the end of an fsck.  (Remember
  to run the program with an "&" to run it in the background!)
 
  If you want to write a program to be compatible with the PC Watchdog
- driver, simply do the following:
+ driver, simply use of modify the watchdog test program:
+ tools/testing/selftests/watchdog/watchdog-test.c
 
--- Snippet of code --
-/*
- * Watchdog Driver Test Program
- */
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/ioctl.h>
-#include <linux/types.h>
-#include <linux/watchdog.h>
-
-int fd;
-
-/*
- * This function simply sends an IOCTL to the driver, which in turn ticks
- * the PC Watchdog card to reset its internal timer so it doesn't trigger
- * a computer reset.
- */
-void keep_alive(void)
-{
-    int dummy;
-
-    ioctl(fd, WDIOC_KEEPALIVE, &dummy);
-}
-
-/*
- * The main program.  Run the program with "-d" to disable the card,
- * or "-e" to enable the card.
- */
-int main(int argc, char *argv[])
-{
-    fd = open("/dev/watchdog", O_WRONLY);
-
-    if (fd == -1) {
-	fprintf(stderr, "Watchdog device not enabled.\n");
-	fflush(stderr);
-	exit(-1);
-    }
-
-    if (argc > 1) {
-	if (!strncasecmp(argv[1], "-d", 2)) {
-	    ioctl(fd, WDIOC_SETOPTIONS, WDIOS_DISABLECARD);
-	    fprintf(stderr, "Watchdog card disabled.\n");
-	    fflush(stderr);
-	    exit(0);
-	} else if (!strncasecmp(argv[1], "-e", 2)) {
-	    ioctl(fd, WDIOC_SETOPTIONS, WDIOS_ENABLECARD);
-	    fprintf(stderr, "Watchdog card enabled.\n");
-	    fflush(stderr);
-	    exit(0);
-	} else {
-	    fprintf(stderr, "-d to disable, -e to enable.\n");
-	    fprintf(stderr, "run by itself to tick the card.\n");
-	    fflush(stderr);
-	    exit(0);
-	}
-    } else {
-	fprintf(stderr, "Watchdog Ticking Away!\n");
-	fflush(stderr);
-    }
-
-    while(1) {
-	keep_alive();
-	sleep(1);
-    }
-}
--- End snippet --
 
  Other IOCTL functions include:
 
@@ -131,5 +64,3 @@ int main(int argc, char *argv[])
  -- Ken Hollis
     (kenji@bitgate.com)
 
-(This documentation may be out of date.  Check
- http://ftp.bitgate.com/pcwd/ for the absolute latest additions.)

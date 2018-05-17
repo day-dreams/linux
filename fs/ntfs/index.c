@@ -1,7 +1,7 @@
 /*
  * index.c - NTFS kernel index handling.  Part of the Linux-NTFS project.
  *
- * Copyright (c) 2004 Anton Altaparmakov
+ * Copyright (c) 2004-2005 Anton Altaparmakov
  *
  * This program/include file is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as published
@@ -19,6 +19,8 @@
  * Foundation,Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#include <linux/slab.h>
+
 #include "aops.h"
 #include "collate.h"
 #include "debug.h"
@@ -32,25 +34,15 @@
  * Allocate a new index context, initialize it with @idx_ni and return it.
  * Return NULL if allocation failed.
  *
- * Locking:  Caller must hold i_sem on the index inode.
+ * Locking:  Caller must hold i_mutex on the index inode.
  */
 ntfs_index_context *ntfs_index_ctx_get(ntfs_inode *idx_ni)
 {
 	ntfs_index_context *ictx;
 
-	ictx = kmem_cache_alloc(ntfs_index_ctx_cache, SLAB_NOFS);
-	if (ictx) {
-		ictx->idx_ni = idx_ni;
-		ictx->entry = NULL;
-		ictx->data = NULL;
-		ictx->data_len = 0;
-		ictx->is_in_root = 0;
-		ictx->ir = NULL;
-		ictx->actx = NULL;
-		ictx->base_ni = NULL;
-		ictx->ia = NULL;
-		ictx->page = NULL;
-	}
+	ictx = kmem_cache_alloc(ntfs_index_ctx_cache, GFP_NOFS);
+	if (ictx)
+		*ictx = (ntfs_index_context){ .idx_ni = idx_ni };
 	return ictx;
 }
 
@@ -60,7 +52,7 @@ ntfs_index_context *ntfs_index_ctx_get(ntfs_inode *idx_ni)
  *
  * Release the index context @ictx, releasing all associated resources.
  *
- * Locking:  Caller must hold i_sem on the index inode.
+ * Locking:  Caller must hold i_mutex on the index inode.
  */
 void ntfs_index_ctx_put(ntfs_index_context *ictx)
 {
@@ -116,7 +108,7 @@ void ntfs_index_ctx_put(ntfs_index_context *ictx)
  * or ntfs_index_entry_write() before the call to ntfs_index_ctx_put() to
  * ensure that the changes are written to disk.
  *
- * Locking:  - Caller must hold i_sem on the index inode.
+ * Locking:  - Caller must hold i_mutex on the index inode.
  *	     - Each page cache page in the index allocation mapping must be
  *	       locked whilst being accessed otherwise we may find a corrupt
  *	       page due to it being under ->writepage at the moment which
@@ -214,7 +206,8 @@ int ntfs_index_lookup(const void *key, const int key_len,
 		if ((key_len == le16_to_cpu(ie->key_length)) && !memcmp(key,
 				&ie->key, key_len)) {
 ir_done:
-			ictx->is_in_root = TRUE;
+			ictx->is_in_root = true;
+			ictx->ir = ir;
 			ictx->actx = actx;
 			ictx->base_ni = base_ni;
 			ictx->ia = NULL;
@@ -279,11 +272,11 @@ done:
 descend_into_child_node:
 	/*
 	 * Convert vcn to index into the index allocation attribute in units
-	 * of PAGE_CACHE_SIZE and map the page cache page, reading it from
+	 * of PAGE_SIZE and map the page cache page, reading it from
 	 * disk if necessary.
 	 */
 	page = ntfs_map_page(ia_mapping, vcn <<
-			idx_ni->itype.index.vcn_size_bits >> PAGE_CACHE_SHIFT);
+			idx_ni->itype.index.vcn_size_bits >> PAGE_SHIFT);
 	if (IS_ERR(page)) {
 		ntfs_error(sb, "Failed to map index page, error %ld.",
 				-PTR_ERR(page));
@@ -295,9 +288,9 @@ descend_into_child_node:
 fast_descend_into_child_node:
 	/* Get to the index allocation block. */
 	ia = (INDEX_ALLOCATION*)(kaddr + ((vcn <<
-			idx_ni->itype.index.vcn_size_bits) & ~PAGE_CACHE_MASK));
+			idx_ni->itype.index.vcn_size_bits) & ~PAGE_MASK));
 	/* Bounds checks. */
-	if ((u8*)ia < kaddr || (u8*)ia > kaddr + PAGE_CACHE_SIZE) {
+	if ((u8*)ia < kaddr || (u8*)ia > kaddr + PAGE_SIZE) {
 		ntfs_error(sb, "Out of bounds check failed.  Corrupt inode "
 				"0x%lx or driver bug.", idx_ni->mft_no);
 		goto unm_err_out;
@@ -330,7 +323,7 @@ fast_descend_into_child_node:
 		goto unm_err_out;
 	}
 	index_end = (u8*)ia + idx_ni->itype.index.block_size;
-	if (index_end > kaddr + PAGE_CACHE_SIZE) {
+	if (index_end > kaddr + PAGE_SIZE) {
 		ntfs_error(sb, "Index buffer (VCN 0x%llx) of inode 0x%lx "
 				"crosses page boundary.  Impossible!  Cannot "
 				"access!  This is probably a bug in the "
@@ -383,7 +376,7 @@ fast_descend_into_child_node:
 		if ((key_len == le16_to_cpu(ie->key_length)) && !memcmp(key,
 				&ie->key, key_len)) {
 ia_done:
-			ictx->is_in_root = FALSE;
+			ictx->is_in_root = false;
 			ictx->actx = NULL;
 			ictx->base_ni = NULL;
 			ictx->ia = ia;
@@ -434,9 +427,9 @@ ia_done:
 		 * the mapped page.
 		 */
 		if (old_vcn << vol->cluster_size_bits >>
-				PAGE_CACHE_SHIFT == vcn <<
+				PAGE_SHIFT == vcn <<
 				vol->cluster_size_bits >>
-				PAGE_CACHE_SHIFT)
+				PAGE_SHIFT)
 			goto fast_descend_into_child_node;
 		unlock_page(page);
 		ntfs_unmap_page(page);

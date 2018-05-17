@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/alpha/mm/numa.c
  *
@@ -6,19 +7,21 @@
  *  Copyright (C) 2001 Andrea Arcangeli <andrea@suse.de> SuSE
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/bootmem.h>
 #include <linux/swap.h>
 #include <linux/initrd.h>
+#include <linux/pfn.h>
+#include <linux/module.h>
 
 #include <asm/hwrpb.h>
 #include <asm/pgalloc.h>
+#include <asm/sections.h>
 
 pg_data_t node_data[MAX_NUMNODES];
-bootmem_data_t node_bdata[MAX_NUMNODES];
+EXPORT_SYMBOL(node_data);
 
 #undef DEBUG_DISCONTIG
 #ifdef DEBUG_DISCONTIG
@@ -27,12 +30,9 @@ bootmem_data_t node_bdata[MAX_NUMNODES];
 #define DBGDCONT(args...)
 #endif
 
-#define PFN_UP(x)       (((x) + PAGE_SIZE-1) >> PAGE_SHIFT)
-#define PFN_DOWN(x)     ((x) >> PAGE_SHIFT)
-#define PFN_PHYS(x)     ((x) << PAGE_SHIFT)
-#define for_each_mem_cluster(memdesc, cluster, i)		\
-	for ((cluster) = (memdesc)->cluster, (i) = 0;		\
-	     (i) < (memdesc)->numclusters; (i)++, (cluster)++)
+#define for_each_mem_cluster(memdesc, _cluster, i)		\
+	for ((_cluster) = (memdesc)->cluster, (i) = 0;		\
+	     (i) < (memdesc)->numclusters; (i)++, (_cluster)++)
 
 static void __init show_mem_layout(void)
 {
@@ -130,8 +130,6 @@ setup_memory_node(int nid, void *kernel_end)
 	if (node_max_pfn > max_low_pfn)
 		max_pfn = max_low_pfn = node_max_pfn;
 
-	num_physpages += node_max_pfn - node_min_pfn;
-
 #if 0 /* we'll try this one again in a little while */
 	/* Cute trick to make sure our local node data is on local memory */
 	node_data[nid] = (pg_data_t *)(__va(node_min_pfn << PAGE_SHIFT));
@@ -142,7 +140,7 @@ setup_memory_node(int nid, void *kernel_end)
 		printk(" not enough mem to reserve NODE_DATA");
 		return;
 	}
-	NODE_DATA(nid)->bdata = &node_bdata[nid];
+	NODE_DATA(nid)->bdata = &bootmem_node_data[nid];
 
 	printk(" Detected node memory:   start %8lu, end %8lu\n",
 	       node_min_pfn, node_max_pfn);
@@ -199,7 +197,7 @@ setup_memory_node(int nid, void *kernel_end)
 	}
 
 	if (bootmap_start == -1)
-		panic("couldn't find a contigous place for the bootmap");
+		panic("couldn't find a contiguous place for the bootmap");
 
 	/* Allocate the bootmap and mark the whole MM as reserved.  */
 	bootmap_size = init_bootmem_node(NODE_DATA(nid), bootmap_start,
@@ -243,7 +241,8 @@ setup_memory_node(int nid, void *kernel_end)
 	}
 
 	/* Reserve the bootmap memory.  */
-	reserve_bootmem_node(NODE_DATA(nid), PFN_PHYS(bootmap_start), bootmap_size);
+	reserve_bootmem_node(NODE_DATA(nid), PFN_PHYS(bootmap_start),
+			bootmap_size, BOOTMEM_DEFAULT);
 	printk(" reserving pages %ld:%ld\n", bootmap_start, bootmap_start+PFN_UP(bootmap_size));
 
 	node_set_online(nid);
@@ -282,7 +281,7 @@ setup_memory(void *kernel_end)
 			nid = kvaddr_to_nid(initrd_start);
 			reserve_bootmem_node(NODE_DATA(nid),
 					     virt_to_phys((void *)initrd_start),
-					     INITRD_SIZE);
+					     INITRD_SIZE, BOOTMEM_DEFAULT);
 		}
 	}
 #endif /* CONFIG_BLK_DEV_INITRD */
@@ -304,8 +303,9 @@ void __init paging_init(void)
 	dma_local_pfn = virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
 
 	for_each_online_node(nid) {
-		unsigned long start_pfn = node_bdata[nid].node_boot_start >> PAGE_SHIFT;
-		unsigned long end_pfn = node_bdata[nid].node_low_pfn;
+		bootmem_data_t *bdata = &bootmem_node_data[nid];
+		unsigned long start_pfn = bdata->node_min_pfn;
+		unsigned long end_pfn = bdata->node_low_pfn;
 
 		if (dma_local_pfn >= end_pfn - start_pfn)
 			zones_size[ZONE_DMA] = end_pfn - start_pfn;
@@ -313,83 +313,10 @@ void __init paging_init(void)
 			zones_size[ZONE_DMA] = dma_local_pfn;
 			zones_size[ZONE_NORMAL] = (end_pfn - start_pfn) - dma_local_pfn;
 		}
-		free_area_init_node(nid, NODE_DATA(nid), zones_size, start_pfn, NULL);
+		node_set_state(nid, N_NORMAL_MEMORY);
+		free_area_init_node(nid, zones_size, start_pfn, NULL);
 	}
 
 	/* Initialize the kernel's ZERO_PGE. */
 	memset((void *)ZERO_PGE, 0, PAGE_SIZE);
-}
-
-void __init mem_init(void)
-{
-	unsigned long codesize, reservedpages, datasize, initsize, pfn;
-	extern int page_is_ram(unsigned long) __init;
-	extern char _text, _etext, _data, _edata;
-	extern char __init_begin, __init_end;
-	unsigned long nid, i;
-	struct page * lmem_map;
-
-	high_memory = (void *) __va(max_low_pfn << PAGE_SHIFT);
-
-	reservedpages = 0;
-	for_each_online_node(nid) {
-		/*
-		 * This will free up the bootmem, ie, slot 0 memory
-		 */
-		totalram_pages += free_all_bootmem_node(NODE_DATA(nid));
-
-		lmem_map = node_mem_map(nid);
-		pfn = NODE_DATA(nid)->node_start_pfn;
-		for (i = 0; i < node_spanned_pages(nid); i++, pfn++)
-			if (page_is_ram(pfn) && PageReserved(lmem_map+i))
-				reservedpages++;
-	}
-
-	codesize =  (unsigned long) &_etext - (unsigned long) &_text;
-	datasize =  (unsigned long) &_edata - (unsigned long) &_data;
-	initsize =  (unsigned long) &__init_end - (unsigned long) &__init_begin;
-
-	printk("Memory: %luk/%luk available (%luk kernel code, %luk reserved, "
-	       "%luk data, %luk init)\n",
-	       (unsigned long)nr_free_pages() << (PAGE_SHIFT-10),
-	       num_physpages << (PAGE_SHIFT-10),
-	       codesize >> 10,
-	       reservedpages << (PAGE_SHIFT-10),
-	       datasize >> 10,
-	       initsize >> 10);
-#if 0
-	mem_stress();
-#endif
-}
-
-void
-show_mem(void)
-{
-	long i,free = 0,total = 0,reserved = 0;
-	long shared = 0, cached = 0;
-	int nid;
-
-	printk("\nMem-info:\n");
-	show_free_areas();
-	printk("Free swap:       %6ldkB\n", nr_swap_pages<<(PAGE_SHIFT-10));
-	for_each_online_node(nid) {
-		struct page * lmem_map = node_mem_map(nid);
-		i = node_spanned_pages(nid);
-		while (i-- > 0) {
-			total++;
-			if (PageReserved(lmem_map+i))
-				reserved++;
-			else if (PageSwapCache(lmem_map+i))
-				cached++;
-			else if (!page_count(lmem_map+i))
-				free++;
-			else
-				shared += page_count(lmem_map + i) - 1;
-		}
-	}
-	printk("%ld pages of RAM\n",total);
-	printk("%ld free pages\n",free);
-	printk("%ld reserved pages\n",reserved);
-	printk("%ld pages shared\n",shared);
-	printk("%ld pages swap cached\n",cached);
 }

@@ -30,32 +30,31 @@
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/thread_info.h>
-#include <linux/version.h>
 #include <linux/ptrace.h>
 #include <linux/hardirq.h>
+#include <linux/kbuild.h>
 
 #include <asm/pgtable.h>
 #include <asm/ptrace.h>
 #include <asm/processor.h>
 #include <asm/pdc.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
-#define DEFINE(sym, val) \
-	asm volatile("\n->" #sym " %0 " #val : : "i" (val))
-
-#define BLANK() asm volatile("\n->" : : )
-
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 #define FRAME_SIZE	128
 #else
 #define FRAME_SIZE	64
 #endif
+#define FRAME_ALIGN	64
 
-#define align(x,y) (((x)+FRAME_SIZE+(y)-1) - (((x)+(y)-1)%(y)))
+/* Add FRAME_SIZE to the size x and align it to y. All definitions
+ * that use align_frame will include space for a frame.
+ */
+#define align_frame(x,y) (((x)+FRAME_SIZE+(y)-1) - (((x)+(y)-1)%(y)))
 
 int main(void)
 {
-	DEFINE(TASK_THREAD_INFO, offsetof(struct task_struct, thread_info));
+	DEFINE(TASK_THREAD_INFO, offsetof(struct task_struct, stack));
 	DEFINE(TASK_STATE, offsetof(struct task_struct, state));
 	DEFINE(TASK_FLAGS, offsetof(struct task_struct, flags));
 	DEFINE(TASK_SIGPENDING, offsetof(struct task_struct, pending));
@@ -151,7 +150,8 @@ int main(void)
 	DEFINE(TASK_PT_IOR, offsetof(struct task_struct, thread.regs.ior));
 	BLANK();
 	DEFINE(TASK_SZ, sizeof(struct task_struct));
-	DEFINE(TASK_SZ_ALGN, align(sizeof(struct task_struct), 64));
+	/* TASK_SZ_ALGN includes space for a stack frame. */
+	DEFINE(TASK_SZ_ALGN, align_frame(sizeof(struct task_struct), FRAME_ALIGN));
 	BLANK();
 	DEFINE(PT_PSW, offsetof(struct pt_regs, gr[ 0]));
 	DEFINE(PT_GR1, offsetof(struct pt_regs, gr[ 1]));
@@ -238,19 +238,17 @@ int main(void)
 	DEFINE(PT_ISR, offsetof(struct pt_regs, isr));
 	DEFINE(PT_IOR, offsetof(struct pt_regs, ior));
 	DEFINE(PT_SIZE, sizeof(struct pt_regs));
-	DEFINE(PT_SZ_ALGN, align(sizeof(struct pt_regs), 64));
+	/* PT_SZ_ALGN includes space for a stack frame. */
+	DEFINE(PT_SZ_ALGN, align_frame(sizeof(struct pt_regs), FRAME_ALIGN));
 	BLANK();
 	DEFINE(TI_TASK, offsetof(struct thread_info, task));
-	DEFINE(TI_EXEC_DOMAIN, offsetof(struct thread_info, exec_domain));
 	DEFINE(TI_FLAGS, offsetof(struct thread_info, flags));
 	DEFINE(TI_CPU, offsetof(struct thread_info, cpu));
 	DEFINE(TI_SEGMENT, offsetof(struct thread_info, addr_limit));
 	DEFINE(TI_PRE_COUNT, offsetof(struct thread_info, preempt_count));
 	DEFINE(THREAD_SZ, sizeof(struct thread_info));
-	DEFINE(THREAD_SZ_ALGN, align(sizeof(struct thread_info), 64));
-	BLANK();
-	DEFINE(IRQSTAT_SIRQ_PEND, offsetof(irq_cpustat_t, __softirq_pending));
-	DEFINE(IRQSTAT_SZ, sizeof(irq_cpustat_t));
+	/* THREAD_SZ_ALGN includes space for a stack frame. */
+	DEFINE(THREAD_SZ_ALGN, align_frame(sizeof(struct thread_info), FRAME_ALIGN));
 	BLANK();
 	DEFINE(ICACHE_BASE, offsetof(struct pdc_cache_info, ic_base));
 	DEFINE(ICACHE_STRIDE, offsetof(struct pdc_cache_info, ic_stride));
@@ -275,8 +273,8 @@ int main(void)
 	DEFINE(DTLB_OFF_COUNT, offsetof(struct pdc_cache_info, dt_off_count));
 	DEFINE(DTLB_LOOP, offsetof(struct pdc_cache_info, dt_loop));
 	BLANK();
-	DEFINE(PA_BLOCKSTEP_BIT, 31-PT_BLOCKSTEP_BIT);
-	DEFINE(PA_SINGLESTEP_BIT, 31-PT_SINGLESTEP_BIT);
+	DEFINE(TIF_BLOCKSTEP_PA_BIT, 31-TIF_BLOCKSTEP);
+	DEFINE(TIF_SINGLESTEP_PA_BIT, 31-TIF_SINGLESTEP);
 	BLANK();
 	DEFINE(ASM_PMD_SHIFT, PMD_SHIFT);
 	DEFINE(ASM_PGDIR_SHIFT, PGDIR_SHIFT);
@@ -289,11 +287,18 @@ int main(void)
 	DEFINE(ASM_PGD_ENTRY_SIZE, PGD_ENTRY_SIZE);
 	DEFINE(ASM_PMD_ENTRY_SIZE, PMD_ENTRY_SIZE);
 	DEFINE(ASM_PTE_ENTRY_SIZE, PTE_ENTRY_SIZE);
+	DEFINE(ASM_PFN_PTE_SHIFT, PFN_PTE_SHIFT);
 	DEFINE(ASM_PT_INITIAL, PT_INITIAL);
-	DEFINE(ASM_PAGE_SIZE, PAGE_SIZE);
 	BLANK();
-	DEFINE(EXCDATA_IP, offsetof(struct exception_data, fault_ip));
-	DEFINE(EXCDATA_SPACE, offsetof(struct exception_data, fault_space));
-	DEFINE(EXCDATA_ADDR, offsetof(struct exception_data, fault_addr));
+	/* HUGEPAGE_SIZE is only used in vmlinux.lds.S to align kernel text
+	 * and kernel data on physical huge pages */
+#ifdef CONFIG_HUGETLB_PAGE
+	DEFINE(HUGEPAGE_SIZE, 1UL << REAL_HPAGE_SHIFT);
+#else
+	DEFINE(HUGEPAGE_SIZE, PAGE_SIZE);
+#endif
+	BLANK();
+	DEFINE(ASM_PDC_RESULT_SIZE, NUM_PDC_RESULT * sizeof(unsigned long));
+	BLANK();
 	return 0;
 }

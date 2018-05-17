@@ -12,18 +12,17 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
 #include <linux/net.h>
+#include <linux/slab.h>
 #include <net/ax25.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <asm/uaccess.h>
-#include <asm/system.h>
+#include <linux/uaccess.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -41,7 +40,7 @@ void nr_output(struct sock *sk, struct sk_buff *skb)
 
 	if (skb->len - NR_TRANSPORT_LEN > NR_MAX_PACKET_SIZE) {
 		/* Save a copy of the Transport Header */
-		memcpy(transport, skb->data, NR_TRANSPORT_LEN);
+		skb_copy_from_linear_data(skb, transport, NR_TRANSPORT_LEN);
 		skb_pull(skb, NR_TRANSPORT_LEN);
 
 		frontlen = skb_headroom(skb);
@@ -55,13 +54,13 @@ void nr_output(struct sock *sk, struct sk_buff *skb)
 			len = (NR_MAX_PACKET_SIZE > skb->len) ? skb->len : NR_MAX_PACKET_SIZE;
 
 			/* Copy the user data */
-			memcpy(skb_put(skbn, len), skb->data, len);
+			skb_copy_from_linear_data(skb, skb_put(skbn, len), len);
 			skb_pull(skb, len);
 
 			/* Duplicate the Transport Header */
 			skb_push(skbn, NR_TRANSPORT_LEN);
-			memcpy(skbn->data, transport, NR_TRANSPORT_LEN);
-
+			skb_copy_to_linear_data(skbn, transport,
+						NR_TRANSPORT_LEN);
 			if (skb->len > 0)
 				skbn->data[4] |= NR_MORE_FLAG;
 
@@ -82,7 +81,7 @@ void nr_output(struct sock *sk, struct sk_buff *skb)
  */
 static void nr_send_iframe(struct sock *sk, struct sk_buff *skb)
 {
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 
 	if (skb == NULL)
 		return;
@@ -101,7 +100,7 @@ static void nr_send_iframe(struct sock *sk, struct sk_buff *skb)
 void nr_send_nak_frame(struct sock *sk)
 {
 	struct sk_buff *skb, *skbn;
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 
 	if ((skb = skb_peek(&nr->ack_queue)) == NULL)
 		return;
@@ -125,7 +124,7 @@ void nr_send_nak_frame(struct sock *sk)
 
 void nr_kick(struct sock *sk)
 {
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 	struct sk_buff *skb, *skbn;
 	unsigned short start, end;
 
@@ -188,7 +187,7 @@ void nr_kick(struct sock *sk)
 
 void nr_transmit_buffer(struct sock *sk, struct sk_buff *skb)
 {
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 	unsigned char *dptr;
 
 	/*
@@ -223,7 +222,7 @@ void nr_transmit_buffer(struct sock *sk, struct sk_buff *skb)
 
 void nr_establish_data_link(struct sock *sk)
 {
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 
 	nr->condition = 0x00;
 	nr->n2count   = 0;
@@ -241,7 +240,7 @@ void nr_establish_data_link(struct sock *sk)
  */
 void nr_enquiry_response(struct sock *sk)
 {
-	nr_cb *nr = nr_sk(sk);
+	struct nr_sock *nr = nr_sk(sk);
 	int frametype = NR_INFOACK;
 
 	if (nr->condition & NR_COND_OWN_RX_BUSY) {
@@ -259,7 +258,7 @@ void nr_enquiry_response(struct sock *sk)
 
 void nr_check_iframes_acked(struct sock *sk, unsigned short nr)
 {
-	nr_cb *nrom = nr_sk(sk);
+	struct nr_sock *nrom = nr_sk(sk);
 
 	if (nrom->vs == nr) {
 		nr_frames_acked(sk, nr);

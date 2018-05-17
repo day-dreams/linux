@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/arch/m32r/kernel/ptrace.c
  *
@@ -14,41 +15,24 @@
  *   Copyright (C) 2000 Russell King
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/sched/task_stack.h>
 #include <linux/mm.h>
+#include <linux/err.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
 #include <linux/string.h>
+#include <linux/signal.h>
 
 #include <asm/cacheflush.h>
 #include <asm/io.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/processor.h>
 #include <asm/mmu_context.h>
-
-/*
- * Get the address of the live pt_regs for the specified task.
- * These are saved onto the top kernel stack when the process
- * is not running.
- *
- * Note: if a user thread is execve'd from kernel space, the
- * kernel stack will not be empty on entry to the kernel, so
- * ptracing these tasks will fail.
- */
-static inline struct pt_regs *
-get_user_regs(struct task_struct *task)
-{
-        return (struct pt_regs *)
-                ((unsigned long)task->thread_info + THREAD_SIZE
-                 - sizeof(struct pt_regs));
-}
 
 /*
  * This routine will get a word off of the process kernel stack.
@@ -58,7 +42,7 @@ get_stack_long(struct task_struct *task, int offset)
 {
 	unsigned long *stack;
 
-	stack = (unsigned long *)get_user_regs(task);
+	stack = (unsigned long *)task_pt_regs(task);
 
 	return stack[offset];
 }
@@ -71,7 +55,7 @@ put_stack_long(struct task_struct *task, int offset, unsigned long data)
 {
 	unsigned long *stack;
 
-	stack = (unsigned long *)get_user_regs(task);
+	stack = (unsigned long *)task_pt_regs(task);
 	stack[offset] = data;
 
 	return 0;
@@ -94,7 +78,7 @@ static int ptrace_read_user(struct task_struct *tsk, unsigned long off,
 	struct user * dummy = NULL;
 #endif
 
-	if ((off & 3) || (off < 0) || (off > sizeof(struct user) - 3))
+	if ((off & 3) || off > sizeof(struct user) - 3)
 		return -EIO;
 
 	off >>= 2;
@@ -156,8 +140,7 @@ static int ptrace_write_user(struct task_struct *tsk, unsigned long off,
 	struct user * dummy = NULL;
 #endif
 
-	if ((off & 3) || off < 0 ||
-	    off > sizeof(struct user) - 3)
+	if ((off & 3) || off > sizeof(struct user) - 3)
 		return -EIO;
 
 	off >>= 2;
@@ -207,7 +190,7 @@ static int ptrace_write_user(struct task_struct *tsk, unsigned long off,
  */
 static int ptrace_getregs(struct task_struct *tsk, void __user *uregs)
 {
-	struct pt_regs *regs = get_user_regs(tsk);
+	struct pt_regs *regs = task_pt_regs(tsk);
 
 	return copy_to_user(uregs, regs, sizeof(struct pt_regs)) ? -EFAULT : 0;
 }
@@ -222,7 +205,7 @@ static int ptrace_setregs(struct task_struct *tsk, void __user *uregs)
 
 	ret = -EFAULT;
 	if (copy_from_user(&newregs, uregs, sizeof(struct pt_regs)) == 0) {
-		struct pt_regs *regs = get_user_regs(tsk);
+		struct pt_regs *regs = task_pt_regs(tsk);
 		*regs = newregs;
 		ret = 0;
 	}
@@ -492,7 +475,7 @@ unregister_debug_trap(struct task_struct *child, unsigned long addr,
 		return 0;
 	}
 
-	/* Recover orignal instruction code. */
+	/* Recover original instruction code. */
 	*code = p->insn[i];
 
 	/* Shift debug trap entries. */
@@ -512,7 +495,8 @@ unregister_all_debug_traps(struct task_struct *child)
 	int i;
 
 	for (i = 0; i < p->nr_trap; i++)
-		access_process_vm(child, p->addr[i], &p->insn[i], sizeof(p->insn[i]), 1);
+		access_process_vm(child, p->addr[i], &p->insn[i], sizeof(p->insn[i]),
+				FOLL_FORCE | FOLL_WRITE);
 	p->nr_trap = 0;
 }
 
@@ -556,7 +540,8 @@ embed_debug_trap(struct task_struct *child, unsigned long next_pc)
 	unsigned long next_insn, code;
 	unsigned long addr = next_pc & ~3;
 
-	if (access_process_vm(child, addr, &next_insn, sizeof(next_insn), 0)
+	if (access_process_vm(child, addr, &next_insn, sizeof(next_insn),
+			FOLL_FORCE)
 	    != sizeof(next_insn)) {
 		return -1; /* error */
 	}
@@ -565,7 +550,8 @@ embed_debug_trap(struct task_struct *child, unsigned long next_pc)
 	if (register_debug_trap(child, next_pc, next_insn, &code)) {
 		return -1; /* error */
 	}
-	if (access_process_vm(child, addr, &code, sizeof(code), 1)
+	if (access_process_vm(child, addr, &code, sizeof(code),
+			FOLL_FORCE | FOLL_WRITE)
 	    != sizeof(code)) {
 		return -1; /* error */
 	}
@@ -581,12 +567,13 @@ withdraw_debug_trap(struct pt_regs *regs)
  	addr = (regs->bpc - 2) & ~3;
 	regs->bpc -= 2;
 	if (unregister_debug_trap(current, addr, &code)) {
-	    access_process_vm(current, addr, &code, sizeof(code), 1);
+	    access_process_vm(current, addr, &code, sizeof(code),
+		    FOLL_FORCE | FOLL_WRITE);
 	    invalidate_cache();
 	}
 }
 
-static void
+void
 init_debug_traps(struct task_struct *child)
 {
 	struct debug_trap *p = &child->thread.debug_trap;
@@ -598,6 +585,36 @@ init_debug_traps(struct task_struct *child)
 	}
 }
 
+void user_enable_single_step(struct task_struct *child)
+{
+	unsigned long next_pc;
+	unsigned long pc, insn;
+
+	clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
+
+	/* Compute next pc.  */
+	pc = get_stack_long(child, PT_BPC);
+
+	if (access_process_vm(child, pc&~3, &insn, sizeof(insn),
+			FOLL_FORCE)
+	    != sizeof(insn))
+		return;
+
+	compute_next_pc(insn, pc, &next_pc, child);
+	if (next_pc & 0x80000000)
+		return;
+
+	if (embed_debug_trap(child, next_pc))
+		return;
+
+	invalidate_cache();
+}
+
+void user_disable_single_step(struct task_struct *child)
+{
+	unregister_all_debug_traps(child);
+	invalidate_cache();
+}
 
 /*
  * Called by kernel/ptrace.c when detaching..
@@ -609,11 +626,12 @@ void ptrace_disable(struct task_struct *child)
 	/* nothing to do.. */
 }
 
-static int
-do_ptrace(long request, struct task_struct *child, long addr, long data)
+long
+arch_ptrace(struct task_struct *child, long request,
+	    unsigned long addr, unsigned long data)
 {
-	unsigned long tmp;
 	int ret;
+	unsigned long __user *datap = (unsigned long __user *) data;
 
 	switch (request) {
 	/*
@@ -621,19 +639,14 @@ do_ptrace(long request, struct task_struct *child, long addr, long data)
 	 */
 	case PTRACE_PEEKTEXT:
 	case PTRACE_PEEKDATA:
-		ret = access_process_vm(child, addr, &tmp, sizeof(tmp), 0);
-		if (ret == sizeof(tmp))
-			ret = put_user(tmp,(unsigned long __user *) data);
-		else
-			ret = -EIO;
+		ret = generic_ptrace_peekdata(child, addr, data);
 		break;
 
 	/*
 	 * read the word at location addr in the USER area.
 	 */
 	case PTRACE_PEEKUSR:
-		ret = ptrace_read_user(child, addr,
-				       (unsigned long __user *)data);
+		ret = ptrace_read_user(child, addr, datap);
 		break;
 
 	/*
@@ -641,15 +654,9 @@ do_ptrace(long request, struct task_struct *child, long addr, long data)
 	 */
 	case PTRACE_POKETEXT:
 	case PTRACE_POKEDATA:
-		ret = access_process_vm(child, addr, &data, sizeof(data), 1);
-		if (ret == sizeof(data)) {
-			ret = 0;
-			if (request == PTRACE_POKETEXT) {
-				invalidate_cache();
-			}
-		} else {
-			ret = -EIO;
-		}
+		ret = generic_ptrace_pokedata(child, addr, data);
+		if (ret == 0 && request == PTRACE_POKETEXT)
+			invalidate_cache();
 		break;
 
 	/*
@@ -659,146 +666,18 @@ do_ptrace(long request, struct task_struct *child, long addr, long data)
 		ret = ptrace_write_user(child, addr, data);
 		break;
 
-	/*
-	 * continue/restart and stop at next (return from) syscall
-	 */
-	case PTRACE_SYSCALL:
-	case PTRACE_CONT:
-		ret = -EIO;
-		if ((unsigned long) data > _NSIG)
-			break;
-		if (request == PTRACE_SYSCALL)
-			set_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
-		else
-			clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
-		child->exit_code = data;
-		wake_up_process(child);
-		ret = 0;
-		break;
-
-	/*
-	 * make the child exit.  Best I can do is send it a sigkill.
-	 * perhaps it should be put in the status that it wants to
-	 * exit.
-	 */
-	case PTRACE_KILL: {
-		ret = 0;
-		unregister_all_debug_traps(child);
-		invalidate_cache();
-		if (child->exit_state == EXIT_ZOMBIE)	/* already dead */
-			break;
-		child->exit_code = SIGKILL;
-		wake_up_process(child);
-		break;
-	}
-
-	/*
-	 * execute single instruction.
-	 */
-	case PTRACE_SINGLESTEP: {
-		unsigned long next_pc;
-		unsigned long pc, insn;
-
-		ret = -EIO;
-		if ((unsigned long) data > _NSIG)
-			break;
-		clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
-		if ((child->ptrace & PT_DTRACE) == 0) {
-			/* Spurious delayed TF traps may occur */
-			child->ptrace |= PT_DTRACE;
-		}
-
-		/* Compute next pc.  */
-		pc = get_stack_long(child, PT_BPC);
-
-		if (access_process_vm(child, pc&~3, &insn, sizeof(insn), 0)
-		    != sizeof(insn))
-			break;
-
-		compute_next_pc(insn, pc, &next_pc, child);
-		if (next_pc & 0x80000000)
-			break;
-
-		if (embed_debug_trap(child, next_pc))
-			break;
-
-		invalidate_cache();
-		child->exit_code = data;
-
-		/* give it a chance to run. */
-		wake_up_process(child);
-		ret = 0;
-		break;
-	}
-
-	/*
-	 * detach a process that was attached.
-	 */
-	case PTRACE_DETACH:
-		ret = 0;
-		ret = ptrace_detach(child, data);
-		break;
-
 	case PTRACE_GETREGS:
-		ret = ptrace_getregs(child, (void __user *)data);
+		ret = ptrace_getregs(child, datap);
 		break;
 
 	case PTRACE_SETREGS:
-		ret = ptrace_setregs(child, (void __user *)data);
+		ret = ptrace_setregs(child, datap);
 		break;
 
 	default:
 		ret = ptrace_request(child, request, addr, data);
 		break;
 	}
-
-	return ret;
-}
-
-asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
-{
-	struct task_struct *child;
-	int ret;
-
-	lock_kernel();
-	ret = -EPERM;
-	if (request == PTRACE_TRACEME) {
-		/* are we already being traced? */
-		if (current->ptrace & PT_PTRACED)
-			goto out;
-		/* set the ptrace bit in the process flags. */
-		current->ptrace |= PT_PTRACED;
-		ret = 0;
-		goto out;
-	}
-	ret = -ESRCH;
-	read_lock(&tasklist_lock);
-	child = find_task_by_pid(pid);
-	if (child)
-		get_task_struct(child);
-	read_unlock(&tasklist_lock);
-	if (!child)
-		goto out;
-
-	ret = -EPERM;
-	if (pid == 1)		/* you may not mess with init */
-		goto out;
-
-	if (request == PTRACE_ATTACH) {
-		ret = ptrace_attach(child);
-		if (ret == 0)
-			init_debug_traps(child);
-		goto out_tsk;
-	}
-
-	ret = ptrace_check_attach(child, request == PTRACE_KILL);
-	if (ret == 0)
-		ret = do_ptrace(request, child, addr, data);
-
-out_tsk:
-	put_task_struct(child);
-out:
-	unlock_kernel();
 
 	return ret;
 }

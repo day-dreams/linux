@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  linux/fs/hfs/btree.h
  *
@@ -33,7 +34,7 @@ struct hfs_btree {
 	unsigned int depth;
 
 	//unsigned int map1_size, map_size;
-	struct semaphore tree_lock;
+	struct mutex tree_lock;
 
 	unsigned int pages_per_bnode;
 	spinlock_t hash_lock;
@@ -111,9 +112,6 @@ extern u16 hfs_brec_lenoff(struct hfs_bnode *, u16, u16 *);
 extern u16 hfs_brec_keylen(struct hfs_bnode *, u16);
 extern int hfs_brec_insert(struct hfs_find_data *, void *, int);
 extern int hfs_brec_remove(struct hfs_find_data *);
-extern struct hfs_bnode *hfs_bnode_split(struct hfs_find_data *);
-extern int hfs_brec_update_parent(struct hfs_find_data *);
-extern int hfs_btree_inc_height(struct hfs_btree *);
 
 /* bfind.c */
 extern int hfs_find_init(struct hfs_btree *, struct hfs_find_data *);
@@ -155,11 +153,6 @@ struct hfs_btree_header_rec {
 	__be32 attributes;	/* (F) attributes */
 	u32 reserved3[16];
 } __packed;
-
-#define HFS_NODE_INDEX	0x00	/* An internal (index) node */
-#define HFS_NODE_HEADER	0x01	/* The tree header node (node 0) */
-#define HFS_NODE_MAP		0x02	/* Holds part of the bitmap of used nodes */
-#define HFS_NODE_LEAF		0xFF	/* A leaf (ndNHeight==1) node */
 
 #define BTREE_ATTR_BADCLOSE	0x00000001	/* b-tree not closed properly. not
 						   used by hfsplus. */

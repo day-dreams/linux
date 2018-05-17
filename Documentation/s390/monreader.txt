@@ -10,7 +10,7 @@ Author: Gerald Schaefer (geraldsc@de.ibm.com)
 Description
 ===========
 This item delivers a new Linux API in the form of a misc char device that is
-useable from user space and allows read access to the z/VM Monitor Records
+usable from user space and allows read access to the z/VM Monitor Records
 collected by the *MONITOR System Service of z/VM.
 
 
@@ -83,7 +83,7 @@ This loads the module and sets the DCSS name to "MYDCSS".
 
 NOTE:
 -----
-This API provides no interface to control the *MONITOR service, e.g. specifiy
+This API provides no interface to control the *MONITOR service, e.g. specify
 which data should be collected. This can be done by the CP command MONITOR
 (Class E privileged), see "CP Command and Utility Reference".
 

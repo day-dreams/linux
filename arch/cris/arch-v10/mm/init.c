@@ -1,8 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/cris/arch-v10/mm/init.c
  *
  */
-#include <linux/config.h>
 #include <linux/mmzone.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
@@ -13,7 +13,7 @@
 #include <asm/mmu.h>
 #include <asm/io.h>
 #include <asm/mmu_context.h>
-#include <asm/arch/svinto.h>
+#include <arch/svinto.h>
 
 extern void tlb_init(void);
 
@@ -42,7 +42,7 @@ paging_init(void)
 	 *  switch_mm)
 	 */
 
-	current_pgd = init_mm.pgd;
+	per_cpu(current_pgd, smp_processor_id()) = init_mm.pgd;
 
 	/* initialise the TLB (tlb.c) */
 
@@ -69,14 +69,10 @@ paging_init(void)
 
 	*R_MMU_KSEG = ( IO_STATE(R_MMU_KSEG, seg_f, seg  ) |  /* bootrom */
 			IO_STATE(R_MMU_KSEG, seg_e, page ) |
-			IO_STATE(R_MMU_KSEG, seg_d, page ) | 
-			IO_STATE(R_MMU_KSEG, seg_c, page ) |   
+			IO_STATE(R_MMU_KSEG, seg_d, page ) |
+			IO_STATE(R_MMU_KSEG, seg_c, page ) |
 			IO_STATE(R_MMU_KSEG, seg_b, seg  ) |  /* kernel reg area */
-#ifdef CONFIG_JULIETTE
-			IO_STATE(R_MMU_KSEG, seg_a, seg  ) |  /* ARTPEC etc. */
-#else
 			IO_STATE(R_MMU_KSEG, seg_a, page ) |
-#endif
 			IO_STATE(R_MMU_KSEG, seg_9, seg  ) |  /* LED's on some boards */
 			IO_STATE(R_MMU_KSEG, seg_8, seg  ) |  /* CSE0/1, flash and I/O */
 			IO_STATE(R_MMU_KSEG, seg_7, page ) |  /* kernel vmalloc area */
@@ -93,14 +89,10 @@ paging_init(void)
 			    IO_FIELD(R_MMU_KBASE_HI, base_d, 0x0 ) |
 			    IO_FIELD(R_MMU_KBASE_HI, base_c, 0x0 ) |
 			    IO_FIELD(R_MMU_KBASE_HI, base_b, 0xb ) |
-#ifdef CONFIG_JULIETTE
-			    IO_FIELD(R_MMU_KBASE_HI, base_a, 0xa ) |
-#else
 			    IO_FIELD(R_MMU_KBASE_HI, base_a, 0x0 ) |
-#endif
 			    IO_FIELD(R_MMU_KBASE_HI, base_9, 0x9 ) |
 			    IO_FIELD(R_MMU_KBASE_HI, base_8, 0x8 ) );
-	
+
 	*R_MMU_KBASE_LO = ( IO_FIELD(R_MMU_KBASE_LO, base_7, 0x0 ) |
 			    IO_FIELD(R_MMU_KBASE_LO, base_6, 0x4 ) |
 			    IO_FIELD(R_MMU_KBASE_LO, base_5, 0x0 ) |
@@ -183,8 +175,7 @@ paging_init(void)
 	 * mem_map page array.
 	 */
 
-	free_area_init_node(0, &contig_page_data, zones_size, PAGE_OFFSET >> PAGE_SHIFT, 0);
-	mem_map = contig_page_data.node_mem_map;
+	free_area_init_node(0, zones_size, PAGE_OFFSET >> PAGE_SHIFT, 0);
 }
 
 /* Initialize remaps of some I/O-ports. It is important that this
@@ -243,7 +234,7 @@ flush_etrax_cacherange(void *startadr, int length)
 }
 
 /* Due to a bug in Etrax100(LX) all versions, receiving DMA buffers
- * will occationally corrupt certain CPU writes if the DMA buffers
+ * will occasionally corrupt certain CPU writes if the DMA buffers
  * happen to be hot in the cache.
  * 
  * As a workaround, we have to flush the relevant parts of the cache

@@ -20,15 +20,30 @@
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#include <sound/driver.h>
+#include <linux/device.h>
 #include <linux/firmware.h>
+#include <linux/slab.h>
+#include <linux/vmalloc.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/hwdep.h>
 #include <sound/vx_core.h>
 
-#ifdef SND_VX_FW_LOADER
+MODULE_FIRMWARE("vx/bx_1_vxp.b56");
+MODULE_FIRMWARE("vx/bx_1_vp4.b56");
+MODULE_FIRMWARE("vx/x1_1_vx2.xlx");
+MODULE_FIRMWARE("vx/x1_2_v22.xlx");
+MODULE_FIRMWARE("vx/x1_1_vxp.xlx");
+MODULE_FIRMWARE("vx/x1_1_vp4.xlx");
+MODULE_FIRMWARE("vx/bd56002.boot");
+MODULE_FIRMWARE("vx/bd563v2.boot");
+MODULE_FIRMWARE("vx/bd563s3.boot");
+MODULE_FIRMWARE("vx/l_1_vx2.d56");
+MODULE_FIRMWARE("vx/l_1_v22.d56");
+MODULE_FIRMWARE("vx/l_1_vxp.d56");
+MODULE_FIRMWARE("vx/l_1_vp4.d56");
 
-int snd_vx_setup_firmware(vx_core_t *chip)
+int snd_vx_setup_firmware(struct vx_core *chip)
 {
 	static char *fw_files[VX_TYPE_NUMS][4] = {
 		[VX_TYPE_BOARD] = {
@@ -93,7 +108,7 @@ int snd_vx_setup_firmware(vx_core_t *chip)
 }
 
 /* exported */
-void snd_vx_free_firmware(vx_core_t *chip)
+void snd_vx_free_firmware(struct vx_core *chip)
 {
 #ifdef CONFIG_PM
 	int i;
@@ -102,147 +117,5 @@ void snd_vx_free_firmware(vx_core_t *chip)
 #endif
 }
 
-#else /* old style firmware loading */
-
-static int vx_hwdep_open(snd_hwdep_t *hw, struct file *file)
-{
-	return 0;
-}
-
-static int vx_hwdep_release(snd_hwdep_t *hw, struct file *file)
-{
-	return 0;
-}
-
-static int vx_hwdep_dsp_status(snd_hwdep_t *hw, snd_hwdep_dsp_status_t *info)
-{
-	static char *type_ids[VX_TYPE_NUMS] = {
-		[VX_TYPE_BOARD] = "vxboard",
-		[VX_TYPE_V2] = "vx222",
-		[VX_TYPE_MIC] = "vx222",
-		[VX_TYPE_VXPOCKET] = "vxpocket",
-		[VX_TYPE_VXP440] = "vxp440",
-	};
-	vx_core_t *vx = hw->private_data;
-
-	snd_assert(type_ids[vx->type], return -EINVAL);
-	strcpy(info->id, type_ids[vx->type]);
-	if (vx_is_pcmcia(vx))
-		info->num_dsps = 4;
-	else
-		info->num_dsps = 3;
-	if (vx->chip_status & VX_STAT_CHIP_INIT)
-		info->chip_ready = 1;
-	info->version = VX_DRIVER_VERSION;
-	return 0;
-}
-
-static void free_fw(const struct firmware *fw)
-{
-	if (fw) {
-		vfree(fw->data);
-		kfree(fw);
-	}
-}
-
-static int vx_hwdep_dsp_load(snd_hwdep_t *hw, snd_hwdep_dsp_image_t *dsp)
-{
-	vx_core_t *vx = hw->private_data;
-	int index, err;
-	struct firmware *fw;
-
-	snd_assert(vx->ops->load_dsp, return -ENXIO);
-
-	fw = kmalloc(sizeof(*fw), GFP_KERNEL);
-	if (! fw) {
-		snd_printk(KERN_ERR "cannot allocate firmware\n");
-		return -ENOMEM;
-	}
-	fw->size = dsp->length;
-	fw->data = vmalloc(fw->size);
-	if (! fw->data) {
-		snd_printk(KERN_ERR "cannot allocate firmware image (length=%d)\n",
-			   (int)fw->size);
-		kfree(fw);
-		return -ENOMEM;
-	}
-	if (copy_from_user(fw->data, dsp->image, dsp->length)) {
-		free_fw(fw);
-		return -EFAULT;
-	}
-
-	index = dsp->index;
-	if (! vx_is_pcmcia(vx))
-		index++;
-	err = vx->ops->load_dsp(vx, index, fw);
-	if (err < 0) {
-		free_fw(fw);
-		return err;
-	}
-#ifdef CONFIG_PM
-	vx->firmware[index] = fw;
-#else
-	free_fw(fw);
-#endif
-
-	if (index == 1)
-		vx->chip_status |= VX_STAT_XILINX_LOADED;
-	if (index < 3)
-		return 0;
-
-	/* ok, we reached to the last one */
-	/* create the devices if not built yet */
-	if (! (vx->chip_status & VX_STAT_DEVICE_INIT)) {
-		if ((err = snd_vx_pcm_new(vx)) < 0)
-			return err;
-
-		if ((err = snd_vx_mixer_new(vx)) < 0)
-			return err;
-
-		if (vx->ops->add_controls)
-			if ((err = vx->ops->add_controls(vx)) < 0)
-				return err;
-
-		if ((err = snd_card_register(vx->card)) < 0)
-			return err;
-
-		vx->chip_status |= VX_STAT_DEVICE_INIT;
-	}
-	vx->chip_status |= VX_STAT_CHIP_INIT;
-	return 0;
-}
-
-
-/* exported */
-int snd_vx_setup_firmware(vx_core_t *chip)
-{
-	int err;
-	snd_hwdep_t *hw;
-
-	if ((err = snd_hwdep_new(chip->card, SND_VX_HWDEP_ID, 0, &hw)) < 0)
-		return err;
-
-	hw->iface = SNDRV_HWDEP_IFACE_VX;
-	hw->private_data = chip;
-	hw->ops.open = vx_hwdep_open;
-	hw->ops.release = vx_hwdep_release;
-	hw->ops.dsp_status = vx_hwdep_dsp_status;
-	hw->ops.dsp_load = vx_hwdep_dsp_load;
-	hw->exclusive = 1;
-	sprintf(hw->name, "VX Loader (%s)", chip->card->driver);
-	chip->hwdep = hw;
-
-	return snd_card_register(chip->card);
-}
-
-/* exported */
-void snd_vx_free_firmware(vx_core_t *chip)
-{
-#ifdef CONFIG_PM
-	int i;
-	for (i = 0; i < 4; i++)
-		free_fw(chip->firmware[i]);
-#endif
-}
-
-#endif /* SND_VX_FW_LOADER */
+EXPORT_SYMBOL(snd_vx_setup_firmware);
+EXPORT_SYMBOL(snd_vx_free_firmware);

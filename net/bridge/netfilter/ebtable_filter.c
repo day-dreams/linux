@@ -12,10 +12,9 @@
 #include <linux/module.h>
 
 #define FILTER_VALID_HOOKS ((1 << NF_BR_LOCAL_IN) | (1 << NF_BR_FORWARD) | \
-   (1 << NF_BR_LOCAL_OUT))
+			    (1 << NF_BR_LOCAL_OUT))
 
-static struct ebt_entries initial_chains[] =
-{
+static struct ebt_entries initial_chains[] = {
 	{
 		.name	= "INPUT",
 		.policy	= EBT_ACCEPT,
@@ -30,8 +29,7 @@ static struct ebt_entries initial_chains[] =
 	},
 };
 
-static struct ebt_replace initial_table =
-{
+static struct ebt_replace_kernel initial_table = {
 	.name		= "filter",
 	.valid_hooks	= FILTER_VALID_HOOKS,
 	.entries_size	= 3 * sizeof(struct ebt_entries),
@@ -50,74 +48,75 @@ static int check(const struct ebt_table_info *info, unsigned int valid_hooks)
 	return 0;
 }
 
-static struct ebt_table frame_filter =
-{ 
+static const struct ebt_table frame_filter = {
 	.name		= "filter",
 	.table		= &initial_table,
-	.valid_hooks	= FILTER_VALID_HOOKS, 
-	.lock		= RW_LOCK_UNLOCKED,
+	.valid_hooks	= FILTER_VALID_HOOKS,
 	.check		= check,
 	.me		= THIS_MODULE,
 };
 
 static unsigned int
-ebt_hook (unsigned int hook, struct sk_buff **pskb, const struct net_device *in,
-   const struct net_device *out, int (*okfn)(struct sk_buff *))
+ebt_in_hook(void *priv, struct sk_buff *skb,
+	    const struct nf_hook_state *state)
 {
-	return ebt_do_table(hook, pskb, in, out, &frame_filter);
+	return ebt_do_table(skb, state, state->net->xt.frame_filter);
 }
 
-static struct nf_hook_ops ebt_ops_filter[] = {
+static unsigned int
+ebt_out_hook(void *priv, struct sk_buff *skb,
+	     const struct nf_hook_state *state)
+{
+	return ebt_do_table(skb, state, state->net->xt.frame_filter);
+}
+
+static const struct nf_hook_ops ebt_ops_filter[] = {
 	{
-		.hook		= ebt_hook,
-		.owner		= THIS_MODULE,
-		.pf		= PF_BRIDGE,
+		.hook		= ebt_in_hook,
+		.pf		= NFPROTO_BRIDGE,
 		.hooknum	= NF_BR_LOCAL_IN,
 		.priority	= NF_BR_PRI_FILTER_BRIDGED,
 	},
 	{
-		.hook		= ebt_hook,
-		.owner		= THIS_MODULE,
-		.pf		= PF_BRIDGE,
+		.hook		= ebt_in_hook,
+		.pf		= NFPROTO_BRIDGE,
 		.hooknum	= NF_BR_FORWARD,
 		.priority	= NF_BR_PRI_FILTER_BRIDGED,
 	},
 	{
-		.hook		= ebt_hook,
-		.owner		= THIS_MODULE,
-		.pf		= PF_BRIDGE,
+		.hook		= ebt_out_hook,
+		.pf		= NFPROTO_BRIDGE,
 		.hooknum	= NF_BR_LOCAL_OUT,
 		.priority	= NF_BR_PRI_FILTER_OTHER,
 	},
 };
 
-static int __init init(void)
+static int __net_init frame_filter_net_init(struct net *net)
 {
-	int i, j, ret;
-
-	ret = ebt_register_table(&frame_filter);
-	if (ret < 0)
-		return ret;
-	for (i = 0; i < ARRAY_SIZE(ebt_ops_filter); i++)
-		if ((ret = nf_register_hook(&ebt_ops_filter[i])) < 0)
-			goto cleanup;
-	return ret;
-cleanup:
-	for (j = 0; j < i; j++)
-		nf_unregister_hook(&ebt_ops_filter[j]);
-	ebt_unregister_table(&frame_filter);
-	return ret;
+	return ebt_register_table(net, &frame_filter, ebt_ops_filter,
+				  &net->xt.frame_filter);
 }
 
-static void __exit fini(void)
+static void __net_exit frame_filter_net_exit(struct net *net)
 {
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(ebt_ops_filter); i++)
-		nf_unregister_hook(&ebt_ops_filter[i]);
-	ebt_unregister_table(&frame_filter);
+	ebt_unregister_table(net, net->xt.frame_filter, ebt_ops_filter);
 }
 
-module_init(init);
-module_exit(fini);
+static struct pernet_operations frame_filter_net_ops = {
+	.init = frame_filter_net_init,
+	.exit = frame_filter_net_exit,
+};
+
+static int __init ebtable_filter_init(void)
+{
+	return register_pernet_subsys(&frame_filter_net_ops);
+}
+
+static void __exit ebtable_filter_fini(void)
+{
+	unregister_pernet_subsys(&frame_filter_net_ops);
+}
+
+module_init(ebtable_filter_init);
+module_exit(ebtable_filter_fini);
 MODULE_LICENSE("GPL");

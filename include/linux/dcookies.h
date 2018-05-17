@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * dcookies.h
  *
@@ -9,13 +10,14 @@
 #ifndef DCOOKIES_H
 #define DCOOKIES_H
  
-#include <linux/config.h>
 
 #ifdef CONFIG_PROFILING
  
+#include <linux/dcache.h>
 #include <linux/types.h>
  
 struct dcookie_user;
+struct path;
  
 /**
  * dcookie_register - register a user of dcookies
@@ -43,27 +45,25 @@ void dcookie_unregister(struct dcookie_user * user);
  *
  * Returns 0 on success, with *cookie filled in
  */
-int get_dcookie(struct dentry * dentry, struct vfsmount * vfsmnt,
-	unsigned long * cookie);
+int get_dcookie(const struct path *path, unsigned long *cookie);
 
 #else
 
-struct dcookie_user * dcookie_register(void)
+static inline struct dcookie_user * dcookie_register(void)
 {
 	return NULL;
 }
 
-void dcookie_unregister(struct dcookie_user * user)
+static inline void dcookie_unregister(struct dcookie_user * user)
 {
 	return;
 }
- 
-static inline int get_dcookie(struct dentry * dentry,
-	struct vfsmount * vfsmnt, unsigned long * cookie)
+
+static inline int get_dcookie(const struct path *path, unsigned long *cookie)
 {
 	return -ENOSYS;
-} 
- 
+}
+
 #endif /* CONFIG_PROFILING */
- 
+
 #endif /* DCOOKIES_H */

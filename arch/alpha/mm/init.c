@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/alpha/mm/init.c
  *
@@ -6,7 +7,7 @@
 
 /* 2.3.x zone allocator, 1999 Andrea Arcangeli <andrea@suse.de> */
 
-#include <linux/config.h>
+#include <linux/pagemap.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -20,9 +21,9 @@
 #include <linux/init.h>
 #include <linux/bootmem.h> /* max_low_pfn */
 #include <linux/vmalloc.h>
+#include <linux/gfp.h>
 
-#include <asm/system.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
 #include <asm/hwrpb.h>
@@ -30,8 +31,8 @@
 #include <asm/mmu_context.h>
 #include <asm/console.h>
 #include <asm/tlb.h>
-
-DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
+#include <asm/setup.h>
+#include <asm/sections.h>
 
 extern void die_if_kernel(char *,struct pt_regs *,long);
 
@@ -57,13 +58,6 @@ pgd_alloc(struct mm_struct *mm)
 		  = pte_val(mk_pte(virt_to_page(ret), PAGE_KERNEL));
 	}
 	return ret;
-}
-
-pte_t *
-pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
-{
-	pte_t *pte = (pte_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT|__GFP_ZERO);
-	return pte;
 }
 
 
@@ -93,36 +87,6 @@ __bad_page(void)
 	memset((void *) EMPTY_PGE, 0, PAGE_SIZE);
 	return pte_mkdirty(mk_pte(virt_to_page(EMPTY_PGE), PAGE_SHARED));
 }
-
-#ifndef CONFIG_DISCONTIGMEM
-void
-show_mem(void)
-{
-	long i,free = 0,total = 0,reserved = 0;
-	long shared = 0, cached = 0;
-
-	printk("\nMem-info:\n");
-	show_free_areas();
-	printk("Free swap:       %6ldkB\n", nr_swap_pages<<(PAGE_SHIFT-10));
-	i = max_mapnr;
-	while (i-- > 0) {
-		total++;
-		if (PageReserved(mem_map+i))
-			reserved++;
-		else if (PageSwapCache(mem_map+i))
-			cached++;
-		else if (!page_count(mem_map+i))
-			free++;
-		else
-			shared += page_count(mem_map + i) - 1;
-	}
-	printk("%ld pages of RAM\n",total);
-	printk("%ld free pages\n",free);
-	printk("%ld reserved pages\n",reserved);
-	printk("%ld pages shared\n",shared);
-	printk("%ld pages swap cached\n",cached);
-}
-#endif
 
 static inline unsigned long
 load_PCB(struct pcb_struct *pcb)
@@ -226,8 +190,20 @@ callback_init(void * kernel_end)
 
 	if (alpha_using_srm) {
 		static struct vm_struct console_remap_vm;
-		unsigned long vaddr = VMALLOC_START;
+		unsigned long nr_pages = 0;
+		unsigned long vaddr;
 		unsigned long i, j;
+
+		/* calculate needed size */
+		for (i = 0; i < crb->map_entries; ++i)
+			nr_pages += crb->map[i].count;
+
+		/* register the vm area */
+		console_remap_vm.flags = VM_ALLOC;
+		console_remap_vm.size = nr_pages << PAGE_SHIFT;
+		vm_area_register_early(&console_remap_vm, PAGE_SIZE);
+
+		vaddr = (unsigned long)console_remap_vm.addr;
 
 		/* Set up the third level PTEs and update the virtual
 		   addresses of the CRB entries.  */
@@ -235,7 +211,7 @@ callback_init(void * kernel_end)
 			unsigned long pfn = crb->map[i].pa >> PAGE_SHIFT;
 			crb->map[i].va = vaddr;
 			for (j = 0; j < crb->map[i].count; ++j) {
-				/* Newer console's (especially on larger
+				/* Newer consoles (especially on larger
 				   systems) may require more pages of
 				   PTEs. Grab additional pages as needed. */
 				if (pmd != pmd_offset(pgd, vaddr)) {
@@ -250,12 +226,6 @@ callback_init(void * kernel_end)
 				vaddr += PAGE_SIZE;
 			}
 		}
-
-		/* Let vmalloc know that we've allocated some space.  */
-		console_remap_vm.flags = VM_ALLOC;
-		console_remap_vm.addr = (void *) VMALLOC_START;
-		console_remap_vm.size = vaddr - VMALLOC_START;
-		vmlist = &console_remap_vm;
 	}
 
 	callback_init_done = 1;
@@ -267,10 +237,9 @@ callback_init(void * kernel_end)
 /*
  * paging_init() sets up the memory map.
  */
-void
-paging_init(void)
+void __init paging_init(void)
 {
-	unsigned long zones_size[MAX_NR_ZONES] = {0, 0, 0};
+	unsigned long zones_size[MAX_NR_ZONES] = {0, };
 	unsigned long dma_pfn, high_pfn;
 
 	dma_pfn = virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
@@ -308,75 +277,25 @@ srm_paging_stop (void)
 }
 #endif
 
-#ifndef CONFIG_DISCONTIGMEM
-static void __init
-printk_memory_info(void)
-{
-	unsigned long codesize, reservedpages, datasize, initsize, tmp;
-	extern int page_is_ram(unsigned long) __init;
-	extern char _text, _etext, _data, _edata;
-	extern char __init_begin, __init_end;
-
-	/* printk all informations */
-	reservedpages = 0;
-	for (tmp = 0; tmp < max_low_pfn; tmp++)
-		/*
-		 * Only count reserved RAM pages
-		 */
-		if (page_is_ram(tmp) && PageReserved(mem_map+tmp))
-			reservedpages++;
-
-	codesize =  (unsigned long) &_etext - (unsigned long) &_text;
-	datasize =  (unsigned long) &_edata - (unsigned long) &_data;
-	initsize =  (unsigned long) &__init_end - (unsigned long) &__init_begin;
-
-	printk("Memory: %luk/%luk available (%luk kernel code, %luk reserved, %luk data, %luk init)\n",
-	       (unsigned long) nr_free_pages() << (PAGE_SHIFT-10),
-	       max_mapnr << (PAGE_SHIFT-10),
-	       codesize >> 10,
-	       reservedpages << (PAGE_SHIFT-10),
-	       datasize >> 10,
-	       initsize >> 10);
-}
-
 void __init
 mem_init(void)
 {
-	max_mapnr = num_physpages = max_low_pfn;
-	totalram_pages += free_all_bootmem();
+	set_max_mapnr(max_low_pfn);
 	high_memory = (void *) __va(max_low_pfn * PAGE_SIZE);
-
-	printk_memory_info();
-}
-#endif /* CONFIG_DISCONTIGMEM */
-
-void
-free_reserved_mem(void *start, void *end)
-{
-	void *__start = start;
-	for (; __start < end; __start += PAGE_SIZE) {
-		ClearPageReserved(virt_to_page(__start));
-		set_page_count(virt_to_page(__start), 1);
-		free_page((long)__start);
-		totalram_pages++;
-	}
+	free_all_bootmem();
+	mem_init_print_info(NULL);
 }
 
 void
 free_initmem(void)
 {
-	extern char __init_begin, __init_end;
-
-	free_reserved_mem(&__init_begin, &__init_end);
-	printk ("Freeing unused kernel memory: %ldk freed\n",
-		(&__init_end - &__init_begin) >> 10);
+	free_initmem_default(-1);
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD
 void
 free_initrd_mem(unsigned long start, unsigned long end)
 {
-	free_reserved_mem((void *)start, (void *)end);
-	printk ("Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
+	free_reserved_area((void *)start, (void *)end, -1, "initrd");
 }
 #endif

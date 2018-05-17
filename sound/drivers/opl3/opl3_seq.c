@@ -25,17 +25,18 @@
 #include "opl3_voice.h"
 #include <linux/init.h>
 #include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <sound/initval.h>
 
 MODULE_AUTHOR("Uros Bizjak <uros@kss-loka.si>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("ALSA driver for OPL3 FM synth");
 
-int use_internal_drums = 0;
+bool use_internal_drums = 0;
 module_param(use_internal_drums, bool, 0444);
 MODULE_PARM_DESC(use_internal_drums, "Enable internal OPL2/3 drums.");
 
-int snd_opl3_synth_use_inc(opl3_t * opl3)
+int snd_opl3_synth_use_inc(struct snd_opl3 * opl3)
 {
 	if (!try_module_get(opl3->card->module))
 		return -EFAULT;
@@ -43,22 +44,23 @@ int snd_opl3_synth_use_inc(opl3_t * opl3)
 
 }
 
-void snd_opl3_synth_use_dec(opl3_t * opl3)
+void snd_opl3_synth_use_dec(struct snd_opl3 * opl3)
 {
 	module_put(opl3->card->module);
 }
 
-int snd_opl3_synth_setup(opl3_t * opl3)
+int snd_opl3_synth_setup(struct snd_opl3 * opl3)
 {
 	int idx;
+	struct snd_hwdep *hwdep = opl3->hwdep;
 
-	down(&opl3->access_mutex);
-	if (opl3->used) {
-		up(&opl3->access_mutex);
+	mutex_lock(&hwdep->open_mutex);
+	if (hwdep->used) {
+		mutex_unlock(&hwdep->open_mutex);
 		return -EBUSY;
 	}
-	opl3->used++;
-	up(&opl3->access_mutex);
+	hwdep->used++;
+	mutex_unlock(&hwdep->open_mutex);
 
 	snd_opl3_reset(opl3);
 
@@ -78,9 +80,10 @@ int snd_opl3_synth_setup(opl3_t * opl3)
 	return 0;
 }
 
-void snd_opl3_synth_cleanup(opl3_t * opl3)
+void snd_opl3_synth_cleanup(struct snd_opl3 * opl3)
 {
 	unsigned long flags;
+	struct snd_hwdep *hwdep;
 
 	/* Stop system timer */
 	spin_lock_irqsave(&opl3->sys_timer_lock, flags);
@@ -91,14 +94,16 @@ void snd_opl3_synth_cleanup(opl3_t * opl3)
 	spin_unlock_irqrestore(&opl3->sys_timer_lock, flags);
 
 	snd_opl3_reset(opl3);
-	down(&opl3->access_mutex);
-	opl3->used--;
-	up(&opl3->access_mutex);
+	hwdep = opl3->hwdep;
+	mutex_lock(&hwdep->open_mutex);
+	hwdep->used--;
+	mutex_unlock(&hwdep->open_mutex);
+	wake_up(&hwdep->open_wait);
 }
 
-static int snd_opl3_synth_use(void *private_data, snd_seq_port_subscribe_t * info)
+static int snd_opl3_synth_use(void *private_data, struct snd_seq_port_subscribe * info)
 {
-	opl3_t *opl3 = private_data;
+	struct snd_opl3 *opl3 = private_data;
 	int err;
 
 	if ((err = snd_opl3_synth_setup(opl3)) < 0)
@@ -123,9 +128,9 @@ static int snd_opl3_synth_use(void *private_data, snd_seq_port_subscribe_t * inf
 	return 0;
 }
 
-static int snd_opl3_synth_unuse(void *private_data, snd_seq_port_subscribe_t * info)
+static int snd_opl3_synth_unuse(void *private_data, struct snd_seq_port_subscribe * info)
 {
-	opl3_t *opl3 = private_data;
+	struct snd_opl3 *opl3 = private_data;
 
 	snd_opl3_synth_cleanup(opl3);
 
@@ -137,7 +142,7 @@ static int snd_opl3_synth_unuse(void *private_data, snd_seq_port_subscribe_t * i
 /*
  * MIDI emulation operators
  */
-snd_midi_op_t opl3_ops = {
+struct snd_midi_op opl3_ops = {
 	.note_on =		snd_opl3_note_on,
 	.note_off =		snd_opl3_note_off,
 	.key_press =		snd_opl3_key_press,
@@ -147,20 +152,12 @@ snd_midi_op_t opl3_ops = {
 	.sysex =		snd_opl3_sysex,
 };
 
-static int snd_opl3_synth_event_input(snd_seq_event_t * ev, int direct,
+static int snd_opl3_synth_event_input(struct snd_seq_event * ev, int direct,
 				      void *private_data, int atomic, int hop)
 {
-	opl3_t *opl3 = private_data;
+	struct snd_opl3 *opl3 = private_data;
 
-	if (ev->type >= SNDRV_SEQ_EVENT_INSTR_BEGIN &&
-	    ev->type <= SNDRV_SEQ_EVENT_INSTR_CHANGE) {
-		if (direct) {
-			snd_seq_instr_event(&opl3->fm_ops, opl3->ilist, ev,
-					    opl3->seq_client, atomic, hop);
-		}
-	} else {
-		snd_midi_process_event(&opl3_ops, ev, opl3->chset);
-	}
+	snd_midi_process_event(&opl3_ops, ev, opl3->chset);
 	return 0;
 }
 
@@ -168,14 +165,14 @@ static int snd_opl3_synth_event_input(snd_seq_event_t * ev, int direct,
 
 static void snd_opl3_synth_free_port(void *private_data)
 {
-	opl3_t *opl3 = private_data;
+	struct snd_opl3 *opl3 = private_data;
 
 	snd_midi_channel_free_set(opl3->chset);
 }
 
-static int snd_opl3_synth_create_port(opl3_t * opl3)
+static int snd_opl3_synth_create_port(struct snd_opl3 * opl3)
 {
-	snd_seq_port_callback_t callbacks;
+	struct snd_seq_port_callback callbacks;
 	char name[32];
 	int voices, opl_ver;
 
@@ -203,27 +200,31 @@ static int snd_opl3_synth_create_port(opl3_t * opl3)
 						      SNDRV_SEQ_PORT_CAP_SUBS_WRITE,
 						      SNDRV_SEQ_PORT_TYPE_MIDI_GENERIC |
 						      SNDRV_SEQ_PORT_TYPE_MIDI_GM |
-						      SNDRV_SEQ_PORT_TYPE_SYNTH,
+						      SNDRV_SEQ_PORT_TYPE_DIRECT_SAMPLE |
+						      SNDRV_SEQ_PORT_TYPE_HARDWARE |
+						      SNDRV_SEQ_PORT_TYPE_SYNTHESIZER,
 						      16, voices,
 						      name);
 	if (opl3->chset->port < 0) {
+		int port;
+		port = opl3->chset->port;
 		snd_midi_channel_free_set(opl3->chset);
-		return opl3->chset->port;
+		return port;
 	}
 	return 0;
 }
 
 /* ------------------------------ */
 
-static int snd_opl3_seq_new_device(snd_seq_device_t *dev)
+static int snd_opl3_seq_probe(struct device *_dev)
 {
-	opl3_t *opl3;
-	int client;
-	snd_seq_client_callback_t callbacks;
-	snd_seq_client_info_t cinfo;
+	struct snd_seq_device *dev = to_seq_dev(_dev);
+	struct snd_opl3 *opl3;
+	int client, err;
+	char name[32];
 	int opl_ver;
 
-	opl3 = *(opl3_t **)SNDRV_SEQ_DEVICE_ARGPTR(dev);
+	opl3 = *(struct snd_opl3 **)SNDRV_SEQ_DEVICE_ARGPTR(dev);
 	if (opl3 == NULL)
 		return -EINVAL;
 
@@ -232,83 +233,58 @@ static int snd_opl3_seq_new_device(snd_seq_device_t *dev)
 	opl3->seq_client = -1;
 
 	/* allocate new client */
-	memset(&callbacks, 0, sizeof(callbacks));
-	callbacks.private_data = opl3;
-	callbacks.allow_output = callbacks.allow_input = 1;
+	opl_ver = (opl3->hardware & OPL3_HW_MASK) >> 8;
+	sprintf(name, "OPL%i FM synth", opl_ver);
 	client = opl3->seq_client =
-	    snd_seq_create_kernel_client(opl3->card, opl3->seq_dev_num, &callbacks);
+		snd_seq_create_kernel_client(opl3->card, opl3->seq_dev_num,
+					     name);
 	if (client < 0)
 		return client;
 
-	/* change name of client */
-	memset(&cinfo, 0, sizeof(cinfo));
-	cinfo.client = client;
-	cinfo.type = KERNEL_CLIENT;
-	opl_ver = (opl3->hardware & OPL3_HW_MASK) >> 8;
-	sprintf(cinfo.name, "OPL%i FM synth", opl_ver);
-	snd_seq_kernel_client_ctl(client, SNDRV_SEQ_IOCTL_SET_CLIENT_INFO, &cinfo);
-
-	snd_opl3_synth_create_port(opl3);
-
-	/* initialize instrument list */
-	opl3->ilist = snd_seq_instr_list_new();
-	if (opl3->ilist == NULL) {
+	if ((err = snd_opl3_synth_create_port(opl3)) < 0) {
 		snd_seq_delete_kernel_client(client);
 		opl3->seq_client = -1;
-		return -ENOMEM;
+		return err;
 	}
-	opl3->ilist->flags = SNDRV_SEQ_INSTR_FLG_DIRECT;
-	snd_seq_fm_init(&opl3->fm_ops, NULL);
 
 	/* setup system timer */
-	init_timer(&opl3->tlist);
-	opl3->tlist.function = snd_opl3_timer_func;
-	opl3->tlist.data = (unsigned long) opl3;
+	timer_setup(&opl3->tlist, snd_opl3_timer_func, 0);
 	spin_lock_init(&opl3->sys_timer_lock);
 	opl3->sys_timer_status = 0;
 
-#ifdef CONFIG_SND_SEQUENCER_OSS
-	snd_opl3_init_seq_oss(opl3, cinfo.name);
+#if IS_ENABLED(CONFIG_SND_SEQUENCER_OSS)
+	snd_opl3_init_seq_oss(opl3, name);
 #endif
 	return 0;
 }
 
-static int snd_opl3_seq_delete_device(snd_seq_device_t *dev)
+static int snd_opl3_seq_remove(struct device *_dev)
 {
-	opl3_t *opl3;
+	struct snd_seq_device *dev = to_seq_dev(_dev);
+	struct snd_opl3 *opl3;
 
-	opl3 = *(opl3_t **)SNDRV_SEQ_DEVICE_ARGPTR(dev);
+	opl3 = *(struct snd_opl3 **)SNDRV_SEQ_DEVICE_ARGPTR(dev);
 	if (opl3 == NULL)
 		return -EINVAL;
 
-#ifdef CONFIG_SND_SEQUENCER_OSS
+#if IS_ENABLED(CONFIG_SND_SEQUENCER_OSS)
 	snd_opl3_free_seq_oss(opl3);
 #endif
 	if (opl3->seq_client >= 0) {
 		snd_seq_delete_kernel_client(opl3->seq_client);
 		opl3->seq_client = -1;
 	}
-	if (opl3->ilist)
-		snd_seq_instr_list_free(&opl3->ilist);
 	return 0;
 }
 
-static int __init alsa_opl3_seq_init(void)
-{
-	static snd_seq_dev_ops_t ops =
-	{
-		snd_opl3_seq_new_device,
-		snd_opl3_seq_delete_device
-	};
+static struct snd_seq_driver opl3_seq_driver = {
+	.driver = {
+		.name = KBUILD_MODNAME,
+		.probe = snd_opl3_seq_probe,
+		.remove = snd_opl3_seq_remove,
+	},
+	.id = SNDRV_SEQ_DEV_ID_OPL3,
+	.argsize = sizeof(struct snd_opl3 *),
+};
 
-	return snd_seq_device_register_driver(SNDRV_SEQ_DEV_ID_OPL3, &ops,
-					      sizeof(opl3_t*));
-}
-
-static void __exit alsa_opl3_seq_exit(void)
-{
-	snd_seq_device_unregister_driver(SNDRV_SEQ_DEV_ID_OPL3);
-}
-
-module_init(alsa_opl3_seq_init)
-module_exit(alsa_opl3_seq_exit)
+module_snd_seq_driver(opl3_seq_driver);

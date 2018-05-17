@@ -1,7 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Implementation of the security services.
  *
- * Author : Stephen Smalley, <sds@epoch.ncsc.mil>
+ * Author : Stephen Smalley, <sds@tycho.nsa.gov>
  */
 #ifndef _SS_SERVICES_H_
 #define _SS_SERVICES_H_
@@ -9,13 +10,13 @@
 #include "policydb.h"
 #include "sidtab.h"
 
-/*
- * The security server uses two global data structures
- * when providing its services:  the SID table (sidtab)
- * and the policy database (policydb).
- */
-extern struct sidtab sidtab;
 extern struct policydb policydb;
+
+void services_compute_xperms_drivers(struct extended_perms *xperms,
+				struct avtab_node *node);
+
+void services_compute_xperms_decision(struct extended_perms_decision *xpermd,
+					struct avtab_node *node);
 
 #endif	/* _SS_SERVICES_H_ */
 

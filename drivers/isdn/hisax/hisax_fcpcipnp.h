@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #include "hisax_if.h"
 #include "hisax_isac.h"
 #include <linux/pci.h>
@@ -12,17 +13,17 @@ enum {
 
 struct hdlc_stat_reg {
 #ifdef __BIG_ENDIAN
-	u_char fill __attribute__((packed));
-	u_char mode __attribute__((packed));
-	u_char xml  __attribute__((packed));
-	u_char cmd  __attribute__((packed));
+	u_char fill;
+	u_char mode;
+	u_char xml;
+	u_char cmd;
 #else
-	u_char cmd  __attribute__((packed));
-	u_char xml  __attribute__((packed));
-	u_char mode __attribute__((packed));
-	u_char fill __attribute__((packed));
+	u_char cmd;
+	u_char xml;
+	u_char mode;
+	u_char fill;
 #endif
-};
+} __attribute__((packed));
 
 struct fritz_bcs {
 	struct hisax_b_if b_if;
@@ -38,7 +39,7 @@ struct fritz_bcs {
 	int rcvidx;
 	int fifo_size;
 	u_char rcvbuf[HSCX_BUFMAX]; /* B-Channel receive Buffer */
-	
+
 	int tx_cnt;		    /* B-Channel transmit counter */
 	struct sk_buff *tx_skb;     /* B-Channel transmit Buffer */
 };
@@ -55,4 +56,3 @@ struct fritz_adapter {
 	u32  (*read_hdlc_status) (struct fritz_adapter *adapter, int nr);
 	void (*write_ctrl) (struct fritz_bcs *bcs, int which);
 };
-

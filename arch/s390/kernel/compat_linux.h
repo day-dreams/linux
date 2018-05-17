@@ -1,14 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_S390X_S390_H
 #define _ASM_S390X_S390_H
 
-#include <linux/config.h>
 #include <linux/compat.h>
 #include <linux/socket.h>
 #include <linux/syscalls.h>
-#include <linux/nfs_fs.h>
-#include <linux/sunrpc/svc.h>
-#include <linux/nfsd/nfsd.h>
-#include <linux/nfsd/export.h>
 
 /* Macro that masks the high order bit of an 32 bit pointer and converts it*/
 /*       to a 64 bit pointer */
@@ -22,86 +18,6 @@ struct ipc_kludge_32 {
         __s32   msgtyp;
 };
 
-struct old_sigaction32 {
-       __u32			sa_handler;	/* Really a pointer, but need to deal with 32 bits */
-       compat_old_sigset_t	sa_mask;	/* A 32 bit mask */
-       __u32			sa_flags;
-       __u32			sa_restorer;	/* Another 32 bit pointer */
-};
- 
-typedef union sigval32 {
-        int     sival_int;
-        __u32   sival_ptr;
-} sigval_t32;
-                 
-typedef struct compat_siginfo {
-	int	si_signo;
-	int	si_errno;
-	int	si_code;
-
-	union {
-		int _pad[((128/sizeof(int)) - 3)];
-
-		/* kill() */
-		struct {
-			pid_t	_pid;	/* sender's pid */
-			uid_t	_uid;	/* sender's uid */
-		} _kill;
-
-		/* POSIX.1b timers */
-		struct {
-			timer_t _tid;		/* timer id */
-			int _overrun;		/* overrun count */
-			sigval_t _sigval;	/* same as below */
-			int _sys_private;       /* not to be passed to user */
-		} _timer;
-
-		/* POSIX.1b signals */
-		struct {
-			pid_t			_pid;	/* sender's pid */
-			uid_t			_uid;	/* sender's uid */
-			sigval_t32		_sigval;
-		} _rt;
-
-		/* SIGCHLD */
-		struct {
-			pid_t			_pid;	/* which child */
-			uid_t			_uid;	/* sender's uid */
-			int			_status;/* exit code */
-			compat_clock_t		_utime;
-			compat_clock_t		_stime;
-		} _sigchld;
-
-		/* SIGILL, SIGFPE, SIGSEGV, SIGBUS */
-		struct {
-			__u32	_addr;	/* faulting insn/memory ref. - pointer */
-		} _sigfault;
-                          
-		/* SIGPOLL */
-		struct {
-			int	_band;	/* POLL_IN, POLL_OUT, POLL_MSG */
-			int	_fd;
-		} _sigpoll;
-	} _sifields;
-} compat_siginfo_t;
-
-/*
- * How these fields are to be accessed.
- */
-#define si_pid		_sifields._kill._pid
-#define si_uid		_sifields._kill._uid
-#define si_status	_sifields._sigchld._status
-#define si_utime	_sifields._sigchld._utime
-#define si_stime	_sifields._sigchld._stime
-#define si_value	_sifields._rt._sigval
-#define si_int		_sifields._rt._sigval.sival_int
-#define si_ptr		_sifields._rt._sigval.sival_ptr
-#define si_addr		_sifields._sigfault._addr
-#define si_band		_sifields._sigpoll._band
-#define si_fd		_sifields._sigpoll._fd    
-#define si_tid		_sifields._timer._tid
-#define si_overrun	_sifields._timer._overrun
-
 /* asm/sigcontext.h */
 typedef union
 {
@@ -112,6 +28,7 @@ typedef union
 typedef struct
 {
 	unsigned int	fpc;
+	unsigned int	pad;
 	freg_t32	fprs[__NUM_FPRS];              
 } _s390_fp_regs32;
 
@@ -120,37 +37,6 @@ typedef struct
         __u32   mask;
         __u32	addr;
 } _psw_t32 __attribute__ ((aligned(8)));
-
-#define PSW32_MASK_PER		0x40000000UL
-#define PSW32_MASK_DAT		0x04000000UL
-#define PSW32_MASK_IO		0x02000000UL
-#define PSW32_MASK_EXT		0x01000000UL
-#define PSW32_MASK_KEY		0x00F00000UL
-#define PSW32_MASK_MCHECK	0x00040000UL
-#define PSW32_MASK_WAIT		0x00020000UL
-#define PSW32_MASK_PSTATE	0x00010000UL
-#define PSW32_MASK_ASC		0x0000C000UL
-#define PSW32_MASK_CC		0x00003000UL
-#define PSW32_MASK_PM		0x00000f00UL
-
-#define PSW32_ADDR_AMODE31	0x80000000UL
-#define PSW32_ADDR_INSN		0x7FFFFFFFUL
-
-#define PSW32_BASE_BITS		0x00080000UL
-
-#define PSW32_ASC_PRIMARY	0x00000000UL
-#define PSW32_ASC_ACCREG	0x00004000UL
-#define PSW32_ASC_SECONDARY	0x00008000UL
-#define PSW32_ASC_HOME		0x0000C000UL
-
-#define PSW32_USER_BITS	(PSW32_BASE_BITS | PSW32_MASK_DAT | PSW32_ASC_HOME | \
-			 PSW32_MASK_IO | PSW32_MASK_EXT | PSW32_MASK_MCHECK | \
-			 PSW32_MASK_PSTATE)
-
-#define PSW32_MASK_MERGE(CURRENT,NEW) \
-        (((CURRENT) & ~(PSW32_MASK_CC|PSW32_MASK_PM)) | \
-         ((NEW) & (PSW32_MASK_CC|PSW32_MASK_PM)))
-
 
 typedef struct
 {
@@ -165,6 +51,14 @@ typedef struct
 	_s390_fp_regs32     fpregs;
 } _sigregs32;
 
+typedef struct
+{
+	__u32 gprs_high[__NUM_GPRS];
+	__u64 vxrs_low[__NUM_VXRS_LOW];
+	__vector128 vxrs_high[__NUM_VXRS_HIGH];
+	__u8 __reserved[128];
+} _sigregs_ext32;
+
 #define _SIGCONTEXT_NSIG32	64
 #define _SIGCONTEXT_NSIG_BPW32	32
 #define __SIGNAL_FRAMESIZE32	96
@@ -177,44 +71,60 @@ struct sigcontext32
 };
 
 /* asm/signal.h */
-struct sigaction32 {
-	__u32		sa_handler;		/* pointer */
-	__u32		sa_flags;
-        __u32		sa_restorer;		/* pointer */
-	compat_sigset_t	sa_mask;        /* mask last for extensibility */
-};
-
-typedef struct {
-	__u32			ss_sp;		/* pointer */
-	int			ss_flags;
-	compat_size_t		ss_size;
-} stack_t32;
 
 /* asm/ucontext.h */
 struct ucontext32 {
 	__u32			uc_flags;
 	__u32			uc_link;	/* pointer */	
-	stack_t32		uc_stack;
+	compat_stack_t		uc_stack;
 	_sigregs32		uc_mcontext;
-	compat_sigset_t		uc_sigmask;	/* mask last for extensibility */
+	compat_sigset_t		uc_sigmask;
+	/* Allow for uc_sigmask growth.  Glibc uses a 1024-bit sigset_t.  */
+	unsigned char		__unused[128 - sizeof(compat_sigset_t)];
+	_sigregs_ext32		uc_mcontext_ext;
 };
 
-#define SIGEV_PAD_SIZE32 ((SIGEV_MAX_SIZE/sizeof(int)) - 3)
-struct sigevent32 {
-	union {
-		int sival_int;
-		u32 sival_ptr;
-	} sigev_value;
-	int sigev_signo;
-	int sigev_notify;
-	union {
-		int _pad[SIGEV_PAD_SIZE32];
-		int _tid;
-		struct {
-			u32 *_function;
-			u32 *_attribute;
-		} _sigev_thread;
-	} _sigev_un;
-};
+struct stat64_emu31;
+struct mmap_arg_struct_emu31;
+struct fadvise64_64_args;
+
+long compat_sys_s390_chown16(const char __user *filename, u16 user, u16 group);
+long compat_sys_s390_lchown16(const char __user *filename, u16 user, u16 group);
+long compat_sys_s390_fchown16(unsigned int fd, u16 user, u16 group);
+long compat_sys_s390_setregid16(u16 rgid, u16 egid);
+long compat_sys_s390_setgid16(u16 gid);
+long compat_sys_s390_setreuid16(u16 ruid, u16 euid);
+long compat_sys_s390_setuid16(u16 uid);
+long compat_sys_s390_setresuid16(u16 ruid, u16 euid, u16 suid);
+long compat_sys_s390_getresuid16(u16 __user *ruid, u16 __user *euid, u16 __user *suid);
+long compat_sys_s390_setresgid16(u16 rgid, u16 egid, u16 sgid);
+long compat_sys_s390_getresgid16(u16 __user *rgid, u16 __user *egid, u16 __user *sgid);
+long compat_sys_s390_setfsuid16(u16 uid);
+long compat_sys_s390_setfsgid16(u16 gid);
+long compat_sys_s390_getgroups16(int gidsetsize, u16 __user *grouplist);
+long compat_sys_s390_setgroups16(int gidsetsize, u16 __user *grouplist);
+long compat_sys_s390_getuid16(void);
+long compat_sys_s390_geteuid16(void);
+long compat_sys_s390_getgid16(void);
+long compat_sys_s390_getegid16(void);
+long compat_sys_s390_truncate64(const char __user *path, u32 high, u32 low);
+long compat_sys_s390_ftruncate64(unsigned int fd, u32 high, u32 low);
+long compat_sys_s390_pread64(unsigned int fd, char __user *ubuf, compat_size_t count, u32 high, u32 low);
+long compat_sys_s390_pwrite64(unsigned int fd, const char __user *ubuf, compat_size_t count, u32 high, u32 low);
+long compat_sys_s390_readahead(int fd, u32 high, u32 low, s32 count);
+long compat_sys_s390_stat64(const char __user *filename, struct stat64_emu31 __user *statbuf);
+long compat_sys_s390_lstat64(const char __user *filename, struct stat64_emu31 __user *statbuf);
+long compat_sys_s390_fstat64(unsigned int fd, struct stat64_emu31 __user *statbuf);
+long compat_sys_s390_fstatat64(unsigned int dfd, const char __user *filename, struct stat64_emu31 __user *statbuf, int flag);
+long compat_sys_s390_old_mmap(struct mmap_arg_struct_emu31 __user *arg);
+long compat_sys_s390_mmap2(struct mmap_arg_struct_emu31 __user *arg);
+long compat_sys_s390_read(unsigned int fd, char __user * buf, compat_size_t count);
+long compat_sys_s390_write(unsigned int fd, const char __user * buf, compat_size_t count);
+long compat_sys_s390_fadvise64(int fd, u32 high, u32 low, compat_size_t len, int advise);
+long compat_sys_s390_fadvise64_64(struct fadvise64_64_args __user *args);
+long compat_sys_s390_sync_file_range(int fd, u32 offhigh, u32 offlow, u32 nhigh, u32 nlow, unsigned int flags);
+long compat_sys_s390_fallocate(int fd, int mode, u32 offhigh, u32 offlow, u32 lenhigh, u32 lenlow);
+long compat_sys_sigreturn(void);
+long compat_sys_rt_sigreturn(void);
 
 #endif /* _ASM_S390X_S390_H */

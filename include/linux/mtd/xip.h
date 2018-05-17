@@ -11,29 +11,28 @@
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
- *
- * $Id: xip.h,v 1.2 2004/12/01 15:49:10 nico Exp $
  */
 
 #ifndef __LINUX_MTD_XIP_H__
 #define __LINUX_MTD_XIP_H__
 
-#include <linux/config.h>
 
 #ifdef CONFIG_MTD_XIP
-
-/*
- * Function that are modifying the flash state away from array mode must
- * obviously not be running from flash.  The __xipram is therefore marking
- * those functions so they get relocated to ram.
- */
-#define __xipram __attribute__ ((__section__ (".data")))
 
 /*
  * We really don't want gcc to guess anything.
  * We absolutely _need_ proper inlining.
  */
 #include <linux/compiler.h>
+
+/*
+ * Function that are modifying the flash state away from array mode must
+ * obviously not be running from flash.  The __xipram is therefore marking
+ * those functions so they get relocated to ram.
+ */
+#ifdef CONFIG_XIP_KERNEL
+#define __xipram noinline __attribute__ ((__section__ (".xiptext")))
+#endif
 
 /*
  * Each architecture has to provide the following macros.  They must access
@@ -54,26 +53,20 @@
  * 	return in usecs the elapsed timebetween now and the reference x as
  * 	returned by xip_currtime().
  *
- * 	note 1: convertion to usec can be approximated, as long as the
+ * 	note 1: conversion to usec can be approximated, as long as the
  * 		returned value is <= the real elapsed time.
  * 	note 2: this should be able to cope with a few seconds without
  * 		overflowing.
+ *
+ * xip_iprefetch()
+ *
+ *      Macro to fill instruction prefetch
+ *	e.g. a series of nops:  asm volatile (".rep 8; nop; .endr");
  */
 
-#if defined(CONFIG_ARCH_SA1100) || defined(CONFIG_ARCH_PXA)
+#include <asm/mtd-xip.h>
 
-#include <asm/hardware.h>
-#ifdef CONFIG_ARCH_PXA
-#include <asm/arch/pxa-regs.h>
-#endif
-
-#define xip_irqpending()	(ICIP & ICMR)
-
-/* we sample OSCR and convert desired delta to usec (1/4 ~= 1000000/3686400) */
-#define xip_currtime()		(OSCR)
-#define xip_elapsed_since(x)	(signed)((OSCR - (x)) / 4)
-
-#else
+#ifndef xip_irqpending
 
 #warning "missing IRQ and timer primitives for XIP MTD support"
 #warning "some of the XIP MTD support code will be disabled"
@@ -85,23 +78,24 @@
 
 #endif
 
+#ifndef xip_iprefetch
+#define xip_iprefetch()		do { } while (0)
+#endif
+
 /*
  * xip_cpu_idle() is used when waiting for a delay equal or larger than
  * the system timer tick period.  This should put the CPU into idle mode
  * to save power and to be woken up only when some interrupts are pending.
- * As above, this should not rely upon standard kernel code.
+ * This should not rely upon standard kernel code.
  */
-
-#if defined(CONFIG_CPU_XSCALE)
-#define xip_cpu_idle()  asm volatile ("mcr p14, 0, %0, c7, c0, 0" :: "r" (1))
-#else
+#ifndef xip_cpu_idle
 #define xip_cpu_idle()  do { } while (0)
 #endif
 
-#else
-
-#define __xipram
-
 #endif /* CONFIG_MTD_XIP */
+
+#ifndef __xipram
+#define __xipram
+#endif
 
 #endif /* __LINUX_MTD_XIP_H__ */

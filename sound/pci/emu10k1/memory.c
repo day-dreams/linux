@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *  Copyright (c) by Takashi Iwai <tiwai@suse.de>
  *
  *  EMU10K1 memory page allocation (PTB area)
@@ -21,9 +21,12 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/pci.h>
+#include <linux/gfp.h>
 #include <linux/time.h>
+#include <linux/mutex.h>
+#include <linux/export.h>
+
 #include <sound/core.h>
 #include <sound/emu10k1.h>
 
@@ -31,10 +34,11 @@
  * aligned pages in others
  */
 #define __set_ptb_entry(emu,page,addr) \
-	(((u32 *)(emu)->ptb_pages.area)[page] = cpu_to_le32(((addr) << 1) | (page)))
+	(((u32 *)(emu)->ptb_pages.area)[page] = cpu_to_le32(((addr) << (emu->address_mode)) | (page)))
 
 #define UNIT_PAGES		(PAGE_SIZE / EMUPAGESIZE)
-#define MAX_ALIGN_PAGES		(MAXPAGES / UNIT_PAGES)
+#define MAX_ALIGN_PAGES0		(MAXPAGES0 / UNIT_PAGES)
+#define MAX_ALIGN_PAGES1		(MAXPAGES1 / UNIT_PAGES)
 /* get aligned page from offset address */
 #define get_aligned_page(offset)	((offset) >> PAGE_SHIFT)
 /* get offset address from aligned page */
@@ -48,7 +52,7 @@
 #define set_silent_ptb(emu,page)	__set_ptb_entry(emu,page,emu->silent_page.addr)
 #else
 /* fill PTB entries -- we need to fill UNIT_PAGES entries */
-static inline void set_ptb_entry(emu10k1_t *emu, int page, dma_addr_t addr)
+static inline void set_ptb_entry(struct snd_emu10k1 *emu, int page, dma_addr_t addr)
 {
 	int i;
 	page *= UNIT_PAGES;
@@ -57,7 +61,7 @@ static inline void set_ptb_entry(emu10k1_t *emu, int page, dma_addr_t addr)
 		addr += EMUPAGESIZE;
 	}
 }
-static inline void set_silent_ptb(emu10k1_t *emu, int page)
+static inline void set_silent_ptb(struct snd_emu10k1 *emu, int page)
 {
 	int i;
 	page *= UNIT_PAGES;
@@ -70,14 +74,14 @@ static inline void set_silent_ptb(emu10k1_t *emu, int page)
 
 /*
  */
-static int synth_alloc_pages(emu10k1_t *hw, emu10k1_memblk_t *blk);
-static int synth_free_pages(emu10k1_t *hw, emu10k1_memblk_t *blk);
+static int synth_alloc_pages(struct snd_emu10k1 *hw, struct snd_emu10k1_memblk *blk);
+static int synth_free_pages(struct snd_emu10k1 *hw, struct snd_emu10k1_memblk *blk);
 
-#define get_emu10k1_memblk(l,member)	list_entry(l, emu10k1_memblk_t, member)
+#define get_emu10k1_memblk(l,member)	list_entry(l, struct snd_emu10k1_memblk, member)
 
 
 /* initialize emu10k1 part */
-static void emu10k1_memblk_init(emu10k1_memblk_t *blk)
+static void emu10k1_memblk_init(struct snd_emu10k1_memblk *blk)
 {
 	blk->mapped_page = -1;
 	INIT_LIST_HEAD(&blk->mapped_link);
@@ -96,7 +100,7 @@ static void emu10k1_memblk_init(emu10k1_memblk_t *blk)
  * in nextp
  * if not found, return a negative error code.
  */
-static int search_empty_map_area(emu10k1_t *emu, int npages, struct list_head **nextp)
+static int search_empty_map_area(struct snd_emu10k1 *emu, int npages, struct list_head **nextp)
 {
 	int page = 0, found_page = -ENOMEM;
 	int max_size = npages;
@@ -105,8 +109,9 @@ static int search_empty_map_area(emu10k1_t *emu, int npages, struct list_head **
 	struct list_head *pos;
 
 	list_for_each (pos, &emu->mapped_link_head) {
-		emu10k1_memblk_t *blk = get_emu10k1_memblk(pos, mapped_link);
-		snd_assert(blk->mapped_page >= 0, continue);
+		struct snd_emu10k1_memblk *blk = get_emu10k1_memblk(pos, mapped_link);
+		if (blk->mapped_page < 0)
+			continue;
 		size = blk->mapped_page - page;
 		if (size == npages) {
 			*nextp = pos;
@@ -120,7 +125,7 @@ static int search_empty_map_area(emu10k1_t *emu, int npages, struct list_head **
 		}
 		page = blk->mapped_page + blk->pages;
 	}
-	size = MAX_ALIGN_PAGES - page;
+	size = (emu->address_mode ? MAX_ALIGN_PAGES1 : MAX_ALIGN_PAGES0) - page;
 	if (size >= max_size) {
 		*nextp = pos;
 		return page;
@@ -134,7 +139,7 @@ static int search_empty_map_area(emu10k1_t *emu, int npages, struct list_head **
  *
  * call with memblk_lock held
  */
-static int map_memblk(emu10k1_t *emu, emu10k1_memblk_t *blk)
+static int map_memblk(struct snd_emu10k1 *emu, struct snd_emu10k1_memblk *blk)
 {
 	int page, pg;
 	struct list_head *next;
@@ -161,11 +166,11 @@ static int map_memblk(emu10k1_t *emu, emu10k1_memblk_t *blk)
  *
  * call with memblk_lock held
  */
-static int unmap_memblk(emu10k1_t *emu, emu10k1_memblk_t *blk)
+static int unmap_memblk(struct snd_emu10k1 *emu, struct snd_emu10k1_memblk *blk)
 {
 	int start_page, end_page, mpage, pg;
 	struct list_head *p;
-	emu10k1_memblk_t *q;
+	struct snd_emu10k1_memblk *q;
 
 	/* calculate the expected size of empty region */
 	if ((p = blk->mapped_link.prev) != &emu->mapped_link_head) {
@@ -177,7 +182,7 @@ static int unmap_memblk(emu10k1_t *emu, emu10k1_memblk_t *blk)
 		q = get_emu10k1_memblk(p, mapped_link);
 		end_page = q->mapped_page;
 	} else
-		end_page = MAX_ALIGN_PAGES;
+		end_page = (emu->address_mode ? MAX_ALIGN_PAGES1 : MAX_ALIGN_PAGES0);
 
 	/* remove links */
 	list_del(&blk->mapped_link);
@@ -197,11 +202,11 @@ static int unmap_memblk(emu10k1_t *emu, emu10k1_memblk_t *blk)
  *
  * unlike synth_alloc the memory block is aligned to the page start
  */
-static emu10k1_memblk_t *
-search_empty(emu10k1_t *emu, int size)
+static struct snd_emu10k1_memblk *
+search_empty(struct snd_emu10k1 *emu, int size)
 {
 	struct list_head *p;
-	emu10k1_memblk_t *blk;
+	struct snd_emu10k1_memblk *blk;
 	int page, psize;
 
 	psize = get_aligned_page(size + PAGE_SIZE -1);
@@ -217,7 +222,7 @@ search_empty(emu10k1_t *emu, int size)
 
 __found_pages:
 	/* create a new memory block */
-	blk = (emu10k1_memblk_t *)__snd_util_memblk_new(emu->memhdr, psize << PAGE_SHIFT, p->prev);
+	blk = (struct snd_emu10k1_memblk *)__snd_util_memblk_new(emu->memhdr, psize << PAGE_SHIFT, p->prev);
 	if (blk == NULL)
 		return NULL;
 	blk->mem.offset = aligned_page_offset(page); /* set aligned offset */
@@ -229,14 +234,16 @@ __found_pages:
 /*
  * check if the given pointer is valid for pages
  */
-static int is_valid_page(emu10k1_t *emu, dma_addr_t addr)
+static int is_valid_page(struct snd_emu10k1 *emu, dma_addr_t addr)
 {
 	if (addr & ~emu->dma_mask) {
-		snd_printk("max memory size is 0x%lx (addr = 0x%lx)!!\n", emu->dma_mask, (unsigned long)addr);
+		dev_err(emu->card->dev,
+			"max memory size is 0x%lx (addr = 0x%lx)!!\n",
+			emu->dma_mask, (unsigned long)addr);
 		return 0;
 	}
 	if (addr & (EMUPAGESIZE-1)) {
-		snd_printk("page is not aligned\n");
+		dev_err(emu->card->dev, "page is not aligned\n");
 		return 0;
 	}
 	return 1;
@@ -245,22 +252,22 @@ static int is_valid_page(emu10k1_t *emu, dma_addr_t addr)
 /*
  * map the given memory block on PTB.
  * if the block is already mapped, update the link order.
- * if no empty pages are found, tries to release unsed memory blocks
+ * if no empty pages are found, tries to release unused memory blocks
  * and retry the mapping.
  */
-int snd_emu10k1_memblk_map(emu10k1_t *emu, emu10k1_memblk_t *blk)
+int snd_emu10k1_memblk_map(struct snd_emu10k1 *emu, struct snd_emu10k1_memblk *blk)
 {
 	int err;
 	int size;
 	struct list_head *p, *nextp;
-	emu10k1_memblk_t *deleted;
+	struct snd_emu10k1_memblk *deleted;
 	unsigned long flags;
 
 	spin_lock_irqsave(&emu->memblk_lock, flags);
 	if (blk->mapped_page >= 0) {
 		/* update order link */
-		list_del(&blk->mapped_order_link);
-		list_add_tail(&blk->mapped_order_link, &emu->mapped_order_link_head);
+		list_move_tail(&blk->mapped_order_link,
+			       &emu->mapped_order_link_head);
 		spin_unlock_irqrestore(&emu->memblk_lock, flags);
 		return 0;
 	}
@@ -285,27 +292,34 @@ int snd_emu10k1_memblk_map(emu10k1_t *emu, emu10k1_memblk_t *blk)
 	return err;
 }
 
+EXPORT_SYMBOL(snd_emu10k1_memblk_map);
+
 /*
  * page allocation for DMA
  */
-snd_util_memblk_t *
-snd_emu10k1_alloc_pages(emu10k1_t *emu, snd_pcm_substream_t *substream)
+struct snd_util_memblk *
+snd_emu10k1_alloc_pages(struct snd_emu10k1 *emu, struct snd_pcm_substream *substream)
 {
-	snd_pcm_runtime_t *runtime = substream->runtime;
-	struct snd_sg_buf *sgbuf = snd_pcm_substream_sgbuf(substream);
-	snd_util_memhdr_t *hdr;
-	emu10k1_memblk_t *blk;
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct snd_util_memhdr *hdr;
+	struct snd_emu10k1_memblk *blk;
 	int page, err, idx;
 
-	snd_assert(emu, return NULL);
-	snd_assert(runtime->dma_bytes > 0 && runtime->dma_bytes < MAXPAGES * EMUPAGESIZE, return NULL);
+	if (snd_BUG_ON(!emu))
+		return NULL;
+	if (snd_BUG_ON(runtime->dma_bytes <= 0 ||
+		       runtime->dma_bytes >= (emu->address_mode ? MAXPAGES1 : MAXPAGES0) * EMUPAGESIZE))
+		return NULL;
 	hdr = emu->memhdr;
-	snd_assert(hdr, return NULL);
+	if (snd_BUG_ON(!hdr))
+		return NULL;
 
-	down(&hdr->block_mutex);
-	blk = search_empty(emu, runtime->dma_bytes);
+	idx = runtime->period_size >= runtime->buffer_size ?
+					(emu->delay_pcm_irq * 2) : 0;
+	mutex_lock(&hdr->block_mutex);
+	blk = search_empty(emu, runtime->dma_bytes + idx);
 	if (blk == NULL) {
-		up(&hdr->block_mutex);
+		mutex_unlock(&hdr->block_mutex);
 		return NULL;
 	}
 	/* fill buffer addresses but pointers are not stored so that
@@ -313,19 +327,16 @@ snd_emu10k1_alloc_pages(emu10k1_t *emu, snd_pcm_substream_t *substream)
 	 */
 	idx = 0;
 	for (page = blk->first_page; page <= blk->last_page; page++, idx++) {
+		unsigned long ofs = idx << PAGE_SHIFT;
 		dma_addr_t addr;
-#ifdef CONFIG_SND_DEBUG
-		if (idx >= sgbuf->pages) {
-			printk(KERN_ERR "emu: pages overflow! (%d-%d) for %d\n",
-			       blk->first_page, blk->last_page, sgbuf->pages);
-			up(&hdr->block_mutex);
-			return NULL;
-		}
-#endif
-		addr = sgbuf->table[idx].addr;
+		if (ofs >= runtime->dma_bytes)
+			addr = emu->silent_page.addr;
+		else
+			addr = snd_pcm_sgbuf_get_addr(substream, ofs);
 		if (! is_valid_page(emu, addr)) {
-			printk(KERN_ERR "emu: failure page = %d\n", idx);
-			up(&hdr->block_mutex);
+			dev_err(emu->card->dev,
+				"emu: failure page = %d\n", idx);
+			mutex_unlock(&hdr->block_mutex);
 			return NULL;
 		}
 		emu->page_addr_table[page] = addr;
@@ -336,21 +347,22 @@ snd_emu10k1_alloc_pages(emu10k1_t *emu, snd_pcm_substream_t *substream)
 	blk->map_locked = 1; /* do not unmap this block! */
 	err = snd_emu10k1_memblk_map(emu, blk);
 	if (err < 0) {
-		__snd_util_mem_free(hdr, (snd_util_memblk_t *)blk);
-		up(&hdr->block_mutex);
+		__snd_util_mem_free(hdr, (struct snd_util_memblk *)blk);
+		mutex_unlock(&hdr->block_mutex);
 		return NULL;
 	}
-	up(&hdr->block_mutex);
-	return (snd_util_memblk_t *)blk;
+	mutex_unlock(&hdr->block_mutex);
+	return (struct snd_util_memblk *)blk;
 }
 
 
 /*
  * release DMA buffer from page table
  */
-int snd_emu10k1_free_pages(emu10k1_t *emu, snd_util_memblk_t *blk)
+int snd_emu10k1_free_pages(struct snd_emu10k1 *emu, struct snd_util_memblk *blk)
 {
-	snd_assert(emu && blk, return -EINVAL);
+	if (snd_BUG_ON(!emu || !blk))
+		return -EINVAL;
 	return snd_emu10k1_synth_free(emu, blk);
 }
 
@@ -363,56 +375,60 @@ int snd_emu10k1_free_pages(emu10k1_t *emu, snd_util_memblk_t *blk)
 /*
  * allocate a synth sample area
  */
-snd_util_memblk_t *
-snd_emu10k1_synth_alloc(emu10k1_t *hw, unsigned int size)
+struct snd_util_memblk *
+snd_emu10k1_synth_alloc(struct snd_emu10k1 *hw, unsigned int size)
 {
-	emu10k1_memblk_t *blk;
-	snd_util_memhdr_t *hdr = hw->memhdr; 
+	struct snd_emu10k1_memblk *blk;
+	struct snd_util_memhdr *hdr = hw->memhdr; 
 
-	down(&hdr->block_mutex);
-	blk = (emu10k1_memblk_t *)__snd_util_mem_alloc(hdr, size);
+	mutex_lock(&hdr->block_mutex);
+	blk = (struct snd_emu10k1_memblk *)__snd_util_mem_alloc(hdr, size);
 	if (blk == NULL) {
-		up(&hdr->block_mutex);
+		mutex_unlock(&hdr->block_mutex);
 		return NULL;
 	}
 	if (synth_alloc_pages(hw, blk)) {
-		__snd_util_mem_free(hdr, (snd_util_memblk_t *)blk);
-		up(&hdr->block_mutex);
+		__snd_util_mem_free(hdr, (struct snd_util_memblk *)blk);
+		mutex_unlock(&hdr->block_mutex);
 		return NULL;
 	}
 	snd_emu10k1_memblk_map(hw, blk);
-	up(&hdr->block_mutex);
-	return (snd_util_memblk_t *)blk;
+	mutex_unlock(&hdr->block_mutex);
+	return (struct snd_util_memblk *)blk;
 }
 
+EXPORT_SYMBOL(snd_emu10k1_synth_alloc);
 
 /*
  * free a synth sample area
  */
 int
-snd_emu10k1_synth_free(emu10k1_t *emu, snd_util_memblk_t *memblk)
+snd_emu10k1_synth_free(struct snd_emu10k1 *emu, struct snd_util_memblk *memblk)
 {
-	snd_util_memhdr_t *hdr = emu->memhdr; 
-	emu10k1_memblk_t *blk = (emu10k1_memblk_t *)memblk;
+	struct snd_util_memhdr *hdr = emu->memhdr; 
+	struct snd_emu10k1_memblk *blk = (struct snd_emu10k1_memblk *)memblk;
 	unsigned long flags;
 
-	down(&hdr->block_mutex);
+	mutex_lock(&hdr->block_mutex);
 	spin_lock_irqsave(&emu->memblk_lock, flags);
 	if (blk->mapped_page >= 0)
 		unmap_memblk(emu, blk);
 	spin_unlock_irqrestore(&emu->memblk_lock, flags);
 	synth_free_pages(emu, blk);
 	 __snd_util_mem_free(hdr, memblk);
-	up(&hdr->block_mutex);
+	mutex_unlock(&hdr->block_mutex);
 	return 0;
 }
 
+EXPORT_SYMBOL(snd_emu10k1_synth_free);
 
 /* check new allocation range */
-static void get_single_page_range(snd_util_memhdr_t *hdr, emu10k1_memblk_t *blk, int *first_page_ret, int *last_page_ret)
+static void get_single_page_range(struct snd_util_memhdr *hdr,
+				  struct snd_emu10k1_memblk *blk,
+				  int *first_page_ret, int *last_page_ret)
 {
 	struct list_head *p;
-	emu10k1_memblk_t *q;
+	struct snd_emu10k1_memblk *q;
 	int first_page, last_page;
 	first_page = blk->first_page;
 	if ((p = blk->mem.list.prev) != &hdr->block) {
@@ -430,78 +446,73 @@ static void get_single_page_range(snd_util_memhdr_t *hdr, emu10k1_memblk_t *blk,
 	*last_page_ret = last_page;
 }
 
+/* release allocated pages */
+static void __synth_free_pages(struct snd_emu10k1 *emu, int first_page,
+			       int last_page)
+{
+	int page;
+
+	for (page = first_page; page <= last_page; page++) {
+		free_page((unsigned long)emu->page_ptr_table[page]);
+		emu->page_addr_table[page] = 0;
+		emu->page_ptr_table[page] = NULL;
+	}
+}
+
 /*
  * allocate kernel pages
  */
-static int synth_alloc_pages(emu10k1_t *emu, emu10k1_memblk_t *blk)
+static int synth_alloc_pages(struct snd_emu10k1 *emu, struct snd_emu10k1_memblk *blk)
 {
 	int page, first_page, last_page;
-	struct snd_dma_buffer dmab;
 
 	emu10k1_memblk_init(blk);
 	get_single_page_range(emu->memhdr, blk, &first_page, &last_page);
 	/* allocate kernel pages */
 	for (page = first_page; page <= last_page; page++) {
-		if (snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, snd_dma_pci_data(emu->pci),
-					PAGE_SIZE, &dmab) < 0)
-			goto __fail;
-		if (! is_valid_page(emu, dmab.addr)) {
-			snd_dma_free_pages(&dmab);
-			goto __fail;
+		/* first try to allocate from <4GB zone */
+		struct page *p = alloc_page(GFP_KERNEL | GFP_DMA32 |
+					    __GFP_NOWARN);
+		if (!p || (page_to_pfn(p) & ~(emu->dma_mask >> PAGE_SHIFT))) {
+			if (p)
+				__free_page(p);
+			/* try to allocate from <16MB zone */
+			p = alloc_page(GFP_ATOMIC | GFP_DMA |
+				       __GFP_NORETRY | /* no OOM-killer */
+				       __GFP_NOWARN);
 		}
-		emu->page_addr_table[page] = dmab.addr;
-		emu->page_ptr_table[page] = dmab.area;
+		if (!p) {
+			__synth_free_pages(emu, first_page, page - 1);
+			return -ENOMEM;
+		}
+		emu->page_addr_table[page] = page_to_phys(p);
+		emu->page_ptr_table[page] = page_address(p);
 	}
 	return 0;
-
-__fail:
-	/* release allocated pages */
-	last_page = page - 1;
-	for (page = first_page; page <= last_page; page++) {
-		dmab.area = emu->page_ptr_table[page];
-		dmab.addr = emu->page_addr_table[page];
-		dmab.bytes = PAGE_SIZE;
-		snd_dma_free_pages(&dmab);
-		emu->page_addr_table[page] = 0;
-		emu->page_ptr_table[page] = NULL;
-	}
-
-	return -ENOMEM;
 }
 
 /*
  * free pages
  */
-static int synth_free_pages(emu10k1_t *emu, emu10k1_memblk_t *blk)
+static int synth_free_pages(struct snd_emu10k1 *emu, struct snd_emu10k1_memblk *blk)
 {
-	int page, first_page, last_page;
-	struct snd_dma_buffer dmab;
+	int first_page, last_page;
 
 	get_single_page_range(emu->memhdr, blk, &first_page, &last_page);
-	dmab.dev.type = SNDRV_DMA_TYPE_DEV;
-	dmab.dev.dev = snd_dma_pci_data(emu->pci);
-	for (page = first_page; page <= last_page; page++) {
-		if (emu->page_ptr_table[page] == NULL)
-			continue;
-		dmab.area = emu->page_ptr_table[page];
-		dmab.addr = emu->page_addr_table[page];
-		dmab.bytes = PAGE_SIZE;
-		snd_dma_free_pages(&dmab);
-		emu->page_addr_table[page] = 0;
-		emu->page_ptr_table[page] = NULL;
-	}
-
+	__synth_free_pages(emu, first_page, last_page);
 	return 0;
 }
 
 /* calculate buffer pointer from offset address */
-inline static void *offset_ptr(emu10k1_t *emu, int page, int offset)
+static inline void *offset_ptr(struct snd_emu10k1 *emu, int page, int offset)
 {
 	char *ptr;
-	snd_assert(page >= 0 && page < emu->max_cache_pages, return NULL);
+	if (snd_BUG_ON(page < 0 || page >= emu->max_cache_pages))
+		return NULL;
 	ptr = emu->page_ptr_table[page];
 	if (! ptr) {
-		printk("emu10k1: access to NULL ptr: page = %d\n", page);
+		dev_err(emu->card->dev,
+			"access to NULL ptr: page = %d\n", page);
 		return NULL;
 	}
 	ptr += offset & (PAGE_SIZE - 1);
@@ -511,11 +522,12 @@ inline static void *offset_ptr(emu10k1_t *emu, int page, int offset)
 /*
  * bzero(blk + offset, size)
  */
-int snd_emu10k1_synth_bzero(emu10k1_t *emu, snd_util_memblk_t *blk, int offset, int size)
+int snd_emu10k1_synth_bzero(struct snd_emu10k1 *emu, struct snd_util_memblk *blk,
+			    int offset, int size)
 {
 	int page, nextofs, end_offset, temp, temp1;
 	void *ptr;
-	emu10k1_memblk_t *p = (emu10k1_memblk_t *)blk;
+	struct snd_emu10k1_memblk *p = (struct snd_emu10k1_memblk *)blk;
 
 	offset += blk->offset & (PAGE_SIZE - 1);
 	end_offset = offset + size;
@@ -535,14 +547,17 @@ int snd_emu10k1_synth_bzero(emu10k1_t *emu, snd_util_memblk_t *blk, int offset, 
 	return 0;
 }
 
+EXPORT_SYMBOL(snd_emu10k1_synth_bzero);
+
 /*
  * copy_from_user(blk + offset, data, size)
  */
-int snd_emu10k1_synth_copy_from_user(emu10k1_t *emu, snd_util_memblk_t *blk, int offset, const char __user *data, int size)
+int snd_emu10k1_synth_copy_from_user(struct snd_emu10k1 *emu, struct snd_util_memblk *blk,
+				     int offset, const char __user *data, int size)
 {
 	int page, nextofs, end_offset, temp, temp1;
 	void *ptr;
-	emu10k1_memblk_t *p = (emu10k1_memblk_t *)blk;
+	struct snd_emu10k1_memblk *p = (struct snd_emu10k1_memblk *)blk;
 
 	offset += blk->offset & (PAGE_SIZE - 1);
 	end_offset = offset + size;
@@ -562,3 +577,5 @@ int snd_emu10k1_synth_copy_from_user(emu10k1_t *emu, snd_util_memblk_t *blk, int
 	} while (offset < end_offset);
 	return 0;
 }
+
+EXPORT_SYMBOL(snd_emu10k1_synth_copy_from_user);

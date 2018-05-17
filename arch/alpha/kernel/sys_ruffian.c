@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/arch/alpha/kernel/sys_ruffian.c
  *
@@ -14,10 +15,10 @@
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
+#include <linux/timex.h>
 #include <linux/init.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
@@ -25,7 +26,6 @@
 #include <asm/pgtable.h>
 #include <asm/core_cia.h>
 #include <asm/tlbflush.h>
-#include <asm/8253pit.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -65,7 +65,7 @@ ruffian_init_irq(void)
 	common_init_isa_dma();
 }
 
-#define RUFFIAN_LATCH	((PIT_TICK_RATE + HZ / 2) / HZ)
+#define RUFFIAN_LATCH	DIV_ROUND_CLOSEST(PIT_TICK_RATE, HZ)
 
 static void __init
 ruffian_init_rtc(void)
@@ -118,10 +118,10 @@ ruffian_kill_arch (int mode)
  *
  */
 
-static int __init
-ruffian_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static int
+ruffian_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
-        static char irq_tab[11][5] __initdata = {
+        static char irq_tab[11][5] = {
 	      /*INT  INTA INTB INTC INTD */
 		{-1,  -1,  -1,  -1,  -1},  /* IdSel 13,  21052	     */
 		{-1,  -1,  -1,  -1,  -1},  /* IdSel 14,  SIO	     */
@@ -140,7 +140,7 @@ ruffian_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 	return COMMON_TABLE_LOOKUP;
 }
 
-static u8 __init
+static u8
 ruffian_swizzle(struct pci_dev *dev, u8 *pinp)
 {
 	int slot, pin = *pinp;
@@ -160,7 +160,7 @@ ruffian_swizzle(struct pci_dev *dev, u8 *pinp)
 				slot = PCI_SLOT(dev->devfn) + 10;
 				break;
 			}
-			pin = bridge_swizzle(pin, PCI_SLOT(dev->devfn));
+			pin = pci_swizzle_interrupt_pin(dev, pin);
 
 			/* Move up the chain of bridges.  */
 			dev = dev->bus->self;
@@ -182,16 +182,16 @@ static unsigned long __init
 ruffian_get_bank_size(unsigned long offset)
 {
 	unsigned long bank_addr, bank, ret = 0;
-  
+
 	/* Valid offsets are: 0x800, 0x840 and 0x880
 	   since Ruffian only uses three banks.  */
 	bank_addr = (unsigned long)PYXIS_MCR + offset;
 	bank = *(vulp)bank_addr;
-    
+
 	/* Check BANK_ENABLE */
 	if (bank & 0x01) {
 		static unsigned long size[] __initdata = {
-			0x40000000UL, /* 0x00,   1G */ 
+			0x40000000UL, /* 0x00,   1G */
 			0x20000000UL, /* 0x02, 512M */
 			0x10000000UL, /* 0x04, 256M */
 			0x08000000UL, /* 0x06, 128M */
@@ -203,7 +203,7 @@ ruffian_get_bank_size(unsigned long offset)
 		};
 
 		bank = (bank & 0x1e) >> 1;
-		if (bank < sizeof(size)/sizeof(*size))
+		if (bank < ARRAY_SIZE(size))
 			ret = size[bank];
 	}
 

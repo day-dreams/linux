@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/ufs/file.c
  *
@@ -23,33 +24,22 @@
  *  ext2 fs regular file handling primitives
  */
 
-#include <asm/uaccess.h>
-#include <asm/system.h>
-
-#include <linux/errno.h>
 #include <linux/fs.h>
-#include <linux/ufs_fs.h>
-#include <linux/fcntl.h>
-#include <linux/time.h>
-#include <linux/stat.h>
-#include <linux/mm.h>
-#include <linux/pagemap.h>
-#include <linux/smp_lock.h>
+
+#include "ufs_fs.h"
+#include "ufs.h"
 
 /*
  * We have mostly NULL's here: the current defaults are ok for
  * the ufs filesystem.
  */
  
-struct file_operations ufs_file_operations = {
+const struct file_operations ufs_file_operations = {
 	.llseek		= generic_file_llseek,
-	.read		= generic_file_read,
-	.write		= generic_file_write,
+	.read_iter	= generic_file_read_iter,
+	.write_iter	= generic_file_write_iter,
 	.mmap		= generic_file_mmap,
 	.open           = generic_file_open,
-	.sendfile	= generic_file_sendfile,
-};
-
-struct inode_operations ufs_file_inode_operations = {
-	.truncate	= ufs_truncate,
+	.fsync		= generic_file_fsync,
+	.splice_read	= generic_file_splice_read,
 };

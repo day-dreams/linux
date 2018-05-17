@@ -9,9 +9,10 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
+#include <linux/init.h>
 #include <linux/threads.h>
 #include <linux/linkage.h>
+#include <asm/thread_info.h>
 #include <asm/ptrace.h>
 #include <asm/page.h>
 #include <asm/spr-regs.h>
@@ -27,7 +28,7 @@
 #   command line string
 #
 ###############################################################################
-	.section	.text.head,"ax"
+	__HEAD
 	.balign		4
 
 	.globl		_boot, __head_reference
@@ -478,11 +479,6 @@ __head_mmu_enabled:
 
 	LEDS		0x000c
 
-	# initialise the processor and the peripherals
-	#call		SYMBOL_NAME(processor_init)
-	#call		SYMBOL_NAME(unit_init)
-	#LEDS		0x0aff
-
 	sethi.p		#0xe5e5,gr3
 	setlo		#0xe5e5,gr3
 	or.p		gr3,gr0,gr4
@@ -513,6 +509,9 @@ __head_mmu_enabled:
 	movgs		gr0,ccr
 	movgs		gr0,cccr
 
+	# initialise the virtual interrupt handling
+	subcc		gr0,gr0,gr0,icc2		/* set Z, clear C */
+
 #ifdef CONFIG_MMU
 	movgs		gr3,scr2
 	movgs		gr3,scr3
@@ -538,7 +537,7 @@ __head_end:
 	.size		_boot, .-_boot
 
 	# provide a point for GDB to place a break
-	.section	.text.start,"ax"
+	.section	.text..start,"ax"
 	.globl		_start
 	.balign		4
 _start:

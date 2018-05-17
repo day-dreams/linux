@@ -97,6 +97,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mca.h>
+#include <linux/slab.h>
 #include <asm/io.h>
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_device.h>
@@ -106,14 +107,14 @@
 #include "53c700.h"
 #include "NCR_D700.h"
 
-char *NCR_D700;			/* command line from insmod */
+static char *NCR_D700;		/* command line from insmod */
 
 MODULE_AUTHOR("James Bottomley");
 MODULE_DESCRIPTION("NCR Dual700 SCSI Driver");
 MODULE_LICENSE("GPL");
 module_param(NCR_D700, charp, 0);
 
-static __u8 __initdata id_array[2*(MCA_MAX_SLOT_NR + 1)] =
+static __u8 id_array[2*(MCA_MAX_SLOT_NR + 1)] =
 	{ [0 ... 2*(MCA_MAX_SLOT_NR + 1)-1] = 7 };
 
 #ifdef MODULE
@@ -168,23 +169,24 @@ static struct scsi_host_template NCR_D700_driver_template = {
 struct NCR_D700_private {
 	struct device		*dev;
 	struct Scsi_Host	*hosts[2];
+	char			name[30];
+	char			pad;
 };
 
-static int 
-NCR_D700_probe_one(struct NCR_D700_private *p, int siop,
-		int irq, int slot, u32 region, int differential)
+static int
+NCR_D700_probe_one(struct NCR_D700_private *p, int siop, int irq,
+		   int slot, u32 region, int differential)
 {
 	struct NCR_700_Host_Parameters *hostdata;
 	struct Scsi_Host *host;
 	int ret;
 
-	hostdata = kmalloc(sizeof(*hostdata), GFP_KERNEL);
+	hostdata = kzalloc(sizeof(*hostdata), GFP_KERNEL);
 	if (!hostdata) {
 		printk(KERN_ERR "NCR D700: SIOP%d: Failed to allocate host"
 		       "data, detatching\n", siop);
 		return -ENOMEM;
 	}
-	memset(hostdata, 0, sizeof(*hostdata));
 
 	if (!request_region(region, 64, "NCR_D700")) {
 		printk(KERN_ERR "NCR D700: Failed to reserve IO region 0x%x\n",
@@ -194,33 +196,47 @@ NCR_D700_probe_one(struct NCR_D700_private *p, int siop,
 	}
 		
 	/* Fill in the three required pieces of hostdata */
-	hostdata->base = region;
+	hostdata->base = ioport_map(region, 64);
 	hostdata->differential = (((1<<siop) & differential) != 0);
 	hostdata->clock = NCR_D700_CLOCK_MHZ;
-
-	NCR_700_set_io_mapped(hostdata);
+	hostdata->burst_length = 8;
 
 	/* and register the siop */
-	host = NCR_700_detect(&NCR_D700_driver_template, hostdata,
-			      p->dev, irq,
-			      /* FIXME: read this from SUS */
-			      id_array[slot * 2 + siop]);
+	host = NCR_700_detect(&NCR_D700_driver_template, hostdata, p->dev);
 	if (!host) {
 		ret = -ENOMEM;
 		goto detect_failed;
 	}
 
+	p->hosts[siop] = host;
+	/* FIXME: read this from SUS */
+	host->this_id = id_array[slot * 2 + siop];
+	host->irq = irq;
+	host->base = region;
 	scsi_scan_host(host);
 
-	p->hosts[siop] = host;
 	return 0;
 
  detect_failed:
-	release_region(host->base, 64);
+	release_region(region, 64);
  region_failed:
 	kfree(hostdata);
 
 	return ret;
+}
+
+static irqreturn_t
+NCR_D700_intr(int irq, void *data)
+{
+	struct NCR_D700_private *p = (struct NCR_D700_private *)data;
+	int i, found = 0;
+
+	for (i = 0; i < 2; i++)
+		if (p->hosts[i] &&
+		    NCR_700_intr(irq, p->hosts[i]) == IRQ_HANDLED)
+			found++;
+
+	return found ? IRQ_HANDLED : IRQ_NONE;
 }
 
 /* Detect a D700 card.  Note, because of the setup --- the chips are
@@ -298,11 +314,17 @@ NCR_D700_probe(struct device *dev)
 		break;
 	}
 
-	p = kmalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc(sizeof(*p), GFP_KERNEL);
 	if (!p)
 		return -ENOMEM;
-	p->dev = dev;
 
+	p->dev = dev;
+	snprintf(p->name, sizeof(p->name), "D700(%s)", dev_name(dev));
+	if (request_irq(irq, NCR_D700_intr, IRQF_SHARED, p->name, p)) {
+		printk(KERN_ERR "D700: request_irq failed\n");
+		kfree(p);
+		return -EBUSY;
+	}
 	/* plumb in both 700 chips */
 	for (i = 0; i < 2; i++) {
 		int err;
@@ -352,7 +374,7 @@ NCR_D700_remove(struct device *dev)
 
 static short NCR_D700_id_table[] = { NCR_D700_MCA_ID, 0 };
 
-struct mca_driver NCR_D700_driver = {
+static struct mca_driver NCR_D700_driver = {
 	.id_table = NCR_D700_id_table,
 	.driver = {
 		.name		= "NCR_D700",

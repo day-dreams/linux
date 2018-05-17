@@ -42,9 +42,22 @@
 #ifndef _LINUX_INET_H
 #define _LINUX_INET_H
 
-#ifdef __KERNEL__
 #include <linux/types.h>
+#include <net/net_namespace.h>
+#include <linux/socket.h>
 
-extern __u32 in_aton(const char *str);
-#endif
+/*
+ * These mimic similar macros defined in user-space for inet_ntop(3).
+ * See /usr/include/netinet/in.h .
+ */
+#define INET_ADDRSTRLEN		(16)
+#define INET6_ADDRSTRLEN	(48)
+
+extern __be32 in_aton(const char *str);
+extern int in4_pton(const char *src, int srclen, u8 *dst, int delim, const char **end);
+extern int in6_pton(const char *src, int srclen, u8 *dst, int delim, const char **end);
+
+extern int inet_pton_with_scope(struct net *net, unsigned short af,
+		const char *src, const char *port, struct sockaddr_storage *addr);
+
 #endif	/* _LINUX_INET_H */

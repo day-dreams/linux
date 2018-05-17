@@ -4,16 +4,16 @@
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or 
+ *   the Free Software Foundation; either version 2 of the License, or
  *   (at your option) any later version.
- * 
+ *
  *   This program is distributed in the hope that it will be useful,
  *   but WITHOUT ANY WARRANTY;  without even the implied warranty of
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
  *   the GNU General Public License for more details.
  *
  *   You should have received a copy of the GNU General Public License
- *   along with this program;  if not, write to the Free Software 
+ *   along with this program;  if not, write to the Free Software
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 #ifndef	_H_JFS_LOGMGR
@@ -35,19 +35,19 @@
 /*
  *	log logical volume
  *
- * a log is used to make the commit operation on journalled 
+ * a log is used to make the commit operation on journalled
  * files within the same logical volume group atomic.
  * a log is implemented with a logical volume.
- * there is one log per logical volume group. 
+ * there is one log per logical volume group.
  *
  * block 0 of the log logical volume is not used (ipl etc).
  * block 1 contains a log "superblock" and is used by logFormat(),
- * lmLogInit(), lmLogShutdown(), and logRedo() to record status 
- * of the log but is not otherwise used during normal processing. 
+ * lmLogInit(), lmLogShutdown(), and logRedo() to record status
+ * of the log but is not otherwise used during normal processing.
  * blocks 2 - (N-1) are used to contain log records.
  *
- * when a volume group is varied-on-line, logRedo() must have 
- * been executed before the file systems (logical volumes) in 
+ * when a volume group is varied-on-line, logRedo() must have
+ * been executed before the file systems (logical volumes) in
  * the volume group can be mounted.
  */
 /*
@@ -97,26 +97,26 @@ struct logsuper {
  *	log logical page
  *
  * (this comment should be rewritten !)
- * the header and trailer structures (h,t) will normally have 
+ * the header and trailer structures (h,t) will normally have
  * the same page and eor value.
- * An exception to this occurs when a complete page write is not 
+ * An exception to this occurs when a complete page write is not
  * accomplished on a power failure. Since the hardware may "split write"
- * sectors in the page, any out of order sequence may occur during powerfail 
+ * sectors in the page, any out of order sequence may occur during powerfail
  * and needs to be recognized during log replay.  The xor value is
  * an "exclusive or" of all log words in the page up to eor.  This
  * 32 bit eor is stored with the top 16 bits in the header and the
  * bottom 16 bits in the trailer.  logredo can easily recognize pages
- * that were not completed by reconstructing this eor and checking 
+ * that were not completed by reconstructing this eor and checking
  * the log page.
  *
- * Previous versions of the operating system did not allow split 
- * writes and detected partially written records in logredo by 
- * ordering the updates to the header, trailer, and the move of data 
- * into the logdata area.  The order: (1) data is moved (2) header 
- * is updated (3) trailer is updated.  In logredo, when the header 
- * differed from the trailer, the header and trailer were reconciled 
- * as follows: if h.page != t.page they were set to the smaller of 
- * the two and h.eor and t.eor set to 8 (i.e. empty page). if (only) 
+ * Previous versions of the operating system did not allow split
+ * writes and detected partially written records in logredo by
+ * ordering the updates to the header, trailer, and the move of data
+ * into the logdata area.  The order: (1) data is moved (2) header
+ * is updated (3) trailer is updated.  In logredo, when the header
+ * differed from the trailer, the header and trailer were reconciled
+ * as follows: if h.page != t.page they were set to the smaller of
+ * the two and h.eor and t.eor set to 8 (i.e. empty page). if (only)
  * h.eor != t.eor they were set to the smaller of their two values.
  */
 struct logpage {
@@ -144,23 +144,23 @@ struct logpage {
  *
  * (this comment should be rewritten !)
  * jfs uses only "after" log records (only a single writer is allowed
- * in a  page, pages are written to temporary paging space if
+ * in a page, pages are written to temporary paging space if
  * if they must be written to disk before commit, and i/o is
  * scheduled for modified pages to their home location after
- * the log records containing the after values and the commit 
+ * the log records containing the after values and the commit
  * record is written to the log on disk, undo discards the copy
  * in main-memory.)
  *
- * a log record consists of a data area of variable length followed by 
+ * a log record consists of a data area of variable length followed by
  * a descriptor of fixed size LOGRDSIZE bytes.
- * the  data area is rounded up to an integral number of 4-bytes and 
+ * the data area is rounded up to an integral number of 4-bytes and
  * must be no longer than LOGPSIZE.
- * the descriptor is of size of multiple of 4-bytes and aligned on a 
- * 4-byte boundary. 
+ * the descriptor is of size of multiple of 4-bytes and aligned on a
+ * 4-byte boundary.
  * records are packed one after the other in the data area of log pages.
- * (sometimes a DUMMY record is inserted so that at least one record ends 
+ * (sometimes a DUMMY record is inserted so that at least one record ends
  * on every page or the longest record is placed on at most two pages).
- * the field eor in page header/trailer points to the byte following 
+ * the field eor in page header/trailer points to the byte following
  * the last record on a page.
  */
 
@@ -215,13 +215,13 @@ struct lrd {
 	union {
 
 		/*
-		 *      COMMIT: commit
+		 *	COMMIT: commit
 		 *
 		 * transaction commit: no type-dependent information;
 		 */
 
 		/*
-		 *      REDOPAGE: after-image
+		 *	REDOPAGE: after-image
 		 *
 		 * apply after-image;
 		 *
@@ -236,7 +236,7 @@ struct lrd {
 		} redopage;	/* (20) */
 
 		/*
-		 *      NOREDOPAGE: the page is freed
+		 *	NOREDOPAGE: the page is freed
 		 *
 		 * do not apply after-image records which precede this record
 		 * in the log with the same page block number to this page.
@@ -252,7 +252,7 @@ struct lrd {
 		} noredopage;	/* (20) */
 
 		/*
-		 *      UPDATEMAP: update block allocation map
+		 *	UPDATEMAP: update block allocation map
 		 *
 		 * either in-line PXD,
 		 * or     out-of-line  XADLIST;
@@ -268,13 +268,13 @@ struct lrd {
 		} updatemap;	/* (20) */
 
 		/*
-		 *      NOREDOINOEXT: the inode extent is freed
+		 *	NOREDOINOEXT: the inode extent is freed
 		 *
-		 * do not apply after-image records which precede this 
-		 * record in the log with the any of the 4 page block 
-		 * numbers in this inode extent. 
-		 * 
-		 * NOTE: The fileset and pxd fields MUST remain in 
+		 * do not apply after-image records which precede this
+		 * record in the log with the any of the 4 page block
+		 * numbers in this inode extent.
+		 *
+		 * NOTE: The fileset and pxd fields MUST remain in
 		 *       the same fields in the REDOPAGE record format.
 		 *
 		 */
@@ -286,22 +286,22 @@ struct lrd {
 		} noredoinoext;	/* (20) */
 
 		/*
-		 *      SYNCPT: log sync point
+		 *	SYNCPT: log sync point
 		 *
-		 * replay log upto syncpt address specified;
+		 * replay log up to syncpt address specified;
 		 */
 		struct {
 			__le32 sync;	/* 4: syncpt address (0 = here) */
 		} syncpt;
 
 		/*
-		 *      MOUNT: file system mount
+		 *	MOUNT: file system mount
 		 *
 		 * file system mount: no type-dependent information;
 		 */
 
 		/*
-		 *      ? FREEXTENT: free specified extent(s)
+		 *	? FREEXTENT: free specified extent(s)
 		 *
 		 * free specified extent(s) from block allocation map
 		 * N.B.: nextents should be length of data/sizeof(xad_t)
@@ -314,17 +314,15 @@ struct lrd {
 		} freextent;
 
 		/*
-		 *      ? NOREDOFILE: this file is freed
+		 *	? NOREDOFILE: this file is freed
 		 *
 		 * do not apply records which precede this record in the log
 		 * with the same inode number.
 		 *
-		 * NOREDILE must be the first to be written at commit
+		 * NOREDOFILE must be the first to be written at commit
 		 * (last to be read in logredo()) - it prevents
 		 * replay of preceding updates of all preceding generations
-		 * of the inumber esp. the on-disk inode itself, 
-		 * but does NOT prevent
-		 * replay of the 
+		 * of the inumber esp. the on-disk inode itself.
 		 */
 		struct {
 			__le32 fileset;	/* 4: fileset number */
@@ -332,7 +330,7 @@ struct lrd {
 		} noredofile;
 
 		/*
-		 *      ? NEWPAGE: 
+		 *	? NEWPAGE:
 		 *
 		 * metadata type dependent
 		 */
@@ -344,7 +342,7 @@ struct lrd {
 		} newpage;
 
 		/*
-		 *      ? DUMMY: filler
+		 *	? DUMMY: filler
 		 *
 		 * no type-dependent information
 		 */
@@ -378,7 +376,7 @@ struct jfs_log {
 	int size;		/* 4: log size in log page (in page) */
 	int l2bsize;		/* 4: log2 of bsize */
 
-	long flag;		/* 4: flag */
+	unsigned long flag;	/* 4: flag */
 
 	struct lbuf *lbuf_free;	/* 4: free lbufs */
 	wait_queue_head_t free_wait;	/* 4: */
@@ -389,7 +387,7 @@ struct jfs_log {
 	int eor;		/* 4: eor of last record in eol page */
 	struct lbuf *bp;	/* 4: current log page buffer */
 
-	struct semaphore loglock;	/* 4: log write serialization lock */
+	struct mutex loglock;	/* 4: log write serialization lock */
 
 	/* syncpt */
 	int nextsync;		/* 4: bytes to write before next syncpt */
@@ -463,9 +461,10 @@ struct lbuf {
 
 	s64 l_blkno;		/* 8: log page block number */
 	caddr_t l_ldata;	/* 4: data page */
+	struct page *l_page;	/* The page itself */
+	uint l_offset;		/* Offset of l_ldata within the page */
 
 	wait_queue_head_t l_ioevent;	/* 4: i/o done event */
-	struct page *l_page;	/* The page itself */
 };
 
 /* Reuse l_freelist for redrive list */
@@ -489,8 +488,9 @@ struct logsyncblk {
  */
 
 #define LOGSYNC_LOCK_INIT(log) spin_lock_init(&(log)->synclock)
-#define LOGSYNC_LOCK(log) spin_lock(&(log)->synclock)
-#define LOGSYNC_UNLOCK(log) spin_unlock(&(log)->synclock)
+#define LOGSYNC_LOCK(log, flags) spin_lock_irqsave(&(log)->synclock, flags)
+#define LOGSYNC_UNLOCK(log, flags) \
+	spin_unlock_irqrestore(&(log)->synclock, flags)
 
 /* compute the difference in bytes of lsn from sync point */
 #define logdiff(diff, lsn, log)\
@@ -505,6 +505,9 @@ extern int lmLogClose(struct super_block *sb);
 extern int lmLogShutdown(struct jfs_log * log);
 extern int lmLogInit(struct jfs_log * log);
 extern int lmLogFormat(struct jfs_log *log, s64 logAddress, int logSize);
+extern int lmGroupCommit(struct jfs_log *, struct tblock *);
+extern int jfsIOWait(void *);
 extern void jfs_flush_journal(struct jfs_log * log, int wait);
+extern void jfs_syncpt(struct jfs_log *log, int hard_sync);
 
 #endif				/* _H_JFS_LOGMGR */

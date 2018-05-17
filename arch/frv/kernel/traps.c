@@ -9,8 +9,8 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
+#include <linux/sched/debug.h>
 #include <linux/signal.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -19,11 +19,12 @@
 #include <linux/string.h>
 #include <linux/linkage.h>
 #include <linux/init.h>
+#include <linux/module.h>
 
+#include <asm/asm-offsets.h>
 #include <asm/setup.h>
 #include <asm/fpu.h>
-#include <asm/system.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/siginfo.h>
 #include <asm/unaligned.h>
@@ -48,7 +49,7 @@ asmlinkage void insn_access_error(unsigned long esfr1, unsigned long epcr0, unsi
 	info.si_signo	= SIGSEGV;
 	info.si_code	= SEGV_ACCERR;
 	info.si_errno	= 0;
-	info.si_addr	= (void *) ((epcr0 & EPCR0_V) ? (epcr0 & EPCR0_PC) : __frame->pc);
+	info.si_addr	= (void __user *) ((epcr0 & EPCR0_V) ? (epcr0 & EPCR0_PC) : __frame->pc);
 
 	force_sig_info(info.si_signo, &info, current);
 } /* end insn_access_error() */
@@ -72,7 +73,7 @@ asmlinkage void illegal_instruction(unsigned long esfr1, unsigned long epcr0, un
 		      epcr0, esr0, esfr1);
 
 	info.si_errno	= 0;
-	info.si_addr	= (void *) ((epcr0 & EPCR0_PC) ? (epcr0 & EPCR0_PC) : __frame->pc);
+	info.si_addr	= (void __user *) ((epcr0 & EPCR0_V) ? (epcr0 & EPCR0_PC) : __frame->pc);
 
 	switch (__frame->tbr & TBR_TT) {
 	case TBR_TT_ILLEGAL_INSTR:
@@ -101,6 +102,234 @@ asmlinkage void illegal_instruction(unsigned long esfr1, unsigned long epcr0, un
 
 /*****************************************************************************/
 /*
+ * handle atomic operations with errors
+ * - arguments in gr8, gr9, gr10
+ * - original memory value placed in gr5
+ * - replacement memory value placed in gr9
+ */
+asmlinkage void atomic_operation(unsigned long esfr1, unsigned long epcr0,
+				 unsigned long esr0)
+{
+	static DEFINE_SPINLOCK(atomic_op_lock);
+	unsigned long x, y, z;
+	unsigned long __user *p;
+	mm_segment_t oldfs;
+	siginfo_t info;
+	int ret;
+
+	y = 0;
+	z = 0;
+
+	oldfs = get_fs();
+	if (!user_mode(__frame))
+		set_fs(KERNEL_DS);
+
+	switch (__frame->tbr & TBR_TT) {
+		/* TIRA gr0,#120
+		 * u32 __atomic_user_cmpxchg32(u32 *ptr, u32 test, u32 new)
+		 */
+	case TBR_TT_ATOMIC_CMPXCHG32:
+		p = (unsigned long __user *) __frame->gr8;
+		x = __frame->gr9;
+		y = __frame->gr10;
+
+		for (;;) {
+			ret = get_user(z, p);
+			if (ret < 0)
+				goto error;
+
+			if (z != x)
+				goto done;
+
+			spin_lock_irq(&atomic_op_lock);
+
+			if (__get_user(z, p) == 0) {
+				if (z != x)
+					goto done2;
+
+				if (__put_user(y, p) == 0)
+					goto done2;
+				goto error2;
+			}
+
+			spin_unlock_irq(&atomic_op_lock);
+		}
+
+		/* TIRA gr0,#121
+		 * u32 __atomic_kernel_xchg32(void *v, u32 new)
+		 */
+	case TBR_TT_ATOMIC_XCHG32:
+		p = (unsigned long __user *) __frame->gr8;
+		y = __frame->gr9;
+
+		for (;;) {
+			ret = get_user(z, p);
+			if (ret < 0)
+				goto error;
+
+			spin_lock_irq(&atomic_op_lock);
+
+			if (__get_user(z, p) == 0) {
+				if (__put_user(y, p) == 0)
+					goto done2;
+				goto error2;
+			}
+
+			spin_unlock_irq(&atomic_op_lock);
+		}
+
+		/* TIRA gr0,#122
+		 * ulong __atomic_kernel_XOR_return(ulong i, ulong *v)
+		 */
+	case TBR_TT_ATOMIC_XOR:
+		p = (unsigned long __user *) __frame->gr8;
+		x = __frame->gr9;
+
+		for (;;) {
+			ret = get_user(z, p);
+			if (ret < 0)
+				goto error;
+
+			spin_lock_irq(&atomic_op_lock);
+
+			if (__get_user(z, p) == 0) {
+				y = x ^ z;
+				if (__put_user(y, p) == 0)
+					goto done2;
+				goto error2;
+			}
+
+			spin_unlock_irq(&atomic_op_lock);
+		}
+
+		/* TIRA gr0,#123
+		 * ulong __atomic_kernel_OR_return(ulong i, ulong *v)
+		 */
+	case TBR_TT_ATOMIC_OR:
+		p = (unsigned long __user *) __frame->gr8;
+		x = __frame->gr9;
+
+		for (;;) {
+			ret = get_user(z, p);
+			if (ret < 0)
+				goto error;
+
+			spin_lock_irq(&atomic_op_lock);
+
+			if (__get_user(z, p) == 0) {
+				y = x ^ z;
+				if (__put_user(y, p) == 0)
+					goto done2;
+				goto error2;
+			}
+
+			spin_unlock_irq(&atomic_op_lock);
+		}
+
+		/* TIRA gr0,#124
+		 * ulong __atomic_kernel_AND_return(ulong i, ulong *v)
+		 */
+	case TBR_TT_ATOMIC_AND:
+		p = (unsigned long __user *) __frame->gr8;
+		x = __frame->gr9;
+
+		for (;;) {
+			ret = get_user(z, p);
+			if (ret < 0)
+				goto error;
+
+			spin_lock_irq(&atomic_op_lock);
+
+			if (__get_user(z, p) == 0) {
+				y = x & z;
+				if (__put_user(y, p) == 0)
+					goto done2;
+				goto error2;
+			}
+
+			spin_unlock_irq(&atomic_op_lock);
+		}
+
+		/* TIRA gr0,#125
+		 * int __atomic_user_sub_return(atomic_t *v, int i)
+		 */
+	case TBR_TT_ATOMIC_SUB:
+		p = (unsigned long __user *) __frame->gr8;
+		x = __frame->gr9;
+
+		for (;;) {
+			ret = get_user(z, p);
+			if (ret < 0)
+				goto error;
+
+			spin_lock_irq(&atomic_op_lock);
+
+			if (__get_user(z, p) == 0) {
+				y = z - x;
+				if (__put_user(y, p) == 0)
+					goto done2;
+				goto error2;
+			}
+
+			spin_unlock_irq(&atomic_op_lock);
+		}
+
+		/* TIRA gr0,#126
+		 * int __atomic_user_add_return(atomic_t *v, int i)
+		 */
+	case TBR_TT_ATOMIC_ADD:
+		p = (unsigned long __user *) __frame->gr8;
+		x = __frame->gr9;
+
+		for (;;) {
+			ret = get_user(z, p);
+			if (ret < 0)
+				goto error;
+
+			spin_lock_irq(&atomic_op_lock);
+
+			if (__get_user(z, p) == 0) {
+				y = z + x;
+				if (__put_user(y, p) == 0)
+					goto done2;
+				goto error2;
+			}
+
+			spin_unlock_irq(&atomic_op_lock);
+		}
+
+	default:
+		BUG();
+	}
+
+done2:
+	spin_unlock_irq(&atomic_op_lock);
+done:
+	if (!user_mode(__frame))
+		set_fs(oldfs);
+	__frame->gr5 = z;
+	__frame->gr9 = y;
+	return;
+
+error2:
+	spin_unlock_irq(&atomic_op_lock);
+error:
+	if (!user_mode(__frame))
+		set_fs(oldfs);
+	__frame->pc -= 4;
+
+	die_if_kernel("-- Atomic Op Error --\n");
+
+	info.si_signo	= SIGSEGV;
+	info.si_code	= SEGV_ACCERR;
+	info.si_errno	= 0;
+	info.si_addr	= (void __user *) __frame->pc;
+
+	force_sig_info(info.si_signo, &info, current);
+}
+
+/*****************************************************************************/
+/*
  *
  */
 asmlinkage void media_exception(unsigned long msr0, unsigned long msr1)
@@ -115,7 +344,7 @@ asmlinkage void media_exception(unsigned long msr0, unsigned long msr1)
 	info.si_signo	= SIGFPE;
 	info.si_code	= FPE_MDAOVF;
 	info.si_errno	= 0;
-	info.si_addr	= (void *) __frame->pc;
+	info.si_addr	= (void __user *) __frame->pc;
 
 	force_sig_info(info.si_signo, &info, current);
 } /* end media_exception() */
@@ -131,16 +360,8 @@ asmlinkage void memory_access_exception(unsigned long esr0,
 	siginfo_t info;
 
 #ifdef CONFIG_MMU
-	unsigned long fixup;
-
-	if ((esr0 & ESRx_EC) == ESRx_EC_DATA_ACCESS)
-		if (handle_misalignment(esr0, ear0, epcr0) == 0)
-			return;
-
-	if ((fixup = search_exception_table(__frame->pc)) != 0) {
-		__frame->pc = fixup;
+	if (fixup_exception(__frame))
 		return;
-	}
 #endif
 
 	die_if_kernel("-- Memory Access Exception --\n"
@@ -155,7 +376,7 @@ asmlinkage void memory_access_exception(unsigned long esr0,
 	info.si_addr	= NULL;
 
 	if ((esr0 & (ESRx_VALID | ESR0_EAV)) == (ESRx_VALID | ESR0_EAV))
-		info.si_addr = (void *) ear0;
+		info.si_addr = (void __user *) ear0;
 
 	force_sig_info(info.si_signo, &info, current);
 
@@ -184,7 +405,7 @@ asmlinkage void data_access_error(unsigned long esfr1, unsigned long esr15, unsi
 	info.si_signo	= SIGSEGV;
 	info.si_code	= SEGV_ACCERR;
 	info.si_errno	= 0;
-	info.si_addr	= (void *)
+	info.si_addr	= (void __user *)
 		(((esr15 & (ESRx_VALID|ESR15_EAV)) == (ESRx_VALID|ESR15_EAV)) ? ear15 : 0);
 
 	force_sig_info(info.si_signo, &info, current);
@@ -218,7 +439,7 @@ asmlinkage void division_exception(unsigned long esfr1, unsigned long esr0, unsi
 	info.si_signo	= SIGFPE;
 	info.si_code	= FPE_INTDIV;
 	info.si_errno	= 0;
-	info.si_addr	= (void *) __frame->pc;
+	info.si_addr	= (void __user *) __frame->pc;
 
 	force_sig_info(info.si_signo, &info, current);
 } /* end division_exception() */
@@ -240,15 +461,6 @@ asmlinkage void compound_exception(unsigned long esfr1,
 		      esr0, esr14, esr15, msr0, msr1);
 	BUG();
 } /* end compound_exception() */
-
-/*****************************************************************************/
-/*
- * The architecture-independent backtrace generator
- */
-void dump_stack(void)
-{
-	show_stack(NULL, NULL);
-}
 
 void show_stack(struct task_struct *task, unsigned long *sp)
 {
@@ -277,26 +489,25 @@ static const char *regnames[] = {
 
 void show_regs(struct pt_regs *regs)
 {
-	uint32_t *reg;
+	unsigned long *reg;
 	int loop;
 
 	printk("\n");
+	show_regs_print_info(KERN_DEFAULT);
 
-	printk("Frame: @%08x [%s]\n",
-	       (uint32_t) regs,
+	printk("Frame: @%08lx [%s]\n",
+	       (unsigned long) regs,
 	       regs->psr & PSR_S ? "kernel" : "user");
 
-	reg = (uint32_t *) regs;
-	for (loop = 0; loop < REG__END; loop++) {
-		printk("%s %08x", regnames[loop + 0], reg[loop + 0]);
+	reg = (unsigned long *) regs;
+	for (loop = 0; loop < NR_PT_REGS; loop++) {
+		printk("%s %08lx", regnames[loop + 0], reg[loop + 0]);
 
-		if (loop == REG__END - 1 || loop % 5 == 4)
+		if (loop == NR_PT_REGS - 1 || loop % 5 == 4)
 			printk("\n");
 		else
 			printk(" | ");
 	}
-
-	printk("Process %s (pid: %d)\n", current->comm, current->pid);
 }
 
 void die_if_kernel(const char *str, ...)
@@ -308,7 +519,7 @@ void die_if_kernel(const char *str, ...)
 		return;
 
 	va_start(va, str);
-	vsprintf(buffer, str, va);
+	vsnprintf(buffer, sizeof(buffer), str, va);
 	va_end(va);
 
 	console_verbose();
@@ -326,7 +537,7 @@ void die_if_kernel(const char *str, ...)
  */
 static void show_backtrace_regs(struct pt_regs *frame)
 {
-	uint32_t *reg;
+	unsigned long *reg;
 	int loop;
 
 	/* print the registers for this frame */
@@ -334,11 +545,11 @@ static void show_backtrace_regs(struct pt_regs *frame)
 	       frame->psr & PSR_S ? "Kernel Mode" : "User Mode",
 	       frame);
 
-	reg = (uint32_t *) frame;
-	for (loop = 0; loop < REG__END; loop++) {
-		printk("%s %08x", regnames[loop + 0], reg[loop + 0]);
+	reg = (unsigned long *) frame;
+	for (loop = 0; loop < NR_PT_REGS; loop++) {
+		printk("%s %08lx", regnames[loop + 0], reg[loop + 0]);
 
-		if (loop == REG__END - 1 || loop % 5 == 4)
+		if (loop == NR_PT_REGS - 1 || loop % 5 == 4)
 			printk("\n");
 		else
 			printk(" | ");

@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2004 Topspin Communications.  All rights reserved.
+ * Copyright (c) 2005 Mellanox Technologies. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -28,14 +29,10 @@
  * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
- *
- * $Id: mthca_config_reg.h 1349 2004-12-16 21:09:43Z roland $
  */
 
 #ifndef MTHCA_CONFIG_REG_H
 #define MTHCA_CONFIG_REG_H
-
-#include <asm/page.h>
 
 #define MTHCA_HCR_BASE         0x80680
 #define MTHCA_HCR_SIZE         0x0001c
@@ -46,5 +43,6 @@
 #define MTHCA_MAP_ECR_SIZE     (MTHCA_ECR_SIZE + MTHCA_ECR_CLR_SIZE)
 #define MTHCA_CLR_INT_BASE     0xf00d8
 #define MTHCA_CLR_INT_SIZE     0x00008
+#define MTHCA_EQ_SET_CI_SIZE   (8 * 32)
 
 #endif /* MTHCA_CONFIG_REG_H */

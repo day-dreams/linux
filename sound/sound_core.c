@@ -1,7 +1,75 @@
 /*
- *	Sound core handling. Breaks out sound functions to submodules
+ *	Sound core.  This file is composed of two parts.  sound_class
+ *	which is common to both OSS and ALSA and OSS sound core which
+ *	is used OSS or emulation of it.
+ */
+
+/*
+ * First, the common part.
+ */
+#include <linux/module.h>
+#include <linux/device.h>
+#include <linux/err.h>
+#include <linux/kdev_t.h>
+#include <linux/major.h>
+#include <sound/core.h>
+
+#ifdef CONFIG_SOUND_OSS_CORE
+static int __init init_oss_soundcore(void);
+static void cleanup_oss_soundcore(void);
+#else
+static inline int init_oss_soundcore(void)	{ return 0; }
+static inline void cleanup_oss_soundcore(void)	{ }
+#endif
+
+struct class *sound_class;
+EXPORT_SYMBOL(sound_class);
+
+MODULE_DESCRIPTION("Core sound module");
+MODULE_AUTHOR("Alan Cox");
+MODULE_LICENSE("GPL");
+
+static char *sound_devnode(struct device *dev, umode_t *mode)
+{
+	if (MAJOR(dev->devt) == SOUND_MAJOR)
+		return NULL;
+	return kasprintf(GFP_KERNEL, "snd/%s", dev_name(dev));
+}
+
+static int __init init_soundcore(void)
+{
+	int rc;
+
+	rc = init_oss_soundcore();
+	if (rc)
+		return rc;
+
+	sound_class = class_create(THIS_MODULE, "sound");
+	if (IS_ERR(sound_class)) {
+		cleanup_oss_soundcore();
+		return PTR_ERR(sound_class);
+	}
+
+	sound_class->devnode = sound_devnode;
+
+	return 0;
+}
+
+static void __exit cleanup_soundcore(void)
+{
+	cleanup_oss_soundcore();
+	class_destroy(sound_class);
+}
+
+subsys_initcall(init_soundcore);
+module_exit(cleanup_soundcore);
+
+
+#ifdef CONFIG_SOUND_OSS_CORE
+/*
+ *	OSS sound core handling. Breaks out sound functions to submodules
  *	
- *	Author:		Alan Cox <alan.cox@linux.org>
+ *	Author:		Alan Cox <alan@lxorguk.ukuu.org.uk>
  *
  *	Fixes:
  *
@@ -34,46 +102,69 @@
  *	locking at some point in 2.3.x.
  */
 
-#include <linux/config.h>
-#include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/fs.h>
 #include <linux/sound.h>
-#include <linux/major.h>
 #include <linux/kmod.h>
-#include <linux/devfs_fs_kernel.h>
-#include <linux/device.h>
 
 #define SOUND_STEP 16
-
 
 struct sound_unit
 {
 	int unit_minor;
-	struct file_operations *unit_fops;
+	const struct file_operations *unit_fops;
 	struct sound_unit *next;
 	char name[32];
 };
 
-#ifdef CONFIG_SOUND_MSNDCLAS
-extern int msnd_classic_init(void);
-#endif
-#ifdef CONFIG_SOUND_MSNDPIN
-extern int msnd_pinnacle_init(void);
+/*
+ * By default, OSS sound_core claims full legacy minor range (0-255)
+ * of SOUND_MAJOR to trap open attempts to any sound minor and
+ * requests modules using custom sound-slot/service-* module aliases.
+ * The only benefit of doing this is allowing use of custom module
+ * aliases instead of the standard char-major-* ones.  This behavior
+ * prevents alternative OSS implementation and is scheduled to be
+ * removed.
+ *
+ * CONFIG_SOUND_OSS_CORE_PRECLAIM and soundcore.preclaim_oss kernel
+ * parameter are added to allow distros and developers to try and
+ * switch to alternative implementations without needing to rebuild
+ * the kernel in the meantime.  If preclaim_oss is non-zero, the
+ * kernel will behave the same as before.  All SOUND_MAJOR minors are
+ * preclaimed and the custom module aliases along with standard chrdev
+ * ones are emitted if a missing device is opened.  If preclaim_oss is
+ * zero, sound_core only grabs what's actually in use and for missing
+ * devices only the standard chrdev aliases are requested.
+ *
+ * All these clutters are scheduled to be removed along with
+ * sound-slot/service-* module aliases.
+ */
+#ifdef CONFIG_SOUND_OSS_CORE_PRECLAIM
+static int preclaim_oss = 1;
+#else
+static int preclaim_oss = 0;
 #endif
 
-struct class_simple *sound_class;
-EXPORT_SYMBOL(sound_class);
+module_param(preclaim_oss, int, 0444);
+
+static int soundcore_open(struct inode *, struct file *);
+
+static const struct file_operations soundcore_fops =
+{
+	/* We must have an owner or the module locking fails */
+	.owner	= THIS_MODULE,
+	.open	= soundcore_open,
+	.llseek = noop_llseek,
+};
 
 /*
  *	Low level list operator. Scan the ordered list, find a hole and
  *	join into it. Called with the lock asserted
  */
 
-static int __sound_insert_unit(struct sound_unit * s, struct sound_unit **list, struct file_operations *fops, int index, int low, int top)
+static int __sound_insert_unit(struct sound_unit * s, struct sound_unit **list, const struct file_operations *fops, int index, int low, int top)
 {
 	int n=low;
 
@@ -153,15 +244,16 @@ static DEFINE_SPINLOCK(sound_loader_lock);
  *	list. Acquires locks as needed
  */
 
-static int sound_insert_unit(struct sound_unit **list, struct file_operations *fops, int index, int low, int top, const char *name, umode_t mode)
+static int sound_insert_unit(struct sound_unit **list, const struct file_operations *fops, int index, int low, int top, const char *name, umode_t mode, struct device *dev)
 {
 	struct sound_unit *s = kmalloc(sizeof(*s), GFP_KERNEL);
 	int r;
 
 	if (!s)
 		return -ENOMEM;
-		
+
 	spin_lock(&sound_loader_lock);
+retry:
 	r = __sound_insert_unit(s, list, fops, index, low, top);
 	spin_unlock(&sound_loader_lock);
 	
@@ -172,13 +264,31 @@ static int sound_insert_unit(struct sound_unit **list, struct file_operations *f
 	else
 		sprintf(s->name, "sound/%s%d", name, r / SOUND_STEP);
 
-	devfs_mk_cdev(MKDEV(SOUND_MAJOR, s->unit_minor),
-			S_IFCHR | mode, s->name);
-	class_simple_device_add(sound_class, MKDEV(SOUND_MAJOR, s->unit_minor),
-				NULL, s->name+6);
-	return r;
+	if (!preclaim_oss) {
+		/*
+		 * Something else might have grabbed the minor.  If
+		 * first free slot is requested, rescan with @low set
+		 * to the next unit; otherwise, -EBUSY.
+		 */
+		r = __register_chrdev(SOUND_MAJOR, s->unit_minor, 1, s->name,
+				      &soundcore_fops);
+		if (r < 0) {
+			spin_lock(&sound_loader_lock);
+			__sound_remove_unit(list, s->unit_minor);
+			if (index < 0) {
+				low = s->unit_minor + SOUND_STEP;
+				goto retry;
+			}
+			spin_unlock(&sound_loader_lock);
+			return -EBUSY;
+		}
+	}
 
- fail:
+	device_create(sound_class, dev, MKDEV(SOUND_MAJOR, s->unit_minor),
+		      NULL, "%s", s->name+6);
+	return s->unit_minor;
+
+fail:
 	kfree(s);
 	return r;
 }
@@ -197,8 +307,10 @@ static void sound_remove_unit(struct sound_unit **list, int unit)
 	p = __sound_remove_unit(list, unit);
 	spin_unlock(&sound_loader_lock);
 	if (p) {
-		devfs_remove(p->name);
-		class_simple_device_remove(MKDEV(SOUND_MAJOR, p->unit_minor));
+		if (!preclaim_oss)
+			__unregister_chrdev(SOUND_MAJOR, p->unit_minor, 1,
+					    p->name);
+		device_destroy(sound_class, MKDEV(SOUND_MAJOR, p->unit_minor));
 		kfree(p);
 	}
 }
@@ -227,19 +339,23 @@ static void sound_remove_unit(struct sound_unit **list, int unit)
 static struct sound_unit *chains[SOUND_STEP];
 
 /**
- *	register_sound_special - register a special sound node
+ *	register_sound_special_device - register a special sound node
  *	@fops: File operations for the driver
  *	@unit: Unit number to allocate
+ *      @dev: device pointer
  *
  *	Allocate a special sound device by minor number from the sound
- *	subsystem. The allocated number is returned on succes. On failure
+ *	subsystem.
+ *
+ *	Return: The allocated number is returned on success. On failure,
  *	a negative error code is returned.
  */
  
-int register_sound_special(struct file_operations *fops, int unit)
+int register_sound_special_device(const struct file_operations *fops, int unit,
+				  struct device *dev)
 {
 	const int chain = unit % SOUND_STEP;
-	int max_unit = 128 + chain;
+	int max_unit = 256;
 	const char *name;
 	char _name[16];
 
@@ -261,6 +377,9 @@ int register_sound_special(struct file_operations *fops, int unit)
 		break;
 	    case 4:
 		name = "audio";
+		break;
+	    case 5:
+		name = "dspW";
 		break;
 	    case 8:
 		name = "sequencer2";
@@ -294,9 +413,16 @@ int register_sound_special(struct file_operations *fops, int unit)
 		break;
 	}
 	return sound_insert_unit(&chains[chain], fops, -1, unit, max_unit,
-				 name, S_IRUSR | S_IWUSR);
+				 name, S_IRUSR | S_IWUSR, dev);
 }
  
+EXPORT_SYMBOL(register_sound_special_device);
+
+int register_sound_special(const struct file_operations *fops, int unit)
+{
+	return register_sound_special_device(fops, unit, NULL);
+}
+
 EXPORT_SYMBOL(register_sound_special);
 
 /**
@@ -305,35 +431,19 @@ EXPORT_SYMBOL(register_sound_special);
  *	@dev: Unit number to allocate
  *
  *	Allocate a mixer device. Unit is the number of the mixer requested.
- *	Pass -1 to request the next free mixer unit. On success the allocated
- *	number is returned, on failure a negative error code is returned.
+ *	Pass -1 to request the next free mixer unit.
+ *
+ *	Return: On success, the allocated number is returned. On failure,
+ *	a negative error code is returned.
  */
 
-int register_sound_mixer(struct file_operations *fops, int dev)
+int register_sound_mixer(const struct file_operations *fops, int dev)
 {
 	return sound_insert_unit(&chains[0], fops, dev, 0, 128,
-				 "mixer", S_IRUSR | S_IWUSR);
+				 "mixer", S_IRUSR | S_IWUSR, NULL);
 }
 
 EXPORT_SYMBOL(register_sound_mixer);
-
-/**
- *	register_sound_midi - register a midi device
- *	@fops: File operations for the driver
- *	@dev: Unit number to allocate
- *
- *	Allocate a midi device. Unit is the number of the midi device requested.
- *	Pass -1 to request the next free midi unit. On success the allocated
- *	number is returned, on failure a negative error code is returned.
- */
-
-int register_sound_midi(struct file_operations *fops, int dev)
-{
-	return sound_insert_unit(&chains[2], fops, dev, 2, 130,
-				 "midi", S_IRUSR | S_IWUSR);
-}
-
-EXPORT_SYMBOL(register_sound_midi);
 
 /*
  *	DSP's are registered as a triple. Register only one and cheat
@@ -346,39 +456,22 @@ EXPORT_SYMBOL(register_sound_midi);
  *	@dev: Unit number to allocate
  *
  *	Allocate a DSP device. Unit is the number of the DSP requested.
- *	Pass -1 to request the next free DSP unit. On success the allocated
- *	number is returned, on failure a negative error code is returned.
+ *	Pass -1 to request the next free DSP unit.
  *
  *	This function allocates both the audio and dsp device entries together
  *	and will always allocate them as a matching pair - eg dsp3/audio3
+ *
+ *	Return: On success, the allocated number is returned. On failure,
+ *	a negative error code is returned.
  */
 
-int register_sound_dsp(struct file_operations *fops, int dev)
+int register_sound_dsp(const struct file_operations *fops, int dev)
 {
 	return sound_insert_unit(&chains[3], fops, dev, 3, 131,
-				 "dsp", S_IWUSR | S_IRUSR);
+				 "dsp", S_IWUSR | S_IRUSR, NULL);
 }
 
 EXPORT_SYMBOL(register_sound_dsp);
-
-/**
- *	register_sound_synth - register a synth device
- *	@fops: File operations for the driver
- *	@dev: Unit number to allocate
- *
- *	Allocate a synth device. Unit is the number of the synth device requested.
- *	Pass -1 to request the next free synth unit. On success the allocated
- *	number is returned, on failure a negative error code is returned.
- */
-
-
-int register_sound_synth(struct file_operations *fops, int dev)
-{
-	return sound_insert_unit(&chains[9], fops, dev, 9, 137,
-				 "synth", S_IRUSR | S_IWUSR);
-}
-
-EXPORT_SYMBOL(register_sound_synth);
 
 /**
  *	unregister_sound_special - unregister a special sound device
@@ -413,21 +506,6 @@ void unregister_sound_mixer(int unit)
 EXPORT_SYMBOL(unregister_sound_mixer);
 
 /**
- *	unregister_sound_midi - unregister a midi device
- *	@unit: unit number to allocate
- *
- *	Release a sound device that was allocated with register_sound_midi().
- *	The unit passed is the return value from the register function.
- */
-
-void unregister_sound_midi(int unit)
-{
-	return sound_remove_unit(&chains[2], unit);
-}
-
-EXPORT_SYMBOL(unregister_sound_midi);
-
-/**
  *	unregister_sound_dsp - unregister a DSP device
  *	@unit: unit number to allocate
  *
@@ -439,39 +517,11 @@ EXPORT_SYMBOL(unregister_sound_midi);
 
 void unregister_sound_dsp(int unit)
 {
-	return sound_remove_unit(&chains[3], unit);
+	sound_remove_unit(&chains[3], unit);
 }
 
 
 EXPORT_SYMBOL(unregister_sound_dsp);
-
-/**
- *	unregister_sound_synth - unregister a synth device
- *	@unit: unit number to allocate
- *
- *	Release a sound device that was allocated with register_sound_synth().
- *	The unit passed is the return value from the register function.
- */
-
-void unregister_sound_synth(int unit)
-{
-	return sound_remove_unit(&chains[9], unit);
-}
-
-EXPORT_SYMBOL(unregister_sound_synth);
-
-/*
- *	Now our file operations
- */
-
-static int soundcore_open(struct inode *, struct file *);
-
-static struct file_operations soundcore_fops=
-{
-	/* We must have an owner or the module locking fails */
-	.owner	= THIS_MODULE,
-	.open	= soundcore_open,
-};
 
 static struct sound_unit *__look_for_unit(int chain, int unit)
 {
@@ -487,12 +537,12 @@ static struct sound_unit *__look_for_unit(int chain, int unit)
 	return NULL;
 }
 
-int soundcore_open(struct inode *inode, struct file *file)
+static int soundcore_open(struct inode *inode, struct file *file)
 {
 	int chain;
 	int unit = iminor(inode);
 	struct sound_unit *s;
-	struct file_operations *new_fops = NULL;
+	const struct file_operations *new_fops = NULL;
 
 	chain=unit&0x0F;
 	if(chain==4 || chain==5)	/* dsp/audio/dsp16 */
@@ -506,8 +556,9 @@ int soundcore_open(struct inode *inode, struct file *file)
 	s = __look_for_unit(chain, unit);
 	if (s)
 		new_fops = fops_get(s->unit_fops);
-	if (!new_fops) {
+	if (preclaim_oss && !new_fops) {
 		spin_unlock(&sound_loader_lock);
+
 		/*
 		 *  Please, don't change this order or code.
 		 *  For ALSA slot means soundcard and OSS emulation code
@@ -517,67 +568,57 @@ int soundcore_open(struct inode *inode, struct file *file)
 		 */
 		request_module("sound-slot-%i", unit>>4);
 		request_module("sound-service-%i-%i", unit>>4, chain);
+
+		/*
+		 * sound-slot/service-* module aliases are scheduled
+		 * for removal in favor of the standard char-major-*
+		 * module aliases.  For the time being, generate both
+		 * the legacy and standard module aliases to ease
+		 * transition.
+		 */
+		if (request_module("char-major-%d-%d", SOUND_MAJOR, unit) > 0)
+			request_module("char-major-%d", SOUND_MAJOR);
+
 		spin_lock(&sound_loader_lock);
 		s = __look_for_unit(chain, unit);
 		if (s)
 			new_fops = fops_get(s->unit_fops);
 	}
+	spin_unlock(&sound_loader_lock);
 	if (new_fops) {
 		/*
 		 * We rely upon the fact that we can't be unloaded while the
-		 * subdriver is there, so if ->open() is successful we can
-		 * safely drop the reference counter and if it is not we can
-		 * revert to old ->f_op. Ugly, indeed, but that's the cost of
-		 * switching ->f_op in the first place.
+		 * subdriver is there.
 		 */
 		int err = 0;
-		struct file_operations *old_fops = file->f_op;
-		file->f_op = new_fops;
-		spin_unlock(&sound_loader_lock);
-		if(file->f_op->open)
+		replace_fops(file, new_fops);
+
+		if (file->f_op->open)
 			err = file->f_op->open(inode,file);
-		if (err) {
-			fops_put(file->f_op);
-			file->f_op = fops_get(old_fops);
-		}
-		fops_put(old_fops);
+
 		return err;
 	}
-	spin_unlock(&sound_loader_lock);
 	return -ENODEV;
 }
 
-extern int mod_firmware_load(const char *, char **);
-EXPORT_SYMBOL(mod_firmware_load);
-
-
-MODULE_DESCRIPTION("Core sound module");
-MODULE_AUTHOR("Alan Cox");
-MODULE_LICENSE("GPL");
 MODULE_ALIAS_CHARDEV_MAJOR(SOUND_MAJOR);
 
-static void __exit cleanup_soundcore(void)
+static void cleanup_oss_soundcore(void)
 {
 	/* We have nothing to really do here - we know the lists must be
 	   empty */
 	unregister_chrdev(SOUND_MAJOR, "sound");
-	devfs_remove("sound");
-	class_simple_destroy(sound_class);
 }
 
-static int __init init_soundcore(void)
+static int __init init_oss_soundcore(void)
 {
-	if (register_chrdev(SOUND_MAJOR, "sound", &soundcore_fops)==-1) {
+	if (preclaim_oss &&
+	    register_chrdev(SOUND_MAJOR, "sound", &soundcore_fops) < 0) {
 		printk(KERN_ERR "soundcore: sound device already in use.\n");
 		return -EBUSY;
 	}
-	devfs_mk_dir ("sound");
-	sound_class = class_simple_create(THIS_MODULE, "sound");
-	if (IS_ERR(sound_class))
-		return PTR_ERR(sound_class);
 
 	return 0;
 }
 
-module_init(init_soundcore);
-module_exit(cleanup_soundcore);
+#endif /* CONFIG_SOUND_OSS_CORE */

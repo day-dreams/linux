@@ -11,7 +11,7 @@
 # 2 of the License, or (at your option) any later version.
 #
 ###############################################################################
-#include <linux/config.h>
+
 #include <linux/linkage.h>
 #include <asm/thread_info.h>
 #include <asm/processor.h>
@@ -31,7 +31,7 @@
 	# address of frame 0 (userspace) on current kernel stack
 	.globl		__kernel_frame0_ptr
 __kernel_frame0_ptr:
-	.long		init_thread_union + THREAD_SIZE - USER_CONTEXT_SIZE
+	.long		init_thread_union + THREAD_SIZE - FRV_FRAME0_SIZE
 
 	# address of current task
 	.globl		__kernel_current_task
@@ -101,13 +101,6 @@ __switch_to:
 
 	movgs		gr14,lr
 	bar
-
-	srli		gr15,#28,gr5
-	subicc		gr5,#0xc,gr0,icc0
-	beq		icc0,#0,111f
-	break
-	nop
-111:
 
 	# jump to __switch_back or ret_from_fork as appropriate
 	# - move prev to GR8

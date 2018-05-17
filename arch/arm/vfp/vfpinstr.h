@@ -52,11 +52,11 @@
 #define FEXT_TO_IDX(inst)	((inst & 0x000f0000) >> 15 | (inst & (1 << 7)) >> 7)
 
 #define vfp_get_sd(inst)	((inst & 0x0000f000) >> 11 | (inst & (1 << 22)) >> 22)
-#define vfp_get_dd(inst)	((inst & 0x0000f000) >> 12)
+#define vfp_get_dd(inst)	((inst & 0x0000f000) >> 12 | (inst & (1 << 22)) >> 18)
 #define vfp_get_sm(inst)	((inst & 0x0000000f) << 1 | (inst & (1 << 5)) >> 5)
-#define vfp_get_dm(inst)	((inst & 0x0000000f))
+#define vfp_get_dm(inst)	((inst & 0x0000000f) | (inst & (1 << 5)) >> 1)
 #define vfp_get_sn(inst)	((inst & 0x000f0000) >> 15 | (inst & (1 << 7)) >> 7)
-#define vfp_get_dn(inst)	((inst & 0x000f0000) >> 16)
+#define vfp_get_dn(inst)	((inst & 0x000f0000) >> 16 | (inst & (1 << 7)) >> 3)
 
 #define vfp_single(inst)	(((inst) & 0x0000f00) == 0xa00)
 
@@ -73,14 +73,14 @@
 
 #define fmrx(_vfp_) ({			\
 	u32 __v;			\
-	asm("mrc%? p10, 7, %0, " vfpreg(_vfp_) ", cr0, 0 @ fmrx	%0, " #_vfp_	\
-	    : "=r" (__v));		\
+	asm("mrc p10, 7, %0, " vfpreg(_vfp_) ", cr0, 0 @ fmrx	%0, " #_vfp_	\
+	    : "=r" (__v) : : "cc");	\
 	__v;				\
  })
 
 #define fmxr(_vfp_,_var_)		\
-	asm("mcr%? p10, 7, %0, " vfpreg(_vfp_) ", cr0, 0 @ fmxr	" #_vfp_ ", %0"	\
-	   : : "r" (_var_))
+	asm("mcr p10, 7, %0, " vfpreg(_vfp_) ", cr0, 0 @ fmxr	" #_vfp_ ", %0"	\
+	   : : "r" (_var_) : "cc")
 
 u32 vfp_single_cpdo(u32 inst, u32 fpscr);
 u32 vfp_single_cprt(u32 inst, u32 fpscr, struct pt_regs *regs);

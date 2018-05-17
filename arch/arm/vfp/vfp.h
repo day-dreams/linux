@@ -117,7 +117,13 @@ static inline u64 vfp_estimate_div128to64(u64 nh, u64 nl, u64 m)
 	if (nh >= m)
 		return ~0ULL;
 	mh = m >> 32;
-	z = (mh << 32 <= nh) ? 0xffffffff00000000ULL : (nh / mh) << 32;
+	if (mh << 32 <= nh) {
+		z = 0xffffffff00000000ULL;
+	} else {
+		z = nh;
+		do_div(z, mh);
+		z <<= 32;
+	}
 	mul64to128(&termh, &terml, m, z);
 	sub128(&remh, &reml, nh, nl, termh, terml);
 	ml = m << 32;
@@ -126,7 +132,12 @@ static inline u64 vfp_estimate_div128to64(u64 nh, u64 nl, u64 m)
 		add128(&remh, &reml, remh, reml, mh, ml);
 	}
 	remh = (remh << 32) | (reml >> 32);
-	z |= (mh << 32 <= remh) ? 0xffffffff : remh / mh;
+	if (mh << 32 <= remh) {
+		z |= 0xffffffff;
+	} else {
+		do_div(remh, mh);
+		z |= remh;
+	}
 	return z;
 }
 
@@ -144,8 +155,8 @@ struct vfp_single {
 	u32	significand;
 };
 
-extern s32 vfp_get_float(unsigned int reg);
-extern void vfp_put_float(unsigned int reg, s32 val);
+asmlinkage s32 vfp_get_float(unsigned int reg);
+asmlinkage void vfp_put_float(s32 val, unsigned int reg);
 
 /*
  * VFP_SINGLE_MANTISSA_BITS - number of bits in the mantissa
@@ -254,9 +265,13 @@ struct vfp_double {
  * which returns (double)0.0.  This is useful for the compare with
  * zero instructions.
  */
+#ifdef CONFIG_VFPv3
+#define VFP_REG_ZERO	32
+#else
 #define VFP_REG_ZERO	16
-extern u64 vfp_get_double(unsigned int reg);
-extern void vfp_put_double(unsigned int reg, u64 val);
+#endif
+asmlinkage u64 vfp_get_double(unsigned int reg);
+asmlinkage void vfp_put_double(u64 val, unsigned int reg);
 
 #define VFP_DOUBLE_MANTISSA_BITS	(52)
 #define VFP_DOUBLE_EXPONENT_BITS	(11)
@@ -330,15 +345,36 @@ static inline int vfp_double_type(struct vfp_double *s)
 
 u32 vfp_double_normaliseround(int dd, struct vfp_double *vd, u32 fpscr, u32 exceptions, const char *func);
 
-/*
- * System registers
- */
-extern u32 vfp_get_sys(unsigned int reg);
-extern void vfp_put_sys(unsigned int reg, u32 val);
-
 u32 vfp_estimate_sqrt_significand(u32 exponent, u32 significand);
 
 /*
  * A special flag to tell the normalisation code not to normalise.
  */
 #define VFP_NAN_FLAG	0x100
+
+/*
+ * A bit pattern used to indicate the initial (unset) value of the
+ * exception mask, in case nothing handles an instruction.  This
+ * doesn't include the NAN flag, which get masked out before
+ * we check for an error.
+ */
+#define VFP_EXCEPTION_ERROR	((u32)-1 & ~VFP_NAN_FLAG)
+
+/*
+ * A flag to tell vfp instruction type.
+ *  OP_SCALAR - this operation always operates in scalar mode
+ *  OP_SD - the instruction exceptionally writes to a single precision result.
+ *  OP_DD - the instruction exceptionally writes to a double precision result.
+ *  OP_SM - the instruction exceptionally reads from a single precision operand.
+ */
+#define OP_SCALAR	(1 << 0)
+#define OP_SD		(1 << 1)
+#define OP_DD		(1 << 1)
+#define OP_SM		(1 << 2)
+
+struct op {
+	u32 (* const fn)(int dd, int dn, int dm, u32 fpscr);
+	u32 flags;
+};
+
+asmlinkage void vfp_save_state(void *location, u32 fpexc);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* cnode related routines for the coda kernel code
    (C) 1996 Peter Braam
    */
@@ -7,19 +8,17 @@
 #include <linux/time.h>
 
 #include <linux/coda.h>
-#include <linux/coda_linux.h>
-#include <linux/coda_fs_i.h>
 #include <linux/coda_psdev.h>
+#include <linux/pagemap.h>
+#include "coda_linux.h"
 
 static inline int coda_fideq(struct CodaFid *fid1, struct CodaFid *fid2)
 {
 	return memcmp(fid1, fid2, sizeof(*fid1)) == 0;
 }
 
-static struct inode_operations coda_symlink_inode_operations = {
-	.readlink	= generic_readlink,
-	.follow_link	= page_follow_link_light,
-	.put_link	= page_put_link,
+static const struct inode_operations coda_symlink_inode_operations = {
+	.get_link	= page_get_link,
 	.setattr	= coda_setattr,
 };
 
@@ -36,6 +35,7 @@ static void coda_fill_inode(struct inode *inode, struct coda_vattr *attr)
                 inode->i_fop = &coda_dir_operations;
         } else if (S_ISLNK(inode->i_mode)) {
 		inode->i_op = &coda_symlink_inode_operations;
+		inode_nohighmem(inode);
 		inode->i_data.a_ops = &coda_symlink_aops;
 		inode->i_mapping = &inode->i_data;
 	} else
@@ -45,19 +45,16 @@ static void coda_fill_inode(struct inode *inode, struct coda_vattr *attr)
 static int coda_test_inode(struct inode *inode, void *data)
 {
 	struct CodaFid *fid = (struct CodaFid *)data;
-	return coda_fideq(&(ITOC(inode)->c_fid), fid);
+	struct coda_inode_info *cii = ITOC(inode);
+	return coda_fideq(&cii->c_fid, fid);
 }
 
 static int coda_set_inode(struct inode *inode, void *data)
 {
 	struct CodaFid *fid = (struct CodaFid *)data;
-	ITOC(inode)->c_fid = *fid;
+	struct coda_inode_info *cii = ITOC(inode);
+	cii->c_fid = *fid;
 	return 0;
-}
-
-static int coda_fail_inode(struct inode *inode, void *data)
-{
-	return -1;
 }
 
 struct inode * coda_iget(struct super_block * sb, struct CodaFid * fid,
@@ -76,6 +73,7 @@ struct inode * coda_iget(struct super_block * sb, struct CodaFid * fid,
 		cii = ITOC(inode);
 		/* we still need to set i_ino for things like stat(2) */
 		inode->i_ino = hash;
+		/* inode is locked and unique, no need to grab cii->c_lock */
 		cii->c_mapcount = 0;
 		unlock_new_inode(inode);
 	}
@@ -91,37 +89,39 @@ struct inode * coda_iget(struct super_block * sb, struct CodaFid * fid,
    - link the two up if this is needed
    - fill in the attributes
 */
-int coda_cnode_make(struct inode **inode, struct CodaFid *fid, struct super_block *sb)
+struct inode *coda_cnode_make(struct CodaFid *fid, struct super_block *sb)
 {
         struct coda_vattr attr;
+	struct inode *inode;
         int error;
         
 	/* We get inode numbers from Venus -- see venus source */
 	error = venus_getattr(sb, fid, &attr);
-	if ( error ) {
-	    *inode = NULL;
-	    return error;
-	} 
+	if (error)
+		return ERR_PTR(error);
 
-	*inode = coda_iget(sb, fid, &attr);
-	if ( IS_ERR(*inode) ) {
-		printk("coda_cnode_make: coda_iget failed\n");
-                return PTR_ERR(*inode);
-        }
-	return 0;
+	inode = coda_iget(sb, fid, &attr);
+	if (IS_ERR(inode))
+		pr_warn("%s: coda_iget failed\n", __func__);
+	return inode;
 }
 
 
+/* Although we treat Coda file identifiers as immutable, there is one
+ * special case for files created during a disconnection where they may
+ * not be globally unique. When an identifier collision is detected we
+ * first try to flush the cached inode from the kernel and finally
+ * resort to renaming/rehashing in-place. Userspace remembers both old
+ * and new values of the identifier to handle any in-flight upcalls.
+ * The real solution is to use globally unique UUIDs as identifiers, but
+ * retrofitting the existing userspace code for this is non-trivial. */
 void coda_replace_fid(struct inode *inode, struct CodaFid *oldfid, 
 		      struct CodaFid *newfid)
 {
-	struct coda_inode_info *cii;
+	struct coda_inode_info *cii = ITOC(inode);
 	unsigned long hash = coda_f2i(newfid);
 	
-	cii = ITOC(inode);
-
-	if (!coda_fideq(&cii->c_fid, oldfid))
-		BUG();
+	BUG_ON(!coda_fideq(&cii->c_fid, oldfid));
 
 	/* replace fid and rehash inode */
 	/* XXX we probably need to hold some lock here! */
@@ -138,11 +138,11 @@ struct inode *coda_fid_to_inode(struct CodaFid *fid, struct super_block *sb)
 	unsigned long hash = coda_f2i(fid);
 
 	if ( !sb ) {
-		printk("coda_fid_to_inode: no sb!\n");
+		pr_warn("%s: no sb!\n", __func__);
 		return NULL;
 	}
 
-	inode = iget5_locked(sb, hash, coda_test_inode, coda_fail_inode, fid);
+	inode = ilookup5(sb, hash, coda_test_inode, fid);
 	if ( !inode )
 		return NULL;
 
@@ -154,19 +154,16 @@ struct inode *coda_fid_to_inode(struct CodaFid *fid, struct super_block *sb)
 }
 
 /* the CONTROL inode is made without asking attributes from Venus */
-int coda_cnode_makectl(struct inode **inode, struct super_block *sb)
+struct inode *coda_cnode_makectl(struct super_block *sb)
 {
-	int error = -ENOMEM;
-
-	*inode = new_inode(sb);
-	if (*inode) {
-		(*inode)->i_ino = CTL_INO;
-		(*inode)->i_op = &coda_ioctl_inode_operations;
-		(*inode)->i_fop = &coda_ioctl_operations;
-		(*inode)->i_mode = 0444;
-		error = 0;
+	struct inode *inode = new_inode(sb);
+	if (inode) {
+		inode->i_ino = CTL_INO;
+		inode->i_op = &coda_ioctl_inode_operations;
+		inode->i_fop = &coda_ioctl_operations;
+		inode->i_mode = 0444;
+		return inode;
 	}
-
-	return error;
+	return ERR_PTR(-ENOMEM);
 }
 

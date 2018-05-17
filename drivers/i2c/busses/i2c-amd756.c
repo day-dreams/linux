@@ -1,7 +1,4 @@
 /*
-    amd756.c - Part of lm_sensors, Linux kernel modules for hardware
-              monitoring
-
     Copyright (c) 1999-2002 Merlin Hughes <merlin@merlin.org>
 
     Shamelessly ripped from i2c-piix4.c:
@@ -18,10 +15,6 @@
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
 /*
@@ -37,17 +30,15 @@
    Note: we assume there can only be one device, with one SMBus interface.
 */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/stddef.h>
-#include <linux/sched.h>
 #include <linux/ioport.h>
 #include <linux/i2c.h>
-#include <linux/init.h>
-#include <asm/io.h>
+#include <linux/acpi.h>
+#include <linux/io.h>
 
 /* AMD756 SMBus address offsets */
 #define SMB_ADDR_OFFSET		0xE0
@@ -86,8 +77,8 @@
 #define AMD756_PROCESS_CALL	0x04
 #define AMD756_BLOCK_DATA	0x05
 
-
-static unsigned short amd756_ioport = 0;
+static struct pci_driver amd756_driver;
+static unsigned short amd756_ioport;
 
 /* 
   SMBUS event = I/O 28-29 bit 11
@@ -130,7 +121,7 @@ static int amd756_transaction(struct i2c_adapter *adap)
 		} while ((temp & (GS_HST_STS | GS_SMB_STS)) &&
 		         (timeout++ < MAX_TIMEOUT));
 		/* If the SMBus is still busy, we give up */
-		if (timeout >= MAX_TIMEOUT) {
+		if (timeout > MAX_TIMEOUT) {
 			dev_dbg(&adap->dev, "Busy wait timeout (%04x)\n", temp);
 			goto abort;
 		}
@@ -147,23 +138,23 @@ static int amd756_transaction(struct i2c_adapter *adap)
 	} while ((temp & GS_HST_STS) && (timeout++ < MAX_TIMEOUT));
 
 	/* If the SMBus is still busy, we give up */
-	if (timeout >= MAX_TIMEOUT) {
+	if (timeout > MAX_TIMEOUT) {
 		dev_dbg(&adap->dev, "Completion timeout!\n");
 		goto abort;
 	}
 
 	if (temp & GS_PRERR_STS) {
-		result = -1;
+		result = -ENXIO;
 		dev_dbg(&adap->dev, "SMBus Protocol error (no response)!\n");
 	}
 
 	if (temp & GS_COL_STS) {
-		result = -1;
+		result = -EIO;
 		dev_warn(&adap->dev, "SMBus collision!\n");
 	}
 
 	if (temp & GS_TO_STS) {
-		result = -1;
+		result = -ETIMEDOUT;
 		dev_dbg(&adap->dev, "SMBus protocol timeout!\n");
 	}
 
@@ -191,22 +182,18 @@ static int amd756_transaction(struct i2c_adapter *adap)
 	outw_p(inw(SMB_GLOBAL_ENABLE) | GE_ABORT, SMB_GLOBAL_ENABLE);
 	msleep(100);
 	outw_p(GS_CLEAR_STS, SMB_GLOBAL_STATUS);
-	return -1;
+	return -EIO;
 }
 
-/* Return -1 on error. */
+/* Return negative errno on error. */
 static s32 amd756_access(struct i2c_adapter * adap, u16 addr,
 		  unsigned short flags, char read_write,
 		  u8 command, int size, union i2c_smbus_data * data)
 {
 	int i, len;
+	int status;
 
-	/** TODO: Should I supporte the 10-bit transfers? */
 	switch (size) {
-	case I2C_SMBUS_PROC_CALL:
-		dev_dbg(&adap->dev, "I2C_SMBUS_PROC_CALL not supported!\n");
-		/* TODO: Well... It is supported, I'm just not sure what to do here... */
-		return -1;
 	case I2C_SMBUS_QUICK:
 		outw_p(((addr & 0x7f) << 1) | (read_write & 0x01),
 		       SMB_HOST_ADDRESS);
@@ -253,13 +240,17 @@ static s32 amd756_access(struct i2c_adapter * adap, u16 addr,
 		}
 		size = AMD756_BLOCK_DATA;
 		break;
+	default:
+		dev_warn(&adap->dev, "Unsupported transaction %d\n", size);
+		return -EOPNOTSUPP;
 	}
 
 	/* How about enabling interrupts... */
 	outw_p(size & GE_CYC_TYPE_MASK, SMB_GLOBAL_ENABLE);
 
-	if (amd756_transaction(adap))	/* Error in transaction */
-		return -1;
+	status = amd756_transaction(adap);
+	if (status)
+		return status;
 
 	if ((read_write == I2C_SMBUS_WRITE) || (size == AMD756_QUICK))
 		return 0;
@@ -292,21 +283,18 @@ static u32 amd756_func(struct i2c_adapter *adapter)
 {
 	return I2C_FUNC_SMBUS_QUICK | I2C_FUNC_SMBUS_BYTE |
 	    I2C_FUNC_SMBUS_BYTE_DATA | I2C_FUNC_SMBUS_WORD_DATA |
-	    I2C_FUNC_SMBUS_BLOCK_DATA | I2C_FUNC_SMBUS_PROC_CALL;
+	    I2C_FUNC_SMBUS_BLOCK_DATA;
 }
 
-static struct i2c_algorithm smbus_algorithm = {
-	.name		= "Non-I2C SMBus adapter",
-	.id		= I2C_ALGO_SMBUS,
+static const struct i2c_algorithm smbus_algorithm = {
 	.smbus_xfer	= amd756_access,
 	.functionality	= amd756_func,
 };
 
 struct i2c_adapter amd756_smbus = {
 	.owner		= THIS_MODULE,
-	.class          = I2C_CLASS_HWMON,
+	.class          = I2C_CLASS_HWMON | I2C_CLASS_SPD,
 	.algo		= &smbus_algorithm,
-	.name		= "unset",
 };
 
 enum chiptype { AMD756, AMD766, AMD768, NFORCE, AMD8111 };
@@ -315,7 +303,7 @@ static const char* chipname[] = {
 	"nVidia nForce", "AMD8111",
 };
 
-static struct pci_device_id amd756_ids[] = {
+static const struct pci_device_id amd756_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_VIPER_740B),
 	  .driver_data = AMD756 },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_VIPER_7413),
@@ -331,8 +319,7 @@ static struct pci_device_id amd756_ids[] = {
 
 MODULE_DEVICE_TABLE (pci, amd756_ids);
 
-static int __devinit amd756_probe(struct pci_dev *pdev,
-				  const struct pci_device_id *id)
+static int amd756_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	int nforce = (id->driver_data == NFORCE);
 	int error;
@@ -368,7 +355,12 @@ static int __devinit amd756_probe(struct pci_dev *pdev,
 		amd756_ioport += SMB_ADDR_OFFSET;
 	}
 
-	if (!request_region(amd756_ioport, SMB_IOSIZE, "amd756-smbus")) {
+	error = acpi_check_region(amd756_ioport, SMB_IOSIZE,
+				  amd756_driver.name);
+	if (error)
+		return -ENODEV;
+
+	if (!request_region(amd756_ioport, SMB_IOSIZE, amd756_driver.name)) {
 		dev_err(&pdev->dev, "SMB region 0x%x already in use!\n",
 			amd756_ioport);
 		return -ENODEV;
@@ -378,18 +370,16 @@ static int __devinit amd756_probe(struct pci_dev *pdev,
 	dev_dbg(&pdev->dev, "SMBREV = 0x%X\n", temp);
 	dev_dbg(&pdev->dev, "AMD756_smba = 0x%X\n", amd756_ioport);
 
-	/* set up the driverfs linkage to our parent device */
+	/* set up the sysfs linkage to our parent device */
 	amd756_smbus.dev.parent = &pdev->dev;
 
-	sprintf(amd756_smbus.name, "SMBus %s adapter at %04x",
-		chipname[id->driver_data], amd756_ioport);
+	snprintf(amd756_smbus.name, sizeof(amd756_smbus.name),
+		 "SMBus %s adapter at %04x", chipname[id->driver_data],
+		 amd756_ioport);
 
 	error = i2c_add_adapter(&amd756_smbus);
-	if (error) {
-		dev_err(&pdev->dev,
-			"Adapter registration failed, module not inserted\n");
+	if (error)
 		goto out_err;
-	}
 
 	return 0;
 
@@ -398,7 +388,7 @@ static int __devinit amd756_probe(struct pci_dev *pdev,
 	return error;
 }
 
-static void __devexit amd756_remove(struct pci_dev *dev)
+static void amd756_remove(struct pci_dev *dev)
 {
 	i2c_del_adapter(&amd756_smbus);
 	release_region(amd756_ioport, SMB_IOSIZE);
@@ -408,24 +398,13 @@ static struct pci_driver amd756_driver = {
 	.name		= "amd756_smbus",
 	.id_table	= amd756_ids,
 	.probe		= amd756_probe,
-	.remove		= __devexit_p(amd756_remove),
+	.remove		= amd756_remove,
 };
 
-static int __init amd756_init(void)
-{
-	return pci_register_driver(&amd756_driver);
-}
-
-static void __exit amd756_exit(void)
-{
-	pci_unregister_driver(&amd756_driver);
-}
+module_pci_driver(amd756_driver);
 
 MODULE_AUTHOR("Merlin Hughes <merlin@merlin.org>");
 MODULE_DESCRIPTION("AMD756/766/768/8111 and nVidia nForce SMBus driver");
 MODULE_LICENSE("GPL");
 
 EXPORT_SYMBOL(amd756_smbus);
-
-module_init(amd756_init)
-module_exit(amd756_exit)

@@ -1,13 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/kernel.h>
-#include <linux/init.h>
 #include <linux/pci.h>
 #include <asm/bootinfo.h>
 
 #include <asm/lasat/lasat.h>
-#include <asm/gt64120.h>
 #include <asm/nile4.h>
 
-#define PCI_ACCESS_READ  0
+#define PCI_ACCESS_READ	 0
 #define PCI_ACCESS_WRITE 1
 
 #define LO(reg) (reg / 4)
@@ -15,10 +14,8 @@
 
 volatile unsigned long *const vrc_pciregs = (void *) Vrc5074_BASE;
 
-static spinlock_t nile4_pci_lock;
-
 static int nile4_pcibios_config_access(unsigned char access_type,
-	struct pci_bus *bus, unsigned int devfn, int where, u32 * val)
+	struct pci_bus *bus, unsigned int devfn, int where, u32 *val)
 {
 	unsigned char busnum = bus->number;
 	u32 adr, mask, err;
@@ -76,9 +73,8 @@ static int nile4_pcibios_config_access(unsigned char access_type,
 }
 
 static int nile4_pcibios_read(struct pci_bus *bus, unsigned int devfn,
-	int where, int size, u32 * val)
+	int where, int size, u32 *val)
 {
-	unsigned long flags;
 	u32 data = 0;
 	int err;
 
@@ -87,11 +83,8 @@ static int nile4_pcibios_read(struct pci_bus *bus, unsigned int devfn,
 	else if ((size == 4) && (where & 3))
 		return PCIBIOS_BAD_REGISTER_NUMBER;
 
-	spin_lock_irqsave(&nile4_pci_lock, flags);
 	err = nile4_pcibios_config_access(PCI_ACCESS_READ, bus, devfn, where,
-					&data);
-	spin_unlock_irqrestore(&nile4_pci_lock, flags);
-
+					  &data);
 	if (err)
 		return err;
 
@@ -108,7 +101,6 @@ static int nile4_pcibios_read(struct pci_bus *bus, unsigned int devfn,
 static int nile4_pcibios_write(struct pci_bus *bus, unsigned int devfn,
 	int where, int size, u32 val)
 {
-	unsigned long flags;
 	u32 data = 0;
 	int err;
 
@@ -117,11 +109,8 @@ static int nile4_pcibios_write(struct pci_bus *bus, unsigned int devfn,
 	else if ((size == 4) && (where & 3))
 		return PCIBIOS_BAD_REGISTER_NUMBER;
 
-	spin_lock_irqsave(&nile4_pci_lock, flags);
 	err = nile4_pcibios_config_access(PCI_ACCESS_READ, bus, devfn, where,
-	                                  &data);
-	spin_unlock_irqrestore(&nile4_pci_lock, flags);
-
+					  &data);
 	if (err)
 		return err;
 

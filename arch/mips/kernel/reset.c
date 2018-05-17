@@ -3,13 +3,16 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 2001 by Ralf Baechle
+ * Copyright (C) 2001, 06 by Ralf Baechle (ralf@linux-mips.org)
  * Copyright (C) 2001 MIPS Technologies, Inc.
  */
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/export.h>
+#include <linux/pm.h>
 #include <linux/types.h>
 #include <linux/reboot.h>
+#include <linux/delay.h>
+
 #include <asm/reboot.h>
 
 /*
@@ -19,25 +22,48 @@
  */
 void (*_machine_restart)(char *command);
 void (*_machine_halt)(void);
-void (*_machine_power_off)(void);
+void (*pm_power_off)(void);
+
+EXPORT_SYMBOL(pm_power_off);
 
 void machine_restart(char *command)
 {
-	_machine_restart(command);
-}
+	if (_machine_restart)
+		_machine_restart(command);
 
-EXPORT_SYMBOL(machine_restart);
+#ifdef CONFIG_SMP
+	preempt_disable();
+	smp_send_stop();
+#endif
+	do_kernel_restart(command);
+	mdelay(1000);
+	pr_emerg("Reboot failed -- System halted\n");
+	local_irq_disable();
+	while (1);
+}
 
 void machine_halt(void)
 {
-	_machine_halt();
-}
+	if (_machine_halt)
+		_machine_halt();
 
-EXPORT_SYMBOL(machine_halt);
+#ifdef CONFIG_SMP
+	preempt_disable();
+	smp_send_stop();
+#endif
+	local_irq_disable();
+	while (1);
+}
 
 void machine_power_off(void)
 {
-	_machine_power_off();
-}
+	if (pm_power_off)
+		pm_power_off();
 
-EXPORT_SYMBOL(machine_power_off);
+#ifdef CONFIG_SMP
+	preempt_disable();
+	smp_send_stop();
+#endif
+	local_irq_disable();
+	while (1);
+}

@@ -3,59 +3,47 @@
  * Licensed under the GPL
  */
 
-#include "linux/config.h"
-#include "linux/fs.h"
-#include "linux/tty.h"
-#include "linux/tty_driver.h"
-#include "linux/major.h"
-#include "linux/mm.h"
-#include "linux/init.h"
-#include "linux/console.h"
-#include "asm/termbits.h"
-#include "asm/irq.h"
-#include "line.h"
+#include <linux/fs.h>
+#include <linux/tty.h>
+#include <linux/tty_driver.h>
+#include <linux/major.h>
+#include <linux/mm.h>
+#include <linux/init.h>
+#include <linux/console.h>
+#include <asm/termbits.h>
+#include <asm/irq.h>
 #include "ssl.h"
-#include "chan_kern.h"
-#include "user_util.h"
-#include "kern_util.h"
-#include "kern.h"
-#include "init.h"
-#include "irq_user.h"
+#include "chan.h"
+#include <init.h>
+#include <irq_user.h>
 #include "mconsole_kern.h"
-#include "2_5compat.h"
 
-static int ssl_version = 1;
-
-/* Referenced only by tty_driver below - presumably it's locked correctly
- * by the tty driver.
- */
-
-static struct tty_driver *ssl_driver;
+static const int ssl_version = 1;
 
 #define NR_PORTS 64
 
-void ssl_announce(char *dev_name, int dev)
+static void ssl_announce(char *dev_name, int dev)
 {
 	printk(KERN_INFO "Serial line %d assigned device '%s'\n", dev,
 	       dev_name);
 }
 
+/* Almost const, except that xterm_title may be changed in an initcall */
 static struct chan_opts opts = {
 	.announce 	= ssl_announce,
 	.xterm_title	= "Serial Line #%d",
 	.raw		= 1,
-	.tramp_stack 	= 0,
-	.in_kernel 	= 1,
 };
 
-static int ssl_config(char *str);
+static int ssl_config(char *str, char **error_out);
 static int ssl_get_config(char *dev, char *str, int size, char **error_out);
-static int ssl_remove(char *str);
+static int ssl_remove(int n, char **error_out);
 
+
+/* Const, except for .mc.list */
 static struct line_driver driver = {
 	.name 			= "UML serial line",
 	.device_name 		= "ttyS",
-	.devfs_name 		= "tts/",
 	.major 			= TTY_MAJOR,
 	.minor_start 		= 64,
 	.type 		 	= TTY_DRIVER_TYPE_SERIAL,
@@ -64,102 +52,60 @@ static struct line_driver driver = {
 	.read_irq_name 		= "ssl",
 	.write_irq 		= SSL_WRITE_IRQ,
 	.write_irq_name 	= "ssl-write",
-	.symlink_from 		= "serial",
-	.symlink_to 		= "tts",
 	.mc  = {
+		.list		= LIST_HEAD_INIT(driver.mc.list),
 		.name  		= "ssl",
 		.config 	= ssl_config,
 		.get_config 	= ssl_get_config,
+		.id		= line_id,
 		.remove 	= ssl_remove,
 	},
 };
 
-/* The array is initialized by line_init, which is an initcall.  The 
- * individual elements are protected by individual semaphores.
+/* The array is initialized by line_init, at initcall time.  The
+ * elements are locked individually as needed.
  */
-static struct line serial_lines[NR_PORTS] =
-	{ [0 ... NR_PORTS - 1] = LINE_INIT(CONFIG_SSL_CHAN, &driver) };
+static char *conf[NR_PORTS];
+static char *def_conf = CONFIG_SSL_CHAN;
+static struct line serial_lines[NR_PORTS];
 
-static struct lines lines = LINES_INIT(NR_PORTS);
-
-static int ssl_config(char *str)
+static int ssl_config(char *str, char **error_out)
 {
-	return(line_config(serial_lines, 
-			   sizeof(serial_lines)/sizeof(serial_lines[0]), str));
+	return line_config(serial_lines, ARRAY_SIZE(serial_lines), str, &opts,
+			   error_out);
 }
 
 static int ssl_get_config(char *dev, char *str, int size, char **error_out)
 {
-	return(line_get_config(dev, serial_lines, 
-			       sizeof(serial_lines)/sizeof(serial_lines[0]), 
-			       str, size, error_out));
+	return line_get_config(dev, serial_lines, ARRAY_SIZE(serial_lines), str,
+			       size, error_out);
 }
 
-static int ssl_remove(char *str)
+static int ssl_remove(int n, char **error_out)
 {
-	return(line_remove(serial_lines, 
-			   sizeof(serial_lines)/sizeof(serial_lines[0]), str));
+	return line_remove(serial_lines, ARRAY_SIZE(serial_lines), n,
+			   error_out);
 }
 
-int ssl_open(struct tty_struct *tty, struct file *filp)
+static int ssl_install(struct tty_driver *driver, struct tty_struct *tty)
 {
-	return line_open(serial_lines, tty, &opts);
+	return line_install(driver, tty, &serial_lines[tty->index]);
 }
 
-#if 0
-static int ssl_chars_in_buffer(struct tty_struct *tty)
-{
-	return(0);
-}
-
-static void ssl_flush_buffer(struct tty_struct *tty)
-{
-	return;
-}
-
-static void ssl_throttle(struct tty_struct * tty)
-{
-	printk(KERN_ERR "Someone should implement ssl_throttle\n");
-}
-
-static void ssl_unthrottle(struct tty_struct * tty)
-{
-	printk(KERN_ERR "Someone should implement ssl_unthrottle\n");
-}
-
-static void ssl_stop(struct tty_struct *tty)
-{
-	printk(KERN_ERR "Someone should implement ssl_stop\n");
-}
-
-static void ssl_start(struct tty_struct *tty)
-{
-	printk(KERN_ERR "Someone should implement ssl_start\n");
-}
-
-void ssl_hangup(struct tty_struct *tty)
-{
-}
-#endif
-
-static struct tty_operations ssl_ops = {
-	.open 	 		= ssl_open,
+static const struct tty_operations ssl_ops = {
+	.open 	 		= line_open,
 	.close 	 		= line_close,
 	.write 	 		= line_write,
 	.put_char 		= line_put_char,
 	.write_room		= line_write_room,
 	.chars_in_buffer 	= line_chars_in_buffer,
+	.flush_buffer 		= line_flush_buffer,
+	.flush_chars 		= line_flush_chars,
 	.set_termios 		= line_set_termios,
-	.ioctl 	 		= line_ioctl,
-#if 0
-	.flush_chars 		= ssl_flush_chars,
-	.flush_buffer 		= ssl_flush_buffer,
-	.throttle 		= ssl_throttle,
-	.unthrottle 		= ssl_unthrottle,
-	.stop 	 		= ssl_stop,
-	.start 	 		= ssl_start,
-	.hangup 	 	= ssl_hangup,
-#endif
+	.throttle 		= line_throttle,
+	.unthrottle 		= line_unthrottle,
+	.install		= ssl_install,
+	.hangup			= line_hangup,
 };
 
 /* Changed by ssl_init and referenced by ssl_exit, which are both serialized
@@ -171,52 +117,67 @@ static void ssl_console_write(struct console *c, const char *string,
 			      unsigned len)
 {
 	struct line *line = &serial_lines[c->index];
+	unsigned long flags;
 
-	down(&line->sem);
-	console_write_chan(&line->chan_list, string, len);
-	up(&line->sem);
+	spin_lock_irqsave(&line->lock, flags);
+	console_write_chan(line->chan_out, string, len);
+	spin_unlock_irqrestore(&line->lock, flags);
 }
 
 static struct tty_driver *ssl_console_device(struct console *c, int *index)
 {
 	*index = c->index;
-	return ssl_driver;
+	return driver.driver;
 }
 
 static int ssl_console_setup(struct console *co, char *options)
 {
 	struct line *line = &serial_lines[co->index];
 
-	return console_open_chan(line,co,&opts);
+	return console_open_chan(line, co);
 }
 
+/* No locking for register_console call - relies on single-threaded initcalls */
 static struct console ssl_cons = {
 	.name		= "ttyS",
 	.write		= ssl_console_write,
 	.device		= ssl_console_device,
 	.setup		= ssl_console_setup,
-	.flags		= CON_PRINTBUFFER,
+	.flags		= CON_PRINTBUFFER|CON_ANYTIME,
 	.index		= -1,
 };
 
-int ssl_init(void)
+static int ssl_init(void)
 {
 	char *new_title;
+	int err;
+	int i;
 
-	printk(KERN_INFO "Initializing software serial port version %d\n", 
+	printk(KERN_INFO "Initializing software serial port version %d\n",
 	       ssl_version);
-	ssl_driver = line_register_devfs(&lines, &driver, &ssl_ops,
-					 serial_lines, ARRAY_SIZE(serial_lines));
 
-	lines_init(serial_lines, sizeof(serial_lines)/sizeof(serial_lines[0]));
+	err = register_lines(&driver, &ssl_ops, serial_lines,
+				    ARRAY_SIZE(serial_lines));
+	if (err)
+		return err;
 
 	new_title = add_xterm_umid(opts.xterm_title);
 	if (new_title != NULL)
 		opts.xterm_title = new_title;
 
+	for (i = 0; i < NR_PORTS; i++) {
+		char *error;
+		char *s = conf[i];
+		if (!s)
+			s = def_conf;
+		if (setup_one_line(serial_lines, i, s, &opts, &error))
+			printk(KERN_ERR "setup_one_line failed for "
+			       "device %d : %s\n", i, error);
+	}
+
 	ssl_init_done = 1;
 	register_console(&ssl_cons);
-	return(0);
+	return 0;
 }
 late_initcall(ssl_init);
 
@@ -224,28 +185,15 @@ static void ssl_exit(void)
 {
 	if (!ssl_init_done)
 		return;
-	close_lines(serial_lines,
-		    sizeof(serial_lines)/sizeof(serial_lines[0]));
+	close_lines(serial_lines, ARRAY_SIZE(serial_lines));
 }
 __uml_exitcall(ssl_exit);
 
 static int ssl_chan_setup(char *str)
 {
-	return(line_setup(serial_lines,
-			  sizeof(serial_lines)/sizeof(serial_lines[0]),
-			  str, 1));
+	line_setup(conf, NR_PORTS, &def_conf, str, "serial line");
+	return 1;
 }
 
 __setup("ssl", ssl_chan_setup);
 __channel_help(ssl_chan_setup, "ssl");
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */

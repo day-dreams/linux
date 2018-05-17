@@ -1,19 +1,23 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _SCSI_SCSI_DRIVER_H
 #define _SCSI_SCSI_DRIVER_H
 
 #include <linux/device.h>
 
 struct module;
+struct request;
 struct scsi_cmnd;
-
+struct scsi_device;
 
 struct scsi_driver {
-	struct module		*owner;
 	struct device_driver	gendrv;
 
-	int (*init_command)(struct scsi_cmnd *);
 	void (*rescan)(struct device *);
-	int (*issue_flush)(struct device *, sector_t *);
+	int (*init_command)(struct scsi_cmnd *);
+	void (*uninit_command)(struct scsi_cmnd *);
+	int (*done)(struct scsi_cmnd *);
+	int (*eh_action)(struct scsi_cmnd *, int);
+	void (*eh_reset)(struct scsi_cmnd *);
 };
 #define to_scsi_driver(drv) \
 	container_of((drv), struct scsi_driver, gendrv)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/arch/arm/mach-footbridge/cats-hw.c
  *
@@ -8,9 +9,11 @@
 #include <linux/ioport.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/screen_info.h>
+#include <linux/io.h>
+#include <linux/spinlock.h>
 
 #include <asm/hardware/dec21285.h>
-#include <asm/io.h>
 #include <asm/mach-types.h>
 #include <asm/setup.h>
 
@@ -74,21 +77,22 @@ __initcall(cats_hw_init);
  * hard reboots fail on early boards.
  */
 static void __init
-fixup_cats(struct machine_desc *desc, struct tag *tags,
-	   char **cmdline, struct meminfo *mi)
+fixup_cats(struct tag *tags, char **cmdline)
 {
-	ORIG_VIDEO_LINES  = 25;
-	ORIG_VIDEO_POINTS = 16;
-	ORIG_Y = 24;
+#if defined(CONFIG_VGA_CONSOLE) || defined(CONFIG_DUMMY_CONSOLE)
+	screen_info.orig_video_lines  = 25;
+	screen_info.orig_video_points = 16;
+	screen_info.orig_y = 24;
+#endif
 }
 
 MACHINE_START(CATS, "Chalice-CATS")
-	MAINTAINER("Philip Blundell")
-	BOOT_MEM(0x00000000, DC21285_ARMCSR_BASE, 0xfe000000)
-	BOOT_PARAMS(0x00000100)
-	SOFT_REBOOT
-	FIXUP(fixup_cats)
-	MAPIO(footbridge_map_io)
-	INITIRQ(footbridge_init_irq)
-	.timer		= &isa_timer,
+	/* Maintainer: Philip Blundell */
+	.atag_offset	= 0x100,
+	.reboot_mode	= REBOOT_SOFT,
+	.fixup		= fixup_cats,
+	.map_io		= footbridge_map_io,
+	.init_irq	= footbridge_init_irq,
+	.init_time	= isa_timer_init,
+	.restart	= footbridge_restart,
 MACHINE_END

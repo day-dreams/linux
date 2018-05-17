@@ -45,12 +45,13 @@ Now eth0 should active, you can test it by "ping" or get more information by
 "ifconfig". If tested ok, continue the next step.
 
 4. cp dl2k.ko /lib/modules/`uname -r`/kernel/drivers/net
-5. Add the following line to /etc/modprobe.conf:
+5. Add the following line to /etc/modprobe.d/dl2k.conf:
 	alias eth0 dl2k
-6. Run "netconfig" or "netconf" to create configuration script ifcfg-eth0
+6. Run depmod to updated module indexes.
+7. Run "netconfig" or "netconf" to create configuration script ifcfg-eth0
    located at /etc/sysconfig/network-scripts or create it manually.
    [see - Configuration Script Sample]
-7. Driver will automatically load and configure at next boot time.
+8. Driver will automatically load and configure at next boot time.
 
 Compiling the Driver
 ====================
@@ -154,8 +155,8 @@ Installing the Driver
   -----------------
   1. Copy dl2k.o to the network modules directory, typically
      /lib/modules/2.x.x-xx/net or /lib/modules/2.x.x/kernel/drivers/net.
-  2. Locate the boot module configuration file, most commonly modprobe.conf
-     or modules.conf (for 2.4) in the /etc directory. Add the following lines:
+  2. Locate the boot module configuration file, most commonly in the
+     /etc/modprobe.d/ directory. Add the following lines:
 
      alias ethx dl2k
      options dl2k <optional parameters>
@@ -173,7 +174,7 @@ Installing the Driver
 
 Parameter Description
 =====================
-You can install this driver without any addtional parameter. However, if you
+You can install this driver without any additional parameter. However, if you
 are going to have extensive functions then it is necessary to set extra
 parameter. Below is a list of the command line parameters supported by the
 Linux device
@@ -222,7 +223,7 @@ rx_timeout=n			- Rx DMA wait time for an interrupt.
 				  reach timeout of n * 640 nano seconds. 
 				  Set proper rx_coalesce and rx_timeout can 
 				  reduce congestion collapse and overload which
-				  has been a bottlenect for high speed network.
+				  has been a bottleneck for high speed network.
 				  
 				  For example, rx_coalesce=10 rx_timeout=800.
 				  that is, hardware assert only 1 interrupt 

@@ -1,5 +1,5 @@
 /*
- * linux/arch/i386/kernel/edd.c
+ * linux/drivers/firmware/edd.c
  *  Copyright (C) 2002, 2003, 2004 Dell Inc.
  *  by Matt Domsch <Matt_Domsch@dell.com>
  *  disk signature by Matt Domsch, Andrew Wilks, and Sandeep K. Shandilya
@@ -11,11 +11,11 @@
  *
  * This code takes information provided by BIOS EDD calls
  * fn41 - Check Extensions Present and
- * fn48 - Get Device Parametes with EDD extensions
+ * fn48 - Get Device Parameters with EDD extensions
  * made in setup.S, copied to safe structures in setup.c,
  * and presents it in sysfs.
  *
- * Please see http://linux.dell.com/edd30/results.html for
+ * Please see http://linux.dell.com/edd/results.html for
  * the list of BIOSs which have been reported to implement EDD.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -74,7 +74,7 @@ static struct edd_device *edd_devices[EDD_MBR_SIG_MAX];
 
 #define EDD_DEVICE_ATTR(_name,_mode,_show,_test) \
 struct edd_attribute edd_attr_##_name = { 	\
-	.attr = {.name = __stringify(_name), .mode = _mode, .owner = THIS_MODULE },	\
+	.attr = {.name = __stringify(_name), .mode = _mode },	\
 	.show	= _show,				\
 	.test	= _test,				\
 };
@@ -115,14 +115,14 @@ edd_attr_show(struct kobject * kobj, struct attribute *attr, char *buf)
 {
 	struct edd_device *dev = to_edd_device(kobj);
 	struct edd_attribute *edd_attr = to_edd_attr(attr);
-	ssize_t ret = 0;
+	ssize_t ret = -EIO;
 
 	if (edd_attr->show)
 		ret = edd_attr->show(dev, buf);
 	return ret;
 }
 
-static struct sysfs_ops edd_attr_ops = {
+static const struct sysfs_ops edd_attr_ops = {
 	.show = edd_attr_show,
 };
 
@@ -151,7 +151,8 @@ edd_show_host_bus(struct edd_device *edev, char *buf)
 		p += scnprintf(p, left, "\tbase_address: %x\n",
 			     info->params.interface_path.isa.base_address);
 	} else if (!strncmp(info->params.host_bus_type, "PCIX", 4) ||
-		   !strncmp(info->params.host_bus_type, "PCI", 3)) {
+		   !strncmp(info->params.host_bus_type, "PCI", 3) ||
+		   !strncmp(info->params.host_bus_type, "XPRS", 4)) {
 		p += scnprintf(p, left,
 			     "\t%02x:%02x.%d  channel: %u\n",
 			     info->params.interface_path.pci.bus,
@@ -159,7 +160,6 @@ edd_show_host_bus(struct edd_device *edev, char *buf)
 			     info->params.interface_path.pci.function,
 			     info->params.interface_path.pci.channel);
 	} else if (!strncmp(info->params.host_bus_type, "IBND", 4) ||
-		   !strncmp(info->params.host_bus_type, "XPRS", 4) ||
 		   !strncmp(info->params.host_bus_type, "HTPT", 4)) {
 		p += scnprintf(p, left,
 			     "\tTBD: %llx\n",
@@ -233,6 +233,8 @@ edd_show_interface(struct edd_device *edev, char *buf)
 
 /**
  * edd_show_raw_data() - copies raw data to buffer for userspace to parse
+ * @edev: target edd_device
+ * @buf: output buffer
  *
  * Returns: number of bytes written, or -EINVAL on failure
  */
@@ -529,8 +531,8 @@ static int
 edd_has_edd30(struct edd_device *edev)
 {
 	struct edd_info *info;
-	int i, nonzero_path = 0;
-	char c;
+	int i;
+	u8 csum = 0;
 
 	if (!edev)
 		return 0;
@@ -542,16 +544,16 @@ edd_has_edd30(struct edd_device *edev)
 		return 0;
 	}
 
-	for (i = 30; i <= 73; i++) {
-		c = *(((uint8_t *) info) + i + 4);
-		if (c) {
-			nonzero_path++;
-			break;
-		}
-	}
-	if (!nonzero_path) {
+
+	/* We support only T13 spec */
+	if (info->params.device_path_info_length != 44)
 		return 0;
-	}
+
+	for (i = 30; i < info->params.device_path_info_length + 30; i++)
+		csum += *(((u8 *)&info->params) + i);
+
+	if (csum)
+		return 0;
 
 	return 1;
 }
@@ -623,19 +625,19 @@ static void edd_release(struct kobject * kobj)
 	kfree(dev);
 }
 
-static struct kobj_type ktype_edd = {
+static struct kobj_type edd_ktype = {
 	.release	= edd_release,
 	.sysfs_ops	= &edd_attr_ops,
 	.default_attrs	= def_attrs,
 };
 
-static decl_subsys(edd,&ktype_edd,NULL);
+static struct kset *edd_kset;
 
 
 /**
  * edd_dev_is_type() - is this EDD device a 'type' device?
- * @edev
- * @type - a host bus or interface identifier string per the EDD spec
+ * @edev: target edd_device
+ * @type: a host bus or interface identifier string per the EDD spec
  *
  * Returns 1 (TRUE) if it is a 'type' device, 0 otherwise.
  */
@@ -657,7 +659,7 @@ edd_dev_is_type(struct edd_device *edev, const char *type)
 
 /**
  * edd_get_pci_dev() - finds pci_dev that matches edev
- * @edev - edd_device
+ * @edev: edd_device
  *
  * Returns pci_dev if found, or NULL
  */
@@ -666,11 +668,11 @@ edd_get_pci_dev(struct edd_device *edev)
 {
 	struct edd_info *info = edd_dev_get_info(edev);
 
-	if (edd_dev_is_type(edev, "PCI")) {
-		return pci_find_slot(info->params.interface_path.pci.bus,
-				     PCI_DEVFN(info->params.interface_path.pci.slot,
-					       info->params.interface_path.pci.
-					       function));
+	if (edd_dev_is_type(edev, "PCI") || edd_dev_is_type(edev, "XPRS")) {
+		return pci_get_domain_bus_and_slot(0,
+				info->params.interface_path.pci.bus,
+				PCI_DEVFN(info->params.interface_path.pci.slot,
+				info->params.interface_path.pci.function));
 	}
 	return NULL;
 }
@@ -680,15 +682,18 @@ edd_create_symlink_to_pcidev(struct edd_device *edev)
 {
 
 	struct pci_dev *pci_dev = edd_get_pci_dev(edev);
+	int ret;
 	if (!pci_dev)
 		return 1;
-	return sysfs_create_link(&edev->kobj,&pci_dev->dev.kobj,"pci_dev");
+	ret = sysfs_create_link(&edev->kobj,&pci_dev->dev.kobj,"pci_dev");
+	pci_dev_put(pci_dev);
+	return ret;
 }
 
 static inline void
 edd_device_unregister(struct edd_device *edev)
 {
-	kobject_unregister(&edev->kobj);
+	kobject_put(&edev->kobj);
 }
 
 static void edd_populate_dir(struct edd_device * edev)
@@ -715,14 +720,14 @@ edd_device_register(struct edd_device *edev, int i)
 
 	if (!edev)
 		return 1;
-	memset(edev, 0, sizeof (*edev));
 	edd_dev_set_info(edev, i);
-	kobject_set_name(&edev->kobj, "int13_dev%02x",
-			 0x80 + i);
-	kobj_set_kset_s(edev,edd_subsys);
-	error = kobject_register(&edev->kobj);
-	if (!error)
+	edev->kobj.kset = edd_kset;
+	error = kobject_init_and_add(&edev->kobj, &edd_ktype, NULL,
+				     "int13_dev%02x", 0x80 + i);
+	if (!error) {
 		edd_populate_dir(edev);
+		kobject_uevent(&edev->kobj, KOBJ_ADD);
+	}
 	return error;
 }
 
@@ -739,7 +744,7 @@ static inline int edd_num_devices(void)
 static int __init
 edd_init(void)
 {
-	unsigned int i;
+	int i;
 	int rc=0;
 	struct edd_device *edev;
 
@@ -748,28 +753,34 @@ edd_init(void)
 
 	if (!edd_num_devices()) {
 		printk(KERN_INFO "EDD information not available.\n");
-		return 1;
+		return -ENODEV;
 	}
 
-	rc = firmware_register(&edd_subsys);
-	if (rc)
-		return rc;
+	edd_kset = kset_create_and_add("edd", NULL, firmware_kobj);
+	if (!edd_kset)
+		return -ENOMEM;
 
-	for (i = 0; i < edd_num_devices() && !rc; i++) {
-		edev = kmalloc(sizeof (*edev), GFP_KERNEL);
-		if (!edev)
-			return -ENOMEM;
+	for (i = 0; i < edd_num_devices(); i++) {
+		edev = kzalloc(sizeof (*edev), GFP_KERNEL);
+		if (!edev) {
+			rc = -ENOMEM;
+			goto out;
+		}
 
 		rc = edd_device_register(edev, i);
 		if (rc) {
 			kfree(edev);
-			break;
+			goto out;
 		}
 		edd_devices[i] = edev;
 	}
 
-	if (rc)
-		firmware_unregister(&edd_subsys);
+	return 0;
+
+out:
+	while (--i >= 0)
+		edd_device_unregister(edd_devices[i]);
+	kset_unregister(edd_kset);
 	return rc;
 }
 
@@ -783,7 +794,7 @@ edd_exit(void)
 		if ((edev = edd_devices[i]))
 			edd_device_unregister(edev);
 	}
-	firmware_unregister(&edd_subsys);
+	kset_unregister(edd_kset);
 }
 
 late_initcall(edd_init);

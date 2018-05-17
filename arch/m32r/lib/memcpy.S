@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  linux/arch/m32r/lib/memcpy.S
  *
@@ -10,11 +11,8 @@
  *        src: r1
  *        n  : r2
  */
-/* $Id$ */
-
 
 	.text
-#include <linux/config.h>
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 

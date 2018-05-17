@@ -259,7 +259,7 @@ This index of '2' means that in order to connect to vty-server adapter
 
 It should be noted that due to the system hotplug I/O capabilities of a
 system the /dev/hvcs* entry that interacts with a particular vty-server
-adapter is not guarenteed to remain the same across system reboots.  Look
+adapter is not guaranteed to remain the same across system reboots.  Look
 in the Q & A section for more on this issue.
 
 ---------------------------------------------------------------------------
@@ -347,8 +347,8 @@ address that is created by firmware.  An example vty-server sysfs entry
 looks like the following:
 
 	Pow5:/sys/bus/vio/drivers/hvcs/30000004 # ls
-	.   current_vty   devspec  name          partner_vtys
-	..  detach_state  index    partner_clcs  vterm_state
+	.   current_vty   devspec       name          partner_vtys
+	..  index         partner_clcs  vterm_state
 
 Each entry is provided, by default with a "name" attribute.  Reading the
 "name" attribute will reveal the device type as shown in the following
@@ -528,7 +528,7 @@ this driver assignment of hotplug added vty-servers may be in a different
 order than how they would be exposed on module load.  Rebooting or
 reloading the module after dynamic addition may result in the /dev/hvcs*
 and vty-server coupling changing if a vty-server adapter was added in a
-slot inbetween two other vty-server adapters.  Refer to the section above
+slot between two other vty-server adapters.  Refer to the section above
 on how to determine which vty-server goes with which /dev/hvcs* node.
 Hint; look at the sysfs "index" attribute for the vty-server.
 
@@ -558,9 +558,9 @@ partitions.
 
 The proper channel for reporting bugs is either through the Linux OS
 distribution company that provided your OS or by posting issues to the
-ppc64 development mailing list at:
+PowerPC development mailing list at:
 
-linuxppc64-dev@lists.linuxppc.org
+linuxppc-dev@lists.ozlabs.org
 
 This request is to provide a documented and searchable public exchange
 of the problems and solutions surrounding this driver for the benefit of

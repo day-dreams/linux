@@ -4,10 +4,9 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/interrupt.h>
 #include <linux/time.h>
 #include <linux/timer.h>
@@ -17,15 +16,18 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/irq.h>
 #include <asm/mach-types.h>
 
 #define __NWBUTTON_C		/* Tell the header file who we are */
 #include "nwbutton.h"
 
+static void button_sequence_finished(struct timer_list *unused);
+
 static int button_press_count;		/* The count of button presses */
-static struct timer_list button_timer;	/* Times for the end of a sequence */ 
+/* Times for the end of a sequence */
+static DEFINE_TIMER(button_timer, button_sequence_finished);
 static DECLARE_WAIT_QUEUE_HEAD(button_wait_queue); /* Used for blocking read */
 static char button_output_buffer[32];	/* Stores data to write out of device */
 static int bcount;			/* The number of bytes in the buffer */
@@ -73,7 +75,7 @@ int button_add_callback (void (*callback) (void), int count)
  * with -EINVAL. If there is more than one entry with the same address,
  * because it searches the list from end to beginning, it will unregister the
  * last one to be registered first (FILO- First In Last Out).
- * Note that this is not neccessarily true if the entries are not submitted
+ * Note that this is not necessarily true if the entries are not submitted
  * at the same time, because another driver could have unregistered a callback
  * between the submissions creating a gap earlier in the list, which would
  * be filled first at submission time.
@@ -91,9 +93,9 @@ int button_del_callback (void (*callback) (void))
 			button_callback_list [lp].count = 0;
 			callback_count--;
 			return 0;
-		};
+		}
 		lp--;
-	};
+	}
 	return -EINVAL;
 }
 
@@ -125,13 +127,11 @@ static void button_consume_callbacks (int bpcount)
  * any matching registered function callbacks, initiate reboot, etc.).
  */
 
-static void button_sequence_finished (unsigned long parameters)
+static void button_sequence_finished(struct timer_list *unused)
 {
-#ifdef CONFIG_NWBUTTON_REBOOT		/* Reboot using button is enabled */
-	if (button_press_count == reboot_count) {
-		kill_proc (1, SIGINT, 1);	/* Ask init to reboot us */
-	}
-#endif /* CONFIG_NWBUTTON_REBOOT */
+	if (IS_ENABLED(CONFIG_NWBUTTON_REBOOT) &&
+	    button_press_count == reboot_count)
+		kill_cad_pid(SIGINT, 1);	/* Ask init to reboot us */
 	button_consume_callbacks (button_press_count);
 	bcount = sprintf (button_output_buffer, "%d\n", button_press_count);
 	button_press_count = 0;		/* Reset the button press counter */
@@ -146,16 +146,10 @@ static void button_sequence_finished (unsigned long parameters)
  *  increments the counter.
  */ 
 
-static irqreturn_t button_handler (int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t button_handler (int irq, void *dev_id)
 {
-	if (button_press_count) {
-		del_timer (&button_timer);
-	}
 	button_press_count++;
-	init_timer (&button_timer);
-	button_timer.function = button_sequence_finished;
-	button_timer.expires = (jiffies + bdelay);
-	add_timer (&button_timer);
+	mod_timer(&button_timer, jiffies + bdelay);
 
 	return IRQ_HANDLED;
 }
@@ -173,7 +167,10 @@ static irqreturn_t button_handler (int irq, void *dev_id, struct pt_regs *regs)
 static int button_read (struct file *filp, char __user *buffer,
 			size_t count, loff_t *ppos)
 {
-	interruptible_sleep_on (&button_wait_queue);
+	DEFINE_WAIT(wait);
+	prepare_to_wait(&button_wait_queue, &wait, TASK_INTERRUPTIBLE);
+	schedule();
+	finish_wait(&button_wait_queue, &wait);
 	return (copy_to_user (buffer, &button_output_buffer, bcount))
 		 ? -EFAULT : bcount;
 }
@@ -184,9 +181,10 @@ static int button_read (struct file *filp, char __user *buffer,
  * attempts to perform these operations on the device.
  */
 
-static struct file_operations button_fops = {
+static const struct file_operations button_fops = {
 	.owner		= THIS_MODULE,
 	.read		= button_read,
+	.llseek		= noop_llseek,
 };
 
 /* 
@@ -224,7 +222,7 @@ static int __init nwbutton_init(void)
 		return -EBUSY;
 	}
 
-	if (request_irq (IRQ_NETWINDER_BUTTON, button_handler, SA_INTERRUPT,
+	if (request_irq (IRQ_NETWINDER_BUTTON, button_handler, 0,
 			"nwbutton", NULL)) {
 		printk (KERN_WARNING "nwbutton: IRQ %d is not free.\n",
 				IRQ_NETWINDER_BUTTON);

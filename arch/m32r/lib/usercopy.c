@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * User address space access functions.
  * The non inlined parts of asm-m32r/uaccess.h are here.
@@ -6,32 +7,10 @@
  * Copyright 1997 Linus Torvalds
  * Copyright 2001, 2002, 2004 Hirokazu Takata
  */
-#include <linux/config.h>
 #include <linux/prefetch.h>
 #include <linux/string.h>
 #include <linux/thread_info.h>
-#include <asm/uaccess.h>
-
-unsigned long
-__generic_copy_to_user(void *to, const void *from, unsigned long n)
-{
-	prefetch(from);
-	if (access_ok(VERIFY_WRITE, to, n))
-		__copy_user(to,from,n);
-	return n;
-}
-
-unsigned long
-__generic_copy_from_user(void *to, const void *from, unsigned long n)
-{
-	prefetchw(to);
-	if (access_ok(VERIFY_READ, from, n))
-		__copy_user_zeroing(to,from,n);
-	else
-		memset(to, 0, n);
-	return n;
-}
-
+#include <linux/uaccess.h>
 
 /*
  * Copy a null terminated string from userspace.
@@ -64,7 +43,7 @@ do {									\
 		"	.balign 4\n"					\
 		"	.long 0b,3b\n"					\
 		".previous"						\
-		: "=r"(res), "=r"(count), "=&r" (__d0), "=&r" (__d1),	\
+		: "=&r"(res), "=&r"(count), "=&r" (__d0), "=&r" (__d1),	\
 		  "=&r" (__d2)						\
 		: "i"(-EFAULT), "0"(count), "1"(count), "3"(src), 	\
 		  "4"(dst)						\
@@ -101,7 +80,7 @@ do {									\
 		"	.balign 4\n"					\
 		"	.long 0b,3b\n"					\
 		".previous"						\
-		: "=r"(res), "=r"(count), "=&r" (__d0), "=&r" (__d1),	\
+		: "=&r"(res), "=&r"(count), "=&r" (__d0), "=&r" (__d1),	\
 		  "=&r" (__d2)						\
 		: "i"(-EFAULT), "0"(count), "1"(count), "3"(src),	\
 		  "4"(dst)						\
@@ -111,15 +90,7 @@ do {									\
 #endif /* CONFIG_ISA_DUAL_ISSUE */
 
 long
-__strncpy_from_user(char *dst, const char *src, long count)
-{
-	long res;
-	__do_strncpy_from_user(dst, src, count, res);
-	return res;
-}
-
-long
-strncpy_from_user(char *dst, const char *src, long count)
+strncpy_from_user(char *dst, const char __user *src, long count)
 {
 	long res = -EFAULT;
 	if (access_ok(VERIFY_READ, src, 1))
@@ -222,7 +193,7 @@ do {									\
 #endif /* not CONFIG_ISA_DUAL_ISSUE */
 
 unsigned long
-clear_user(void *to, unsigned long n)
+clear_user(void __user *to, unsigned long n)
 {
 	if (access_ok(VERIFY_WRITE, to, n))
 		__do_clear_user(to, n);
@@ -230,7 +201,7 @@ clear_user(void *to, unsigned long n)
 }
 
 unsigned long
-__clear_user(void *to, unsigned long n)
+__clear_user(void __user *to, unsigned long n)
 {
 	__do_clear_user(to, n);
 	return n;
@@ -244,7 +215,7 @@ __clear_user(void *to, unsigned long n)
 
 #ifdef CONFIG_ISA_DUAL_ISSUE
 
-long strnlen_user(const char *s, long n)
+long strnlen_user(const char __user *s, long n)
 {
 	unsigned long mask = -__addr_ok(s);
 	unsigned long res;
@@ -294,7 +265,7 @@ long strnlen_user(const char *s, long n)
 		: "0" (n), "1" (s), "r" (n & 3), "r" (mask), "r"(0x01010101)
 		: "r0", "r1", "cbit");
 
-	/* NOTE: strnlen_user() algorism:
+	/* NOTE: strnlen_user() algorithm:
 	 * {
 	 *   char *p;
 	 *   for (p = s; n-- && *p != '\0'; ++p)
@@ -313,7 +284,7 @@ long strnlen_user(const char *s, long n)
 
 #else /* not CONFIG_ISA_DUAL_ISSUE */
 
-long strnlen_user(const char *s, long n)
+long strnlen_user(const char __user *s, long n)
 {
 	unsigned long mask = -__addr_ok(s);
 	unsigned long res;
@@ -370,7 +341,7 @@ long strnlen_user(const char *s, long n)
 		: "0" (n), "1" (s), "r" (n & 3), "r" (mask), "r"(0x01010101)
 		: "r0", "r1", "r2", "r3", "cbit");
 
-	/* NOTE: strnlen_user() algorism:
+	/* NOTE: strnlen_user() algorithm:
 	 * {
 	 *   char *p;
 	 *   for (p = s; n-- && *p != '\0'; ++p)

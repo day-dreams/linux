@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Platform dependent support for HP simulator.
  *
@@ -5,7 +6,6 @@
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  * Copyright (C) 1999 Vijay Chander <vijay@engr.sgi.com>
  */
-#include <linux/config.h>
 
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -22,6 +22,7 @@
 #include <asm/machvec.h>
 #include <asm/pgtable.h>
 #include <asm/sal.h>
+#include <asm/hpsim.h>
 
 #include "hpsim_ssc.h"
 
@@ -29,7 +30,7 @@ static int simcons_init (struct console *, char *);
 static void simcons_write (struct console *, const char *, unsigned);
 static struct tty_driver *simcons_console_device (struct console *, int *);
 
-struct console hpsim_cons = {
+static struct console hpsim_cons = {
 	.name =		"simcons",
 	.write =	simcons_write,
 	.device =	simcons_console_device,
@@ -59,7 +60,18 @@ simcons_write (struct console *cons, const char *buf, unsigned count)
 
 static struct tty_driver *simcons_console_device (struct console *c, int *index)
 {
-	extern struct tty_driver *hp_simserial_driver;
 	*index = c->index;
 	return hp_simserial_driver;
+}
+
+int simcons_register(void)
+{
+	if (!ia64_platform_is("hpsim"))
+		return 1;
+
+	if (hpsim_cons.flags & CON_ENABLED)
+		return 1;
+
+	register_console(&hpsim_cons);
+	return 0;
 }

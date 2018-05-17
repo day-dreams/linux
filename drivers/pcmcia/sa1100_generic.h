@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #include "soc_common.h"
 #include "sa11xx_base.h"
 
@@ -13,6 +14,7 @@ extern int pcmcia_freebird_init(struct device *);
 extern int pcmcia_gcplus_init(struct device *);
 extern int pcmcia_graphicsmaster_init(struct device *);
 extern int pcmcia_h3600_init(struct device *);
+extern int pcmcia_nanoengine_init(struct device *);
 extern int pcmcia_pangolin_init(struct device *);
 extern int pcmcia_pfs168_init(struct device *);
 extern int pcmcia_shannon_init(struct device *);

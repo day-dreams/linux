@@ -1,11 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- *  drivers/s390/char/raw3270.h
- *    IBM/3270 Driver
+ * IBM/3270 Driver
  *
- *  Author(s):
- *    Original 3270 Code for 2.4 written by Richard Hitt (UTS Global)
- *    Rewritten for 2.5 by Martin Schwidefsky <schwidefsky@de.ibm.com>
- *	-- Copyright (C) 2003 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ * Author(s):
+ *   Original 3270 Code for 2.4 written by Richard Hitt (UTS Global)
+ *   Rewritten for 2.5 by Martin Schwidefsky <schwidefsky@de.ibm.com>
+ *     Copyright IBM Corp. 2003, 2009
  */
 
 #include <asm/idals.h>
@@ -21,6 +21,7 @@
 
 /* Local Channel Commands */
 #define TC_WRITE	0x01		/* Write */
+#define TC_RDBUF	0x02		/* Read Buffer */
 #define TC_EWRITE	0x05		/* Erase write */
 #define TC_READMOD	0x06		/* Read modified */
 #define TC_EWRITEA	0x0d		/* Erase write alternate */
@@ -76,7 +77,8 @@
 #define TW_KR		0xc2		/* Keyboard restore */
 #define TW_PLUSALARM	0x04		/* Add this bit for alarm */
 
-#define RAW3270_MAXDEVS	256
+#define RAW3270_FIRSTMINOR	1	/* First minor number */
+#define RAW3270_MAXDEVS		255	/* Max number of 3270 devices */
 
 /* For TUBGETMOD and TUBSETMOD. Should include. */
 struct raw3270_iocb {
@@ -90,6 +92,7 @@ struct raw3270_iocb {
 
 struct raw3270;
 struct raw3270_view;
+extern struct class *class3270;
 
 /* 3270 CCW request */
 struct raw3270_request {
@@ -123,22 +126,17 @@ raw3270_request_final(struct raw3270_request *rq)
 
 void raw3270_buffer_address(struct raw3270 *, char *, unsigned short);
 
-/* Return value of *intv (see raw3270_fn below) can be one of the following: */
-#define RAW3270_IO_DONE		0	/* request finished */
-#define RAW3270_IO_BUSY		1	/* request still active */
-#define RAW3270_IO_RETRY	2	/* retry current request */
-#define RAW3270_IO_STOP		3	/* kill current request */
-
 /*
  * Functions of a 3270 view.
  */
 struct raw3270_fn {
 	int  (*activate)(struct raw3270_view *);
 	void (*deactivate)(struct raw3270_view *);
-	int  (*intv)(struct raw3270_view *,
+	void (*intv)(struct raw3270_view *,
 		     struct raw3270_request *, struct irb *);
 	void (*release)(struct raw3270_view *);
 	void (*free)(struct raw3270_view *);
+	void (*resize)(struct raw3270_view *, int, int, int);
 };
 
 /*
@@ -166,7 +164,11 @@ void raw3270_del_view(struct raw3270_view *);
 void raw3270_deactivate_view(struct raw3270_view *);
 struct raw3270_view *raw3270_find_view(struct raw3270_fn *, int);
 int raw3270_start(struct raw3270_view *, struct raw3270_request *);
+int raw3270_start_locked(struct raw3270_view *, struct raw3270_request *);
 int raw3270_start_irq(struct raw3270_view *, struct raw3270_request *);
+int raw3270_reset(struct raw3270_view *);
+struct raw3270_view *raw3270_view(struct raw3270_view *);
+int raw3270_view_active(struct raw3270_view *);
 
 /* Reference count inliner for view structures. */
 static inline void
@@ -184,12 +186,19 @@ raw3270_put_view(struct raw3270_view *view)
 		wake_up(&raw3270_wait_queue);
 }
 
-struct raw3270 *raw3270_setup_console(struct ccw_device *cdev);
+struct raw3270 *raw3270_setup_console(void);
 void raw3270_wait_cons_dev(struct raw3270 *);
 
 /* Notifier for device addition/removal */
-int raw3270_register_notifier(void (*notifier)(int, int));
-void raw3270_unregister_notifier(void (*notifier)(int, int));
+struct raw3270_notifier {
+	struct list_head list;
+	void (*create)(int minor);
+	void (*destroy)(int minor);
+};
+
+int raw3270_register_notifier(struct raw3270_notifier *);
+void raw3270_unregister_notifier(struct raw3270_notifier *);
+void raw3270_pm_unfreeze(struct raw3270_view *);
 
 /*
  * Little memory allocator for string objects. 
@@ -226,7 +235,7 @@ alloc_string(struct list_head *free_list, unsigned long len)
 		INIT_LIST_HEAD(&cs->update);
 		return cs;
 	}
-	return 0;
+	return NULL;
 }
 
 static inline unsigned long

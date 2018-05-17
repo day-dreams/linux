@@ -10,35 +10,41 @@
  */
 
 #include <linux/sched.h>
-#include <linux/slab.h>
+#include <linux/gfp.h>
 #include <linux/mm.h>
 #include <linux/highmem.h>
+#include <linux/quicklist.h>
 #include <asm/pgalloc.h>
 #include <asm/page.h>
 #include <asm/cacheflush.h>
 
 pgd_t swapper_pg_dir[PTRS_PER_PGD] __attribute__((aligned(PAGE_SIZE)));
-kmem_cache_t *pgd_cache;
 
 pte_t *pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
 {
-	pte_t *pte = (pte_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT);
+	pte_t *pte = (pte_t *)__get_free_page(GFP_KERNEL);
 	if (pte)
 		clear_page(pte);
 	return pte;
 }
 
-struct page *pte_alloc_one(struct mm_struct *mm, unsigned long address)
+pgtable_t pte_alloc_one(struct mm_struct *mm, unsigned long address)
 {
 	struct page *page;
 
 #ifdef CONFIG_HIGHPTE
-	page = alloc_pages(GFP_KERNEL|__GFP_HIGHMEM|__GFP_REPEAT, 0);
+	page = alloc_pages(GFP_KERNEL|__GFP_HIGHMEM, 0);
 #else
-	page = alloc_pages(GFP_KERNEL|__GFP_REPEAT, 0);
+	page = alloc_pages(GFP_KERNEL, 0);
 #endif
-	if (page)
-		clear_highpage(page);
+	if (!page)
+		return NULL;
+
+	clear_highpage(page);
+	if (!pgtable_page_ctor(page)) {
+		__free_page(page);
+		return NULL;
+	}
 	flush_dcache_page(page);
 	return page;
 }
@@ -75,7 +81,7 @@ void __set_pmd(pmd_t *pmdptr, unsigned long pmd)
  * checks at dup_mmap(), exec(), and other mmlist addition points
  * could be used. The locking scheme was chosen on the basis of
  * manfred's recommendations and having no core impact whatsoever.
- * -- wli
+ * -- nyc
  */
 DEFINE_SPINLOCK(pgd_lock);
 struct page *pgd_list;
@@ -85,22 +91,22 @@ static inline void pgd_list_add(pgd_t *pgd)
 	struct page *page = virt_to_page(pgd);
 	page->index = (unsigned long) pgd_list;
 	if (pgd_list)
-		pgd_list->private = (unsigned long) &page->index;
+		set_page_private(pgd_list, (unsigned long) &page->index);
 	pgd_list = page;
-	page->private = (unsigned long) &pgd_list;
+	set_page_private(page, (unsigned long)&pgd_list);
 }
 
 static inline void pgd_list_del(pgd_t *pgd)
 {
 	struct page *next, **pprev, *page = virt_to_page(pgd);
 	next = (struct page *) page->index;
-	pprev = (struct page **) page->private;
+	pprev = (struct page **) page_private(page);
 	*pprev = next;
 	if (next)
-		next->private = (unsigned long) pprev;
+		set_page_private(next, (unsigned long) pprev);
 }
 
-void pgd_ctor(void *pgd, kmem_cache_t *cache, unsigned long unused)
+void pgd_ctor(void *pgd)
 {
 	unsigned long flags;
 
@@ -120,7 +126,7 @@ void pgd_ctor(void *pgd, kmem_cache_t *cache, unsigned long unused)
 }
 
 /* never called when PTRS_PER_PMD > 1 */
-void pgd_dtor(void *pgd, kmem_cache_t *cache, unsigned long unused)
+void pgd_dtor(void *pgd)
 {
 	unsigned long flags; /* can be called from interrupt context */
 
@@ -131,29 +137,21 @@ void pgd_dtor(void *pgd, kmem_cache_t *cache, unsigned long unused)
 
 pgd_t *pgd_alloc(struct mm_struct *mm)
 {
-	pgd_t *pgd;
-
-	pgd = kmem_cache_alloc(pgd_cache, GFP_KERNEL);
-	if (!pgd)
-		return pgd;
-
-	return pgd;
+	return quicklist_alloc(0, GFP_KERNEL, pgd_ctor);
 }
 
-void pgd_free(pgd_t *pgd)
+void pgd_free(struct mm_struct *mm, pgd_t *pgd)
 {
 	/* in the non-PAE case, clear_page_tables() clears user pgd entries */
-	kmem_cache_free(pgd_cache, pgd);
+ 	quicklist_free(0, pgd_dtor, pgd);
 }
 
 void __init pgtable_cache_init(void)
 {
-	pgd_cache = kmem_cache_create("pgd",
-				      PTRS_PER_PGD * sizeof(pgd_t),
-				      PTRS_PER_PGD * sizeof(pgd_t),
-				      0,
-				      pgd_ctor,
-				      pgd_dtor);
-	if (!pgd_cache)
-		panic("pgtable_cache_init(): Cannot create pgd cache");
 }
+
+void check_pgt_cache(void)
+{
+	quicklist_trim(0, pgd_dtor, 25, 16);
+}
+

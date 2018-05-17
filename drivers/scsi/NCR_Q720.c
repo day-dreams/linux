@@ -10,6 +10,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mca.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/delay.h>
@@ -54,7 +55,7 @@ static struct scsi_host_template NCR_Q720_tpnt = {
 };
 
 static irqreturn_t
-NCR_Q720_intr(int irq, void *data, struct pt_regs * regs)
+NCR_Q720_intr(int irq, void *data)
 {
 	struct NCR_Q720_private *p = (struct NCR_Q720_private *)data;
 	__u8 sir = (readb(p->mem_base + 0x0d) & 0xf0) >> 4;
@@ -68,7 +69,7 @@ NCR_Q720_intr(int irq, void *data, struct pt_regs * regs)
 
 	while((siop = ffz(sir)) < p->siops) {
 		sir |= 1<<siop;
-		ncr53c8xx_intr(irq, p->hosts[siop], regs);
+		ncr53c8xx_intr(irq, p->hosts[siop]);
 	}
 	return IRQ_HANDLED;
 }
@@ -148,11 +149,10 @@ NCR_Q720_probe(struct device *dev)
 	__u32 base_addr, mem_size;
 	void __iomem *mem_base;
 
-	p = kmalloc(sizeof(*p), GFP_KERNEL);
+	p = kzalloc(sizeof(*p), GFP_KERNEL);
 	if (!p)
 		return -ENOMEM;
 
-	memset(p, 0, sizeof(*p));
 	pos2 = mca_device_read_pos(mca_dev, 2);
 	/* enable device */
 	pos2 |=  NCR_Q720_POS2_BOARD_ENABLE | NCR_Q720_POS2_INTERRUPT_ENABLE;
@@ -217,15 +217,14 @@ NCR_Q720_probe(struct device *dev)
 	}
 	
 	if (dma_declare_coherent_memory(dev, base_addr, base_addr,
-					mem_size, DMA_MEMORY_MAP)
-	    != DMA_MEMORY_MAP) {
+					mem_size, 0)) {
 		printk(KERN_ERR "NCR_Q720: DMA declare memory failed\n");
 		goto out_release_region;
 	}
 
 	/* The first 1k of the memory buffer is a memory map of the registers
 	 */
-	mem_base = (__u32)dma_mark_declared_memory_occupied(dev, base_addr,
+	mem_base = dma_mark_declared_memory_occupied(dev, base_addr,
 							    1024);
 	if (IS_ERR(mem_base)) {
 		printk("NCR_Q720 failed to reserve memory mapped region\n");
@@ -265,7 +264,7 @@ NCR_Q720_probe(struct device *dev)
 	p->irq = irq;
 	p->siops = siops;
 
-	if (request_irq(irq, NCR_Q720_intr, SA_SHIRQ, "NCR_Q720", p)) {
+	if (request_irq(irq, NCR_Q720_intr, IRQF_SHARED, "NCR_Q720", p)) {
 		printk(KERN_ERR "NCR_Q720: request irq %d failed\n", irq);
 		goto out_release;
 	}
@@ -351,7 +350,7 @@ static struct mca_driver NCR_Q720_driver = {
 		.name		= "NCR_Q720",
 		.bus		= &mca_bus_type,
 		.probe		= NCR_Q720_probe,
-		.remove		= __devexit_p(NCR_Q720_remove),
+		.remove		= NCR_Q720_remove,
 	},
 };
 

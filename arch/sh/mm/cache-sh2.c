@@ -2,9 +2,11 @@
  * arch/sh/mm/cache-sh2.c
  *
  * Copyright (C) 2002 Paul Mundt
+ * Copyright (C) 2008 Yoshinori Sato
  *
  * Released under the terms of the GNU GPL v2.0.
  */
+
 #include <linux/init.h>
 #include <linux/mm.h>
 
@@ -14,37 +16,76 @@
 #include <asm/cacheflush.h>
 #include <asm/io.h>
 
-/*
- * Calculate the OC address and set the way bit on the SH-2.
- *
- * We must have already jump_to_P2()'ed prior to calling this
- * function, since we rely on CCR manipulation to do the
- * Right Thing(tm).
- */
-unsigned long __get_oc_addr(unsigned long set, unsigned long way)
+static void sh2__flush_wback_region(void *start, int size)
 {
-	unsigned long ccr;
+	unsigned long v;
+	unsigned long begin, end;
 
-	/*
-	 * On SH-2 the way bit isn't tracked in the address field
-	 * if we're doing address array access .. instead, we need
-	 * to manually switch out the way in the CCR.
-	 */
-	ccr = ctrl_inl(CCR);
-	ccr &= ~0x00c0;
-	ccr |= way << cpu_data->dcache.way_shift;
-
-	/*
-	 * Despite the number of sets being halved, we end up losing
-	 * the first 2 ways to OCRAM instead of the last 2 (if we're
-	 * 4-way). As a result, forcibly setting the W1 bit handily
-	 * bumps us up 2 ways.
-	 */
-	if (ccr & CCR_CACHE_ORA)
-		ccr |= 1 << (cpu_data->dcache.way_shift + 1);
-
-	ctrl_outl(ccr, CCR);
-
-	return CACHE_OC_ADDRESS_ARRAY | (set << cpu_data->dcache.entry_shift);
+	begin = (unsigned long)start & ~(L1_CACHE_BYTES-1);
+	end = ((unsigned long)start + size + L1_CACHE_BYTES-1)
+		& ~(L1_CACHE_BYTES-1);
+	for (v = begin; v < end; v+=L1_CACHE_BYTES) {
+		unsigned long addr = CACHE_OC_ADDRESS_ARRAY | (v & 0x00000ff0);
+		int way;
+		for (way = 0; way < 4; way++) {
+			unsigned long data =  __raw_readl(addr | (way << 12));
+			if ((data & CACHE_PHYSADDR_MASK) == (v & CACHE_PHYSADDR_MASK)) {
+				data &= ~SH_CACHE_UPDATED;
+				__raw_writel(data, addr | (way << 12));
+			}
+		}
+	}
 }
 
+static void sh2__flush_purge_region(void *start, int size)
+{
+	unsigned long v;
+	unsigned long begin, end;
+
+	begin = (unsigned long)start & ~(L1_CACHE_BYTES-1);
+	end = ((unsigned long)start + size + L1_CACHE_BYTES-1)
+		& ~(L1_CACHE_BYTES-1);
+
+	for (v = begin; v < end; v+=L1_CACHE_BYTES)
+		__raw_writel((v & CACHE_PHYSADDR_MASK),
+			  CACHE_OC_ADDRESS_ARRAY | (v & 0x00000ff0) | 0x00000008);
+}
+
+static void sh2__flush_invalidate_region(void *start, int size)
+{
+#ifdef CONFIG_CACHE_WRITEBACK
+	/*
+	 * SH-2 does not support individual line invalidation, only a
+	 * global invalidate.
+	 */
+	unsigned long ccr;
+	unsigned long flags;
+	local_irq_save(flags);
+	jump_to_uncached();
+
+	ccr = __raw_readl(SH_CCR);
+	ccr |= CCR_CACHE_INVALIDATE;
+	__raw_writel(ccr, SH_CCR);
+
+	back_to_cached();
+	local_irq_restore(flags);
+#else
+	unsigned long v;
+	unsigned long begin, end;
+
+	begin = (unsigned long)start & ~(L1_CACHE_BYTES-1);
+	end = ((unsigned long)start + size + L1_CACHE_BYTES-1)
+		& ~(L1_CACHE_BYTES-1);
+
+	for (v = begin; v < end; v+=L1_CACHE_BYTES)
+		__raw_writel((v & CACHE_PHYSADDR_MASK),
+			  CACHE_OC_ADDRESS_ARRAY | (v & 0x00000ff0) | 0x00000008);
+#endif
+}
+
+void __init sh2_cache_init(void)
+{
+	__flush_wback_region		= sh2__flush_wback_region;
+	__flush_purge_region		= sh2__flush_purge_region;
+	__flush_invalidate_region	= sh2__flush_invalidate_region;
+}

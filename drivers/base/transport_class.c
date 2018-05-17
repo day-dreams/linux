@@ -1,13 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * transport_class.c - implementation of generic transport classes
  *                     using attribute_containers
  *
  * Copyright (c) 2005 - James Bottomley <James.Bottomley@steeleye.com>
  *
- * This file is licensed under GPLv2
- *
  * The basic idea here is to allow any "device controller" (which
- * would most often be a Host Bus Adapter" to use the services of one
+ * would most often be a Host Bus Adapter to use the services of one
  * or more tranport classes for performing transport specific
  * services.  Transport specific services are things that the generic
  * command layer doesn't want to know about (speed settings, line
@@ -27,6 +26,7 @@
  * transport class is framed entirely in terms of generic devices to
  * allow it to be used by any physical HBA in the system.
  */
+#include <linux/export.h>
 #include <linux/attribute_container.h>
 #include <linux/transport_class.h>
 
@@ -64,7 +64,9 @@ void transport_class_unregister(struct transport_class *tclass)
 }
 EXPORT_SYMBOL_GPL(transport_class_unregister);
 
-static int anon_transport_dummy_function(struct device *dev)
+static int anon_transport_dummy_function(struct transport_container *tc,
+					 struct device *dev,
+					 struct device *cdev)
 {
 	/* do nothing */
 	return 0;
@@ -106,26 +108,26 @@ EXPORT_SYMBOL_GPL(anon_transport_class_register);
  */
 void anon_transport_class_unregister(struct anon_transport_class *atc)
 {
-	attribute_container_unregister(&atc->container);
+	if (unlikely(attribute_container_unregister(&atc->container)))
+		BUG();
 }
 EXPORT_SYMBOL_GPL(anon_transport_class_unregister);
 
 static int transport_setup_classdev(struct attribute_container *cont,
 				    struct device *dev,
-				    struct class_device *classdev)
+				    struct device *classdev)
 {
 	struct transport_class *tclass = class_to_transport_class(cont->class);
+	struct transport_container *tcont = attribute_container_to_transport_container(cont);
 
 	if (tclass->setup)
-		tclass->setup(dev);
+		tclass->setup(tcont, dev, classdev);
 
 	return 0;
 }
 
 /**
- * transport_setup_device - declare a new dev for transport class association
- *			    but don't make it visible yet.
- *
+ * transport_setup_device - declare a new dev for transport class association but don't make it visible yet.
  * @dev: the generic device representing the entity being added
  *
  * Usually, dev represents some component in the HBA system (either
@@ -145,6 +147,20 @@ void transport_setup_device(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(transport_setup_device);
 
+static int transport_add_class_device(struct attribute_container *cont,
+				      struct device *dev,
+				      struct device *classdev)
+{
+	int error = attribute_container_add_class_device(classdev);
+	struct transport_container *tcont = 
+		attribute_container_to_transport_container(cont);
+
+	if (!error && tcont->statistics)
+		error = sysfs_create_group(&classdev->kobj, tcont->statistics);
+
+	return error;
+}
+
 
 /**
  * transport_add_device - declare a new dev for transport class association
@@ -159,18 +175,19 @@ EXPORT_SYMBOL_GPL(transport_setup_device);
 
 void transport_add_device(struct device *dev)
 {
-	attribute_container_device_trigger(dev,
-			   attribute_container_add_class_device_adapter);
+	attribute_container_device_trigger(dev, transport_add_class_device);
 }
 EXPORT_SYMBOL_GPL(transport_add_device);
 
 static int transport_configure(struct attribute_container *cont,
-			       struct device *dev)
+			       struct device *dev,
+			       struct device *cdev)
 {
 	struct transport_class *tclass = class_to_transport_class(cont->class);
+	struct transport_container *tcont = attribute_container_to_transport_container(cont);
 
 	if (tclass->configure)
-		tclass->configure(dev);
+		tclass->configure(tcont, dev, cdev);
 
 	return 0;
 }
@@ -189,21 +206,26 @@ static int transport_configure(struct attribute_container *cont,
  */
 void transport_configure_device(struct device *dev)
 {
-	attribute_container_trigger(dev, transport_configure);
+	attribute_container_device_trigger(dev, transport_configure);
 }
 EXPORT_SYMBOL_GPL(transport_configure_device);
 
 static int transport_remove_classdev(struct attribute_container *cont,
 				     struct device *dev,
-				     struct class_device *classdev)
+				     struct device *classdev)
 {
+	struct transport_container *tcont = 
+		attribute_container_to_transport_container(cont);
 	struct transport_class *tclass = class_to_transport_class(cont->class);
 
 	if (tclass->remove)
-		tclass->remove(dev);
+		tclass->remove(tcont, dev, classdev);
 
-	if (tclass->remove != anon_transport_dummy_function)
+	if (tclass->remove != anon_transport_dummy_function) {
+		if (tcont->statistics)
+			sysfs_remove_group(&classdev->kobj, tcont->statistics);
 		attribute_container_class_device_del(classdev);
+	}
 
 	return 0;
 }
@@ -229,12 +251,12 @@ EXPORT_SYMBOL_GPL(transport_remove_device);
 
 static void transport_destroy_classdev(struct attribute_container *cont,
 				      struct device *dev,
-				      struct class_device *classdev)
+				      struct device *classdev)
 {
 	struct transport_class *tclass = class_to_transport_class(cont->class);
 
 	if (tclass->remove != anon_transport_dummy_function)
-		class_device_put(classdev);
+		put_device(classdev);
 }
 
 

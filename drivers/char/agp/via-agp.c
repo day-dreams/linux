@@ -1,5 +1,5 @@
 /*
- * VIA AGPGART routines. 
+ * VIA AGPGART routines.
  */
 
 #include <linux/types.h>
@@ -9,7 +9,7 @@
 #include <linux/agp_backend.h>
 #include "agp.h"
 
-static struct pci_device_id agp_via_pci_table[];
+static const struct pci_device_id agp_via_pci_table[];
 
 #define VIA_GARTCTRL	0x80
 #define VIA_APSIZE	0x84
@@ -36,22 +36,22 @@ static int via_fetch_size(void)
 			return values[i].size;
 		}
 	}
+	printk(KERN_ERR PFX "Unknown aperture size from AGP bridge (0x%x)\n", temp);
 	return 0;
 }
 
 
 static int via_configure(void)
 {
-	u32 temp;
 	struct aper_size_info_8 *current_size;
 
 	current_size = A_SIZE_8(agp_bridge->current_size);
 	/* aperture size */
 	pci_write_config_byte(agp_bridge->dev, VIA_APSIZE,
 			      current_size->size_value);
-	/* address to map too */
-	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
-	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
+	/* address to map to */
+	agp_bridge->gart_bus_addr = pci_bus_address(agp_bridge->dev,
+						    AGP_APERTURE_BAR);
 
 	/* GART control register */
 	pci_write_config_dword(agp_bridge->dev, VIA_GARTCTRL, 0x0000000f);
@@ -78,12 +78,17 @@ static void via_cleanup(void)
 
 static void via_tlbflush(struct agp_memory *mem)
 {
-	pci_write_config_dword(agp_bridge->dev, VIA_GARTCTRL, 0x0000008f);
-	pci_write_config_dword(agp_bridge->dev, VIA_GARTCTRL, 0x0000000f);
+	u32 temp;
+
+	pci_read_config_dword(agp_bridge->dev, VIA_GARTCTRL, &temp);
+	temp |= (1<<7);
+	pci_write_config_dword(agp_bridge->dev, VIA_GARTCTRL, temp);
+	temp &= ~(1<<7);
+	pci_write_config_dword(agp_bridge->dev, VIA_GARTCTRL, temp);
 }
 
 
-static struct aper_size_info_8 via_generic_sizes[7] =
+static const struct aper_size_info_8 via_generic_sizes[9] =
 {
 	{256, 65536, 6, 0},
 	{128, 32768, 5, 128},
@@ -91,7 +96,9 @@ static struct aper_size_info_8 via_generic_sizes[7] =
 	{32, 8192, 3, 224},
 	{16, 4096, 2, 240},
 	{8, 2048, 1, 248},
-	{4, 1024, 0, 252}
+	{4, 1024, 0, 252},
+	{2, 512, 0, 254},
+	{1, 256, 0, 255}
 };
 
 
@@ -121,24 +128,24 @@ static int via_configure_agp3(void)
 {
 	u32 temp;
 	struct aper_size_info_16 *current_size;
-    
+
 	current_size = A_SIZE_16(agp_bridge->current_size);
 
-	/* address to map too */
-	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
-	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
+	/* address to map to */
+	agp_bridge->gart_bus_addr = pci_bus_address(agp_bridge->dev,
+						    AGP_APERTURE_BAR);
 
 	/* attbase - aperture GATT base */
 	pci_write_config_dword(agp_bridge->dev, VIA_AGP3_ATTBASE,
 		agp_bridge->gatt_bus_addr & 0xfffff000);
 
-	/* 1. Enable GTLB in RX90<7>, all AGP aperture access needs to fetch 
+	/* 1. Enable GTLB in RX90<7>, all AGP aperture access needs to fetch
 	 *    translation table first.
 	 * 2. Enable AGP aperture in RX91<0>. This bit controls the enabling of the
 	 *    graphics AGP aperture for the AGP3.0 port.
 	 */
 	pci_read_config_dword(agp_bridge->dev, VIA_AGP3_GARTCTRL, &temp);
-	pci_write_config_dword(agp_bridge->dev, VIA_AGP3_GARTCTRL, temp | (3<<7));		
+	pci_write_config_dword(agp_bridge->dev, VIA_AGP3_GARTCTRL, temp | (3<<7));
 	return 0;
 }
 
@@ -162,11 +169,12 @@ static void via_tlbflush_agp3(struct agp_memory *mem)
 }
 
 
-struct agp_bridge_driver via_agp3_driver = {
+static const struct agp_bridge_driver via_agp3_driver = {
 	.owner			= THIS_MODULE,
 	.aperture_sizes		= agp3_generic_sizes,
 	.size_type		= U8_APER_SIZE,
 	.num_aperture_sizes	= 10,
+	.needs_scratch_page	= true,
 	.configure		= via_configure_agp3,
 	.fetch_size		= via_fetch_size_agp3,
 	.cleanup		= via_cleanup_agp3,
@@ -182,14 +190,18 @@ struct agp_bridge_driver via_agp3_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages	= agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages	= agp_generic_destroy_pages,
+	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-struct agp_bridge_driver via_driver = {
+static const struct agp_bridge_driver via_driver = {
 	.owner			= THIS_MODULE,
 	.aperture_sizes		= via_generic_sizes,
 	.size_type		= U8_APER_SIZE,
-	.num_aperture_sizes	= 7,
+	.num_aperture_sizes	= 9,
+	.needs_scratch_page	= true,
 	.configure		= via_configure,
 	.fetch_size		= via_fetch_size,
 	.cleanup		= via_cleanup,
@@ -205,10 +217,13 @@ struct agp_bridge_driver via_driver = {
 	.alloc_by_type		= agp_generic_alloc_by_type,
 	.free_by_type		= agp_generic_free_by_type,
 	.agp_alloc_page		= agp_generic_alloc_page,
+	.agp_alloc_pages	= agp_generic_alloc_pages,
 	.agp_destroy_page	= agp_generic_destroy_page,
+	.agp_destroy_pages	= agp_generic_destroy_pages,
+	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-static struct agp_device_ids via_agp_device_ids[] __devinitdata =
+static struct agp_device_ids via_agp_device_ids[] =
 {
 	{
 		.device_id	= PCI_DEVICE_ID_VIA_82C597_0,
@@ -337,6 +352,12 @@ static struct agp_device_ids via_agp_device_ids[] __devinitdata =
 		.chipset_name	= "PT880",
 	},
 
+	/* PT880 Ultra */
+	{
+		.device_id	= PCI_DEVICE_ID_VIA_PT880ULTRA,
+		.chipset_name	= "PT880 Ultra",
+	},
+
 	/* PT890 */
 	{
 		.device_id	= PCI_DEVICE_ID_VIA_8783_0,
@@ -363,7 +384,40 @@ static struct agp_device_ids via_agp_device_ids[] __devinitdata =
 		.device_id	= PCI_DEVICE_ID_VIA_3296_0,
 		.chipset_name	= "P4M800",
 	},
-
+	/* P4M800CE */
+	{
+		.device_id	= PCI_DEVICE_ID_VIA_P4M800CE,
+		.chipset_name	= "VT3314",
+	},
+	/* VT3324 / CX700 */
+	{
+		.device_id  = PCI_DEVICE_ID_VIA_VT3324,
+		.chipset_name   = "CX700",
+	},
+	/* VT3336 - this is a chipset for AMD Athlon/K8 CPU. Due to K8's unique
+	 * architecture, the AGP resource and behavior are different from
+	 * the traditional AGP which resides only in chipset. AGP is used
+	 * by 3D driver which wasn't available for the VT3336 and VT3364
+	 * generation until now.  Unfortunately, by testing, VT3364 works
+	 * but VT3336 doesn't. - explanation from via, just leave this as
+	 * as a placeholder to avoid future patches adding it back in.
+	 */
+#if 0
+	{
+		.device_id  = PCI_DEVICE_ID_VIA_VT3336,
+		.chipset_name   = "VT3336",
+	},
+#endif
+	/* P4M890 */
+	{
+		.device_id  = PCI_DEVICE_ID_VIA_P4M890,
+		.chipset_name   = "P4M890",
+	},
+	/* P4M900 */
+	{
+		.device_id  = PCI_DEVICE_ID_VIA_VT3364,
+		.chipset_name   = "P4M900",
+	},
 	{ }, /* dummy final entry, always present */
 };
 
@@ -383,8 +437,7 @@ static void check_via_agp3 (struct agp_bridge_data *bridge)
 }
 
 
-static int __devinit agp_via_probe(struct pci_dev *pdev,
-				   const struct pci_device_id *ent)
+static int agp_via_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	struct agp_device_ids *devs = via_agp_device_ids;
 	struct agp_bridge_data *bridge;
@@ -430,7 +483,7 @@ static int __devinit agp_via_probe(struct pci_dev *pdev,
 	return agp_add_bridge(bridge);
 }
 
-static void __devexit agp_via_remove(struct pci_dev *pdev)
+static void agp_via_remove(struct pci_dev *pdev)
 {
 	struct agp_bridge_data *bridge = pci_get_drvdata(pdev);
 
@@ -440,10 +493,10 @@ static void __devexit agp_via_remove(struct pci_dev *pdev)
 
 #ifdef CONFIG_PM
 
-static int agp_via_suspend(struct pci_dev *pdev, u32 state)
+static int agp_via_suspend(struct pci_dev *pdev, pm_message_t state)
 {
 	pci_save_state (pdev);
-	pci_set_power_state (pdev, 3);
+	pci_set_power_state (pdev, PCI_D3hot);
 
 	return 0;
 }
@@ -452,7 +505,7 @@ static int agp_via_resume(struct pci_dev *pdev)
 {
 	struct agp_bridge_data *bridge = pci_get_drvdata(pdev);
 
-	pci_set_power_state (pdev, 0);
+	pci_set_power_state (pdev, PCI_D0);
 	pci_restore_state(pdev);
 
 	if (bridge->driver == &via_agp3_driver)
@@ -466,7 +519,7 @@ static int agp_via_resume(struct pci_dev *pdev)
 #endif /* CONFIG_PM */
 
 /* must be the same order as name table above */
-static struct pci_device_id agp_via_pci_table[] = {
+static const struct pci_device_id agp_via_pci_table[] = {
 #define ID(x) \
 	{						\
 	.class		= (PCI_CLASS_BRIDGE_HOST << 8),	\
@@ -498,11 +551,16 @@ static struct pci_device_id agp_via_pci_table[] = {
 	ID(PCI_DEVICE_ID_VIA_8763_0),
 	ID(PCI_DEVICE_ID_VIA_8378_0),
 	ID(PCI_DEVICE_ID_VIA_PT880),
+	ID(PCI_DEVICE_ID_VIA_PT880ULTRA),
 	ID(PCI_DEVICE_ID_VIA_8783_0),
 	ID(PCI_DEVICE_ID_VIA_PX8X0_0),
 	ID(PCI_DEVICE_ID_VIA_3269_0),
 	ID(PCI_DEVICE_ID_VIA_83_87XX_1),
 	ID(PCI_DEVICE_ID_VIA_3296_0),
+	ID(PCI_DEVICE_ID_VIA_P4M800CE),
+	ID(PCI_DEVICE_ID_VIA_VT3324),
+	ID(PCI_DEVICE_ID_VIA_P4M890),
+	ID(PCI_DEVICE_ID_VIA_VT3364),
 	{ }
 };
 
@@ -525,7 +583,7 @@ static int __init agp_via_init(void)
 {
 	if (agp_off)
 		return -EINVAL;
-	return pci_module_init(&agp_via_pci_driver);
+	return pci_register_driver(&agp_via_pci_driver);
 }
 
 static void __exit agp_via_cleanup(void)
@@ -537,4 +595,4 @@ module_init(agp_via_init);
 module_exit(agp_via_cleanup);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Dave Jones <davej@codemonkey.org.uk>");
+MODULE_AUTHOR("Dave Jones");

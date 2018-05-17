@@ -5,74 +5,53 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# (C) Copyright 2002,2003 Yoshinori Sato <ysato@users.sourceforge.jp>
+# (C) Copyright 2002-2015 Yoshinori Sato <ysato@users.sourceforge.jp>
 #
 
-platform-$(CONFIG_CPU_H8300H)	:= h8300h
-platform-$(CONFIG_CPU_H8S)	:= h8s
-PLATFORM := $(platform-y)
-
-board-$(CONFIG_H8300H_GENERIC)		:= generic
-board-$(CONFIG_H8300H_AKI3068NET)	:= aki3068net
-board-$(CONFIG_H8300H_H8MAX)		:= h8max
-board-$(CONFIG_H8300H_SIM)		:= generic
-board-$(CONFIG_H8S_GENERIC)		:= generic
-board-$(CONFIG_H8S_EDOSK2674)		:= edosk2674
-board-$(CONFIG_H8S_SIM)			:= generic
-BOARD := $(board-y)
-
-model-$(CONFIG_RAMKERNEL)	:= ram
-model-$(CONFIG_ROMKERNEL)	:= rom
-MODEL := $(model-y)
-
 cflags-$(CONFIG_CPU_H8300H)	:= -mh
-ldflags-$(CONFIG_CPU_H8300H)	:= -mh8300helf
+aflags-$(CONFIG_CPU_H8300H)	:= -mh -Wa,--mach=h8300h
+ldflags-$(CONFIG_CPU_H8300H)	:= -mh8300helf_linux
 cflags-$(CONFIG_CPU_H8S)	:= -ms
-ldflags-$(CONFIG_CPU_H8S)	:= -mh8300self
+aflags-$(CONFIG_CPU_H8S)	:= -ms -Wa,--mach=h8300s
+ldflags-$(CONFIG_CPU_H8S)	:= -mh8300self_linux
 
-CFLAGS += $(cflags-y)
-CFLAGS += -mint32 -fno-builtin
-CFLAGS += -g
-CFLAGS += -D__linux__
-CFLAGS += -DUTS_SYSNAME=\"uClinux\"
-AFLAGS += -DPLATFORM=$(PLATFORM) -DMODEL=$(MODEL) $(cflags-y)
+KBUILD_CFLAGS += $(cflags-y)
+KBUILD_CFLAGS += -mint32 -fno-builtin
+KBUILD_CFLAGS += -D__linux__
+KBUILD_CFLAGS += -DUTS_SYSNAME=\"uClinux\"
+KBUILD_AFLAGS += $(aflags-y)
 LDFLAGS += $(ldflags-y)
 
-CROSS_COMPILE = h8300-elf-
-LIBGCC := $(shell $(CROSS-COMPILE)$(CC) $(CFLAGS) -print-libgcc-file-name)
-
-head-y := arch/$(ARCH)/platform/$(platform-y)/$(board-y)/crt0_$(model-y).o
-
-core-y	+= arch/$(ARCH)/kernel/ \
-	   arch/$(ARCH)/mm/
-ifdef PLATFORM
-core-y	+= arch/$(ARCH)/platform/$(PLATFORM)/ \
-	   arch/$(ARCH)/platform/$(PLATFORM)/$(BOARD)/
+ifeq ($(CROSS_COMPILE),)
+CROSS_COMPILE := h8300-unknown-linux-
 endif
 
-libs-y	+= arch/$(ARCH)/lib/ $(LIBGCC)
+core-y	+= arch/$(ARCH)/kernel/ arch/$(ARCH)/mm/
+ifneq '$(CONFIG_H8300_BUILTIN_DTB)' '""'
+core-y += arch/h8300/boot/dts/
+endif
+
+libs-y	+= arch/$(ARCH)/lib/
 
 boot := arch/h8300/boot
 
-export MODEL PLATFORM BOARD
+%.dtb %.dtb.S %.dtb.o: | scripts
+	$(Q)$(MAKE) $(build)=arch/h8300/boot/dts arch/h8300/boot/dts/$@
+
+PHONY += dtbs
+dtbs: scripts
+	$(Q)$(MAKE) $(build)=arch/h8300/boot/dts
 
 archmrproper:
 
 archclean:
 	$(Q)$(MAKE) $(clean)=$(boot)
 
-prepare: include/asm-$(ARCH)/asm-offsets.h
-
-include/asm-$(ARCH)/asm-offsets.h: arch/$(ARCH)/kernel/asm-offsets.s \
-				   include/asm include/linux/version.h
-	$(call filechk,gen-asm-offsets)
-
-vmlinux.srec vmlinux.bin: vmlinux
+vmlinux.srec vmlinux.bin zImage uImage.bin: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
 define archhelp
-  echo  'vmlinux.bin  - Create raw binary'
-  echo  'vmlinux.srec - Create srec binary'
+  @echo  'vmlinux.bin  - Create raw binary'
+  @echo  'vmlinux.srec - Create srec binary'
+  @echo  'zImage       - Compressed kernel image'
 endef
-
-CLEAN_FILES += include/asm-$(ARCH)/asm-offsets.h

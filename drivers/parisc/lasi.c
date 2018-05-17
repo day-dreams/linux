@@ -20,7 +20,6 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/pm.h>
-#include <linux/slab.h>
 #include <linux/types.h>
 
 #include <asm/io.h>
@@ -108,7 +107,7 @@ lasi_init_irq(struct gsc_asic *this_lasi)
 
 #else
 
-void __init lasi_led_init(unsigned long lasi_hpa)
+static void __init lasi_led_init(unsigned long lasi_hpa)
 {
 	unsigned long datareg;
 
@@ -139,7 +138,7 @@ void __init lasi_led_init(unsigned long lasi_hpa)
 		break;
 	}
 
-	register_led_driver(DISPLAY_MODEL_LASI, LED_CMD_REG_NONE, (char *)datareg);
+	register_led_driver(DISPLAY_MODEL_LASI, LED_CMD_REG_NONE, datareg);
 }
 #endif
 
@@ -151,7 +150,7 @@ void __init lasi_led_init(unsigned long lasi_hpa)
  * 
  */
 
-static unsigned long lasi_power_off_hpa;
+static unsigned long lasi_power_off_hpa __read_mostly;
 
 static void lasi_power_off(void)
 {
@@ -164,19 +163,19 @@ static void lasi_power_off(void)
 	gsc_writel(0x02, datareg);
 }
 
-int __init
-lasi_init_chip(struct parisc_device *dev)
+static int __init lasi_init_chip(struct parisc_device *dev)
 {
+	extern void (*chassis_power_off)(void);
 	struct gsc_asic *lasi;
 	struct gsc_irq gsc_irq;
 	int ret;
 
-	lasi = kmalloc(sizeof(*lasi), GFP_KERNEL);
+	lasi = kzalloc(sizeof(*lasi), GFP_KERNEL);
 	if (!lasi)
 		return -ENOMEM;
 
 	lasi->name = "Lasi";
-	lasi->hpa = dev->hpa;
+	lasi->hpa = dev->hpa.start;
 
 	/* Check the 4-bit (yes, only 4) version register */
 	lasi->version = gsc_readl(lasi->hpa + LASI_VER) & 0xf;
@@ -193,7 +192,7 @@ lasi_init_chip(struct parisc_device *dev)
 	dev->irq = gsc_alloc_irq(&gsc_irq);
 	if (dev->irq < 0) {
 		printk(KERN_ERR "%s(): cannot get GSC irq\n",
-				__FUNCTION__);
+				__func__);
 		kfree(lasi);
 		return -EBUSY;
 	}
@@ -223,18 +222,18 @@ lasi_init_chip(struct parisc_device *dev)
 	 * ensure that only the first LASI (the one controlling the power off)
 	 * should set the HPA here */
 	lasi_power_off_hpa = lasi->hpa;
-	pm_power_off = lasi_power_off;
+	chassis_power_off = lasi_power_off;
 	
 	return ret;
 }
 
-static struct parisc_device_id lasi_tbl[] = {
+static struct parisc_device_id lasi_tbl[] __initdata = {
 	{ HPHW_BA, HVERSION_REV_ANY_ID, HVERSION_ANY_ID, 0x00081 },
 	{ 0, }
 };
 
-struct parisc_driver lasi_driver = {
-	.name =		"Lasi",
+struct parisc_driver lasi_driver __refdata = {
+	.name =		"lasi",
 	.id_table =	lasi_tbl,
 	.probe =	lasi_init_chip,
 };

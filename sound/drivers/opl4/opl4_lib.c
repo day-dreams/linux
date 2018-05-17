@@ -20,21 +20,23 @@
 #include "opl4_local.h"
 #include <sound/initval.h>
 #include <linux/ioport.h>
+#include <linux/slab.h>
 #include <linux/init.h>
-#include <asm/io.h>
+#include <linux/module.h>
+#include <linux/io.h>
 
 MODULE_AUTHOR("Clemens Ladisch <clemens@ladisch.de>");
 MODULE_DESCRIPTION("OPL4 driver");
 MODULE_LICENSE("GPL");
 
-static void inline snd_opl4_wait(opl4_t *opl4)
+static inline void snd_opl4_wait(struct snd_opl4 *opl4)
 {
 	int timeout = 10;
 	while ((inb(opl4->fm_port) & OPL4_STATUS_BUSY) && --timeout > 0)
 		;
 }
 
-void snd_opl4_write(opl4_t *opl4, u8 reg, u8 value)
+void snd_opl4_write(struct snd_opl4 *opl4, u8 reg, u8 value)
 {
 	snd_opl4_wait(opl4);
 	outb(reg, opl4->pcm_port);
@@ -43,7 +45,9 @@ void snd_opl4_write(opl4_t *opl4, u8 reg, u8 value)
 	outb(value, opl4->pcm_port + 1);
 }
 
-u8 snd_opl4_read(opl4_t *opl4, u8 reg)
+EXPORT_SYMBOL(snd_opl4_write);
+
+u8 snd_opl4_read(struct snd_opl4 *opl4, u8 reg)
 {
 	snd_opl4_wait(opl4);
 	outb(reg, opl4->pcm_port);
@@ -52,7 +56,9 @@ u8 snd_opl4_read(opl4_t *opl4, u8 reg)
 	return inb(opl4->pcm_port + 1);
 }
 
-void snd_opl4_read_memory(opl4_t *opl4, char *buf, int offset, int size)
+EXPORT_SYMBOL(snd_opl4_read);
+
+void snd_opl4_read_memory(struct snd_opl4 *opl4, char *buf, int offset, int size)
 {
 	unsigned long flags;
 	u8 memcfg;
@@ -76,7 +82,9 @@ void snd_opl4_read_memory(opl4_t *opl4, char *buf, int offset, int size)
 	spin_unlock_irqrestore(&opl4->reg_lock, flags);
 }
 
-void snd_opl4_write_memory(opl4_t *opl4, const char *buf, int offset, int size)
+EXPORT_SYMBOL(snd_opl4_read_memory);
+
+void snd_opl4_write_memory(struct snd_opl4 *opl4, const char *buf, int offset, int size)
 {
 	unsigned long flags;
 	u8 memcfg;
@@ -100,7 +108,9 @@ void snd_opl4_write_memory(opl4_t *opl4, const char *buf, int offset, int size)
 	spin_unlock_irqrestore(&opl4->reg_lock, flags);
 }
 
-static void snd_opl4_enable_opl4(opl4_t *opl4)
+EXPORT_SYMBOL(snd_opl4_write_memory);
+
+static void snd_opl4_enable_opl4(struct snd_opl4 *opl4)
 {
 	outb(OPL3_REG_MODE, opl4->fm_port + 2);
 	inb(opl4->fm_port);
@@ -110,7 +120,7 @@ static void snd_opl4_enable_opl4(opl4_t *opl4)
 	inb(opl4->fm_port);
 }
 
-static int snd_opl4_detect(opl4_t *opl4)
+static int snd_opl4_detect(struct snd_opl4 *opl4)
 {
 	u8 id1, id2;
 
@@ -143,20 +153,20 @@ static int snd_opl4_detect(opl4_t *opl4)
 	return 0;
 }
 
-#if defined(CONFIG_SND_SEQUENCER) || (defined(MODULE) && defined(CONFIG_SND_SEQUENCER_MODULE))
-static void snd_opl4_seq_dev_free(snd_seq_device_t *seq_dev)
+#if IS_ENABLED(CONFIG_SND_SEQUENCER)
+static void snd_opl4_seq_dev_free(struct snd_seq_device *seq_dev)
 {
-	opl4_t *opl4 = seq_dev->private_data;
+	struct snd_opl4 *opl4 = seq_dev->private_data;
 	opl4->seq_dev = NULL;
 }
 
-static int snd_opl4_create_seq_dev(opl4_t *opl4, int seq_device)
+static int snd_opl4_create_seq_dev(struct snd_opl4 *opl4, int seq_device)
 {
 	opl4->seq_dev_num = seq_device;
 	if (snd_seq_device_new(opl4->card, seq_device, SNDRV_SEQ_DEV_ID_OPL4,
-			       sizeof(opl4_t *), &opl4->seq_dev) >= 0) {
+			       sizeof(struct snd_opl4 *), &opl4->seq_dev) >= 0) {
 		strcpy(opl4->seq_dev->name, "OPL4 Wavetable");
-		*(opl4_t **)SNDRV_SEQ_DEVICE_ARGPTR(opl4->seq_dev) = opl4;
+		*(struct snd_opl4 **)SNDRV_SEQ_DEVICE_ARGPTR(opl4->seq_dev) = opl4;
 		opl4->seq_dev->private_data = opl4;
 		opl4->seq_dev->private_free = snd_opl4_seq_dev_free;
 	}
@@ -164,38 +174,30 @@ static int snd_opl4_create_seq_dev(opl4_t *opl4, int seq_device)
 }
 #endif
 
-static void snd_opl4_free(opl4_t *opl4)
+static void snd_opl4_free(struct snd_opl4 *opl4)
 {
-#ifdef CONFIG_PROC_FS
 	snd_opl4_free_proc(opl4);
-#endif
-	if (opl4->res_fm_port) {
-		release_resource(opl4->res_fm_port);
-		kfree_nocheck(opl4->res_fm_port);
-	}
-	if (opl4->res_pcm_port) {
-		release_resource(opl4->res_pcm_port);
-		kfree_nocheck(opl4->res_pcm_port);
-	}
+	release_and_free_resource(opl4->res_fm_port);
+	release_and_free_resource(opl4->res_pcm_port);
 	kfree(opl4);
 }
 
-static int snd_opl4_dev_free(snd_device_t *device)
+static int snd_opl4_dev_free(struct snd_device *device)
 {
-	opl4_t *opl4 = device->device_data;
+	struct snd_opl4 *opl4 = device->device_data;
 	snd_opl4_free(opl4);
 	return 0;
 }
 
-int snd_opl4_create(snd_card_t *card,
+int snd_opl4_create(struct snd_card *card,
 		    unsigned long fm_port, unsigned long pcm_port,
 		    int seq_device,
-		    opl3_t **ropl3, opl4_t **ropl4)
+		    struct snd_opl3 **ropl3, struct snd_opl4 **ropl4)
 {
-	opl4_t *opl4;
-	opl3_t *opl3;
+	struct snd_opl4 *opl4;
+	struct snd_opl3 *opl3;
 	int err;
-	static snd_device_ops_t ops = {
+	static struct snd_device_ops ops = {
 		.dev_free = snd_opl4_dev_free
 	};
 
@@ -204,7 +206,7 @@ int snd_opl4_create(snd_card_t *card,
 	if (ropl4)
 		*ropl4 = NULL;
 
-	opl4 = kcalloc(1, sizeof(*opl4), GFP_KERNEL);
+	opl4 = kzalloc(sizeof(*opl4), GFP_KERNEL);
 	if (!opl4)
 		return -ENOMEM;
 
@@ -220,7 +222,7 @@ int snd_opl4_create(snd_card_t *card,
 	opl4->fm_port = fm_port;
 	opl4->pcm_port = pcm_port;
 	spin_lock_init(&opl4->reg_lock);
-	init_MUTEX(&opl4->access_mutex);
+	mutex_init(&opl4->access_mutex);
 
 	err = snd_opl4_detect(opl4);
 	if (err < 0) {
@@ -245,11 +247,9 @@ int snd_opl4_create(snd_card_t *card,
 	snd_opl4_enable_opl4(opl4);
 
 	snd_opl4_create_mixer(opl4);
-#ifdef CONFIG_PROC_FS
 	snd_opl4_create_proc(opl4);
-#endif
 
-#if defined(CONFIG_SND_SEQUENCER) || (defined(MODULE) && defined(CONFIG_SND_SEQUENCER_MODULE))
+#if IS_ENABLED(CONFIG_SND_SEQUENCER)
 	opl4->seq_client = -1;
 	if (opl4->hardware < OPL3_HW_OPL4_ML)
 		snd_opl4_create_seq_dev(opl4, seq_device);
@@ -262,10 +262,6 @@ int snd_opl4_create(snd_card_t *card,
 	return 0;
 }
 
-EXPORT_SYMBOL(snd_opl4_write);
-EXPORT_SYMBOL(snd_opl4_read);
-EXPORT_SYMBOL(snd_opl4_write_memory);
-EXPORT_SYMBOL(snd_opl4_read_memory);
 EXPORT_SYMBOL(snd_opl4_create);
 
 static int __init alsa_opl4_init(void)

@@ -34,27 +34,20 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
-#include <linux/init.h>		/* for __init and __devinit */
+#include <linux/init.h>		/* for __init */
 #include <linux/pci.h>
 #include <linux/ioport.h>
 #include <linux/slab.h>
-#include <linux/smp_lock.h>
 
 #include <asm/byteorder.h>
 #include <asm/pdc.h>
 #include <asm/pdcpat.h>
 #include <asm/page.h>
-#include <asm/system.h>
 
+#include <asm/ropes.h>
 #include <asm/hardware.h>	/* for register_parisc_driver() stuff */
 #include <asm/parisc-device.h>
-#include <asm/iosapic.h>	/* for iosapic_register() */
 #include <asm/io.h>		/* read/write stuff */
-
-#ifndef TRUE
-#define TRUE (1 == 1)
-#define FALSE (1 == 0)
-#endif
 
 #undef DEBUG_LBA	/* general stuff */
 #undef DEBUG_LBA_PORT	/* debug I/O Port access */
@@ -88,18 +81,6 @@
 #define DBG_PAT(x...)
 #endif
 
-#ifdef DEBUG_LBA
-#undef ASSERT
-#define ASSERT(expr) \
-	if(!(expr)) { \
-		printk("\n%s:%d: Assertion " #expr " failed!\n", \
-				__FILE__, __LINE__); \
-		panic(#expr); \
-	}
-#else
-#define ASSERT(expr)
-#endif
-
 
 /*
 ** Config accessor functions only pass in the 8-bit bus number and not
@@ -117,129 +98,23 @@
 
 #define MODULE_NAME "LBA"
 
-#define LBA_FUNC_ID	0x0000	/* function id */
-#define LBA_FCLASS	0x0008	/* function class, bist, header, rev... */
-#define LBA_CAPABLE	0x0030	/* capabilities register */
-
-#define LBA_PCI_CFG_ADDR	0x0040	/* poke CFG address here */
-#define LBA_PCI_CFG_DATA	0x0048	/* read or write data here */
-
-#define LBA_PMC_MTLT	0x0050	/* Firmware sets this - read only. */
-#define LBA_FW_SCRATCH	0x0058	/* Firmware writes the PCI bus number here. */
-#define LBA_ERROR_ADDR	0x0070	/* On error, address gets logged here */
-
-#define LBA_ARB_MASK	0x0080	/* bit 0 enable arbitration. PAT/PDC enables */
-#define LBA_ARB_PRI	0x0088	/* firmware sets this. */
-#define LBA_ARB_MODE	0x0090	/* firmware sets this. */
-#define LBA_ARB_MTLT	0x0098	/* firmware sets this. */
-
-#define LBA_MOD_ID	0x0100	/* Module ID. PDC_PAT_CELL reports 4 */
-
-#define LBA_STAT_CTL	0x0108	/* Status & Control */
-#define   LBA_BUS_RESET		0x01	/*  Deassert PCI Bus Reset Signal */
-#define   CLEAR_ERRLOG		0x10	/*  "Clear Error Log" cmd */
-#define   CLEAR_ERRLOG_ENABLE	0x20	/*  "Clear Error Log" Enable */
-#define   HF_ENABLE	0x40	/*    enable HF mode (default is -1 mode) */
-
-#define LBA_LMMIO_BASE	0x0200	/* < 4GB I/O address range */
-#define LBA_LMMIO_MASK	0x0208
-
-#define LBA_GMMIO_BASE	0x0210	/* > 4GB I/O address range */
-#define LBA_GMMIO_MASK	0x0218
-
-#define LBA_WLMMIO_BASE	0x0220	/* All < 4GB ranges under the same *SBA* */
-#define LBA_WLMMIO_MASK	0x0228
-
-#define LBA_WGMMIO_BASE	0x0230	/* All > 4GB ranges under the same *SBA* */
-#define LBA_WGMMIO_MASK	0x0238
-
-#define LBA_IOS_BASE	0x0240	/* I/O port space for this LBA */
-#define LBA_IOS_MASK	0x0248
-
-#define LBA_ELMMIO_BASE	0x0250	/* Extra LMMIO range */
-#define LBA_ELMMIO_MASK	0x0258
-
-#define LBA_EIOS_BASE	0x0260	/* Extra I/O port space */
-#define LBA_EIOS_MASK	0x0268
-
-#define LBA_GLOBAL_MASK	0x0270	/* Mercury only: Global Address Mask */
-#define LBA_DMA_CTL	0x0278	/* firmware sets this */
-
-#define LBA_IBASE	0x0300	/* SBA DMA support */
-#define LBA_IMASK	0x0308
-
-/* FIXME: ignore DMA Hint stuff until we can measure performance */
-#define LBA_HINT_CFG	0x0310
-#define LBA_HINT_BASE	0x0380	/* 14 registers at every 8 bytes. */
-
-#define LBA_BUS_MODE	0x0620
-
-/* ERROR regs are needed for config cycle kluges */
-#define LBA_ERROR_CONFIG 0x0680
-#define     LBA_SMART_MODE 0x20
-#define LBA_ERROR_STATUS 0x0688
-#define LBA_ROPE_CTL     0x06A0
-
-#define LBA_IOSAPIC_BASE	0x800 /* Offset of IRQ logic */
-
 /* non-postable I/O port space, densely packed */
 #define LBA_PORT_BASE	(PCI_F_EXTEND | 0xfee00000UL)
-
-#define ELROY_HVERS	0x782
-#define MERCURY_HVERS	0x783
-#define QUICKSILVER_HVERS	0x784
-
-static inline int IS_ELROY(struct parisc_device *d)
-{
-	return (d->id.hversion == ELROY_HVERS);
-}
-
-static inline int IS_MERCURY(struct parisc_device *d)
-{
-	return (d->id.hversion == MERCURY_HVERS);
-}
-
-static inline int IS_QUICKSILVER(struct parisc_device *d)
-{
-	return (d->id.hversion == QUICKSILVER_HVERS);
-}
-
-
-/*
-** lba_device: Per instance Elroy data structure
-*/
-struct lba_device {
-	struct pci_hba_data hba;
-
-	spinlock_t	lba_lock;
-	void		*iosapic_obj;
-
-#ifdef CONFIG_PARISC64
-	unsigned long	iop_base;    /* PA_VIEW - for IO port accessor funcs */
-#endif
-
-	int		flags;       /* state/functionality enabled */
-	int		hw_rev;      /* HW revision of chip */
-};
-
+static void __iomem *astro_iop_base __read_mostly;
 
 static u32 lba_t32;
 
-/*
-** lba "flags"
-*/
-#define LBA_FLAG_NO_DMA_DURING_CFG	0x01
+/* lba flags */
 #define LBA_FLAG_SKIP_PROBE	0x10
 
-/* Tape Release 4 == hw_rev 5 */
-#define LBA_TR4PLUS(d)      ((d)->hw_rev > 0x4)
-#define LBA_DMA_DURING_CFG_DISABLED(d) ((d)->flags & LBA_FLAG_NO_DMA_DURING_CFG)
 #define LBA_SKIP_PROBE(d) ((d)->flags & LBA_FLAG_SKIP_PROBE)
 
 
 /* Looks nice and keeps the compiler happy */
-#define LBA_DEV(d) ((struct lba_device *) (d))
-
+#define LBA_DEV(d) ({				\
+	void *__pdata = d;			\
+	BUG_ON(!__pdata);			\
+	(struct lba_device *)__pdata; })
 
 /*
 ** Only allow 8 subsidiary busses per LBA
@@ -293,7 +168,8 @@ lba_dump_res(struct resource *r, int d)
 
 	printk(KERN_DEBUG "(%p)", r->parent);
 	for (i = d; i ; --i) printk(" ");
-	printk(KERN_DEBUG "%p [%lx,%lx]/%x\n", r, r->start, r->end, (int) r->flags);
+	printk(KERN_DEBUG "%p [%lx,%lx]/%lx\n", r,
+		(long)r->start, (long)r->end, r->flags);
 	lba_dump_res(r->child, d+2);
 	lba_dump_res(r->sibling, d);
 }
@@ -303,7 +179,7 @@ lba_dump_res(struct resource *r, int d)
 ** LBA rev 2.0, 2.1, 2.2, and 3.0 bus walks require a complex
 ** workaround for cfg cycles:
 **	-- preserve  LBA state
-**	-- LBA_FLAG_NO_DMA_DURING_CFG workaround
+**	-- prevent any DMA from occurring
 **	-- turn on smart mode
 **	-- probe with config writes before doing config reads
 **	-- check ERROR_STATUS
@@ -313,25 +189,18 @@ lba_dump_res(struct resource *r, int d)
 ** The workaround is only used for device discovery.
 */
 
-static int
-lba_device_present( u8 bus, u8 dfn, struct lba_device *d)
+static int lba_device_present(u8 bus, u8 dfn, struct lba_device *d)
 {
-	u8 first_bus = d->hba.hba_bus->secondary;
-	u8 last_sub_bus = d->hba.hba_bus->subordinate;
-
-	ASSERT(bus >= first_bus);
-	ASSERT(bus <= last_sub_bus);
-	ASSERT((bus - first_bus) < LBA_MAX_NUM_BUSES);
+	u8 first_bus = d->hba.hba_bus->busn_res.start;
+	u8 last_sub_bus = d->hba.hba_bus->busn_res.end;
 
 	if ((bus < first_bus) ||
 	    (bus > last_sub_bus) ||
-	    ((bus - first_bus) >= LBA_MAX_NUM_BUSES))
-	{
-	    /* devices that fall into any of these cases won't get claimed */
-	    return(FALSE);
+	    ((bus - first_bus) >= LBA_MAX_NUM_BUSES)) {
+		return 0;
 	}
 
-	return TRUE;
+	return 1;
 }
 
 
@@ -346,7 +215,6 @@ lba_device_present( u8 bus, u8 dfn, struct lba_device *d)
     /* For LBA rev 2.0, 2.1, 2.2, and 3.0, we must disable DMA		\
     ** arbitration for full bus walks.					\
     */									\
-    if (LBA_DMA_DURING_CFG_DISABLED(d)) {				\
 	/* Save contents of arb mask register. */			\
 	arb_mask = READ_REG32(d->hba.base_addr + LBA_ARB_MASK);		\
 \
@@ -354,8 +222,7 @@ lba_device_present( u8 bus, u8 dfn, struct lba_device *d)
 	 * Turn off all device arbitration bits (i.e. everything	\
 	 * except arbitration enable bit).				\
 	 */								\
-	WRITE_REG32(0x1, d->hba.base_addr + LBA_ARB_MASK);			\
-    }									\
+	WRITE_REG32(0x1, d->hba.base_addr + LBA_ARB_MASK);		\
 \
     /*									\
      * Set the smart mode bit so that master aborts don't cause		\
@@ -375,7 +242,7 @@ lba_device_present( u8 bus, u8 dfn, struct lba_device *d)
      * Read address register to ensure that LBA is the bus master,	\
      * which implies that DMA traffic has stopped when DMA arb is off.	\
      */									\
-    lba_t32 = READ_REG32((d)->hba.base_addr + LBA_PCI_CFG_ADDR);		\
+    lba_t32 = READ_REG32((d)->hba.base_addr + LBA_PCI_CFG_ADDR);	\
     /*									\
      * Generate a cfg write cycle (will have no affect on		\
      * Vendor ID register since read-only).				\
@@ -385,7 +252,7 @@ lba_device_present( u8 bus, u8 dfn, struct lba_device *d)
      * Make sure write has completed before proceeding further,		\
      * i.e. before setting clear enable.				\
      */									\
-    lba_t32 = READ_REG32((d)->hba.base_addr + LBA_PCI_CFG_ADDR);		\
+    lba_t32 = READ_REG32((d)->hba.base_addr + LBA_PCI_CFG_ADDR);	\
 }
 
 
@@ -439,20 +306,16 @@ lba_device_present( u8 bus, u8 dfn, struct lba_device *d)
     }									\
 }
 
-#define LBA_CFG_TR4_ADDR_SETUP(d, addr) \
-    WRITE_REG32(((addr) & ~3), (d)->hba.base_addr + LBA_PCI_CFG_ADDR); \
-    lba_t32 = READ_REG32((d)->hba.base_addr + LBA_PCI_CFG_ADDR)
+#define LBA_CFG_TR4_ADDR_SETUP(d, addr)					\
+	WRITE_REG32(((addr) & ~3), (d)->hba.base_addr + LBA_PCI_CFG_ADDR);
 
-#define LBA_CFG_ADDR_SETUP(d, addr) {				\
+#define LBA_CFG_ADDR_SETUP(d, addr) {					\
     WRITE_REG32(((addr) & ~3), (d)->hba.base_addr + LBA_PCI_CFG_ADDR);	\
     /*									\
-     * HPREVISIT:							\
-     *       --	Potentially could skip this once DMA bug fixed.		\
-     *									\
      * Read address register to ensure that LBA is the bus master,	\
      * which implies that DMA traffic has stopped when DMA arb is off.	\
      */									\
-    lba_t32 = READ_REG32((d)->hba.base_addr + LBA_PCI_CFG_ADDR);		\
+    lba_t32 = READ_REG32((d)->hba.base_addr + LBA_PCI_CFG_ADDR);	\
 }
 
 
@@ -465,12 +328,10 @@ lba_device_present( u8 bus, u8 dfn, struct lba_device *d)
      * Restore error config register (turn off smart mode).		\
      */									\
     WRITE_REG32(error_config, base + LBA_ERROR_CONFIG);			\
-    if (LBA_DMA_DURING_CFG_DISABLED(d)) {				\
 	/*								\
 	 * Restore arb mask register (reenables DMA arbitration).	\
 	 */								\
 	WRITE_REG32(arb_mask, base + LBA_ARB_MASK);			\
-    }									\
 }
 
 
@@ -478,39 +339,23 @@ lba_device_present( u8 bus, u8 dfn, struct lba_device *d)
 static unsigned int
 lba_rd_cfg(struct lba_device *d, u32 tok, u8 reg, u32 size)
 {
-	u32 data = ~0;
+	u32 data = ~0U;
 	int error = 0;
 	u32 arb_mask = 0;	/* used by LBA_CFG_SETUP/RESTORE */
 	u32 error_config = 0;	/* used by LBA_CFG_SETUP/RESTORE */
 	u32 status_control = 0;	/* used by LBA_CFG_SETUP/RESTORE */
 
-	ASSERT((size == sizeof(u8)) ||
-		(size == sizeof(u16)) ||
-		(size == sizeof(u32)));
-
-	if ((size != sizeof(u8)) &&
-		(size != sizeof(u16)) &&
-		(size != sizeof(u32))) {
-		return(data);
-	}
-
 	LBA_CFG_SETUP(d, tok);
 	LBA_CFG_PROBE(d, tok);
 	LBA_CFG_MASTER_ABORT_CHECK(d, d->hba.base_addr, tok, error);
 	if (!error) {
+		void __iomem *data_reg = d->hba.base_addr + LBA_PCI_CFG_DATA;
+
 		LBA_CFG_ADDR_SETUP(d, tok | reg);
 		switch (size) {
-		case sizeof(u8):
-			data = (u32) READ_REG8(d->hba.base_addr + LBA_PCI_CFG_DATA + (reg & 3));
-			break;
-		case sizeof(u16):
-			data = (u32) READ_REG16(d->hba.base_addr + LBA_PCI_CFG_DATA + (reg & 2));
-			break;
-		case sizeof(u32):
-			data = READ_REG32(d->hba.base_addr + LBA_PCI_CFG_DATA);
-			break;
-		default:
-			break; /* leave data as -1 */
+		case 1: data = (u32) READ_REG8(data_reg + (reg & 3)); break;
+		case 2: data = (u32) READ_REG16(data_reg+ (reg & 2)); break;
+		case 4: data = READ_REG32(data_reg); break;
 		}
 	}
 	LBA_CFG_RESTORE(d, d->hba.base_addr);
@@ -518,143 +363,27 @@ lba_rd_cfg(struct lba_device *d, u32 tok, u8 reg, u32 size)
 }
 
 
-#if USE_PAT_PDC_CFG
-
-/* PAT PDC needs to be relocated in order to perform properly.
- * tg3 driver does about 1600 PCI Cfg writes to initialize the card.
- * On 440Mhz A500, PDC takes ~20ms/write, or ~30 seconds per card.
- * On PA8800, that takes about 5ms/write (8 seconds).
- * But relocating PDC will burn at least 4MB of RAM.
- * Easier/Cheaper to just maintain our own mercury cfg ops.
- */
-#define pat_cfg_addr(bus, devfn, addr) (((bus) << 16) | ((devfn) << 8) | (addr))
-
-static int pat_cfg_read(struct pci_bus *bus, unsigned int devfn, int pos, int size, u32 *data)
-{
-	int tok = pat_cfg_addr(bus->number, devfn, pos);
-	u32 tmp;
-	int ret = pdc_pat_io_pci_cfg_read(tok, size, &tmp);
-
-	DBG_CFG("%s(%d:%d.%d+0x%02x) -> 0x%x %d\n", __FUNCTION__, bus->number, PCI_SLOT(devfn), PCI_FUNC(devfn), pos, tmp, ret);
-
-	switch (size) {
-		case 1: *data = (u8)  tmp; return (tmp == (u8)  ~0);
-		case 2: *data = (u16) tmp; return (tmp == (u16) ~0);
-		case 4: *data = (u32) tmp; return (tmp == (u32) ~0);
-	}
-	*data = ~0;
-	return (ret);
-}
-
-static int pat_cfg_write(struct pci_bus *bus, unsigned int devfn, int pos, int size, u32 data)
-{
-	int tok = pat_cfg_addr(bus->number, devfn, pos);
-	int ret = pdc_pat_io_pci_cfg_write(tok, size, data);
-
-	DBG_CFG("%s(%d:%d.%d+0x%02x, 0x%lx/%d)\n", __FUNCTION__, bus->number, PCI_SLOT(devfn), PCI_FUNC(devfn), pos, data, size);
-	return (ret);
-}
-
-static struct pci_ops pat_cfg_ops = {
-	.read =		pat_cfg_read,
-	.write =	pat_cfg_write,
-};
-#endif
-
-
-#ifdef CONFIG_PARISC64
-static int mercury_cfg_read(struct pci_bus *bus, unsigned int devfn, int pos, int size, u32 *data)
+static int elroy_cfg_read(struct pci_bus *bus, unsigned int devfn, int pos, int size, u32 *data)
 {
 	struct lba_device *d = LBA_DEV(parisc_walk_tree(bus->bridge));
-	u32 local_bus = (bus->parent == NULL) ? 0 : bus->secondary;
+	u32 local_bus = (bus->parent == NULL) ? 0 : bus->busn_res.start;
 	u32 tok = LBA_CFG_TOK(local_bus, devfn);
+	void __iomem *data_reg = d->hba.base_addr + LBA_PCI_CFG_DATA;
 
-	/* Basic Algorithm
-	** Should only get here on fully working LBA rev.
-	** This is how simple the original LBA code should have been.
-	*/
-	LBA_CFG_TR4_ADDR_SETUP(d, tok | pos);
-	switch(size) {
-	case 1: *(u8 *)  data = READ_REG8(d->hba.base_addr + LBA_PCI_CFG_DATA
-							+ (pos & 3));
-		DBG_CFG("%s(%x+%2x) -> 0x%x (c)\n", __FUNCTION__, tok, pos,
-				*(u8 *)data);
-		return(*(u8 *)data == (u8) ~0U);
-	case 2: *(u16 *) data = READ_REG16(d->hba.base_addr + LBA_PCI_CFG_DATA
-							+ (pos & 2));
-		DBG_CFG("%s(%x+%2x) -> 0x%x (c)\n", __FUNCTION__, tok, pos,
-				*(u16 *)data);
-		return(*(u16 *)data == (u16) ~0U);
-	case 4: *(u32 *) data = READ_REG32(d->hba.base_addr + LBA_PCI_CFG_DATA);
-		DBG_CFG("%s(%x+%2x) -> 0x%x (c)\n", __FUNCTION__, tok, pos, *data);
-		return(*data == ~0U);
-	}
-	DBG_CFG("%s(%x+%2x) -> bad size (%d)\n", __FUNCTION__, tok, pos, size);
-	*data = ~0U;
-	return(!PCIBIOS_SUCCESSFUL);	/* failed */
-}
-
-/*
- * LBA 4.0 config write code implements non-postable semantics
- * by doing a read of CONFIG ADDR after the write.
- */
-
-static int mercury_cfg_write(struct pci_bus *bus, unsigned int devfn, int pos, int size, u32 data)
-{
-	struct lba_device *d = LBA_DEV(parisc_walk_tree(bus->bridge));
-	unsigned long data_reg = d->hba.base_addr + LBA_PCI_CFG_DATA;
-	u32 local_bus = (bus->parent == NULL) ? 0 : bus->secondary;
-	u32 tok = LBA_CFG_TOK(local_bus,devfn);
-
- 	ASSERT((tok & 0xff) == 0);
-	ASSERT(pos < 0x100);
-
-	DBG_CFG("%s(%x+%2x) <- 0x%x (c)\n", __FUNCTION__, tok, pos, data);
-
-	/* Basic Algorithm */
-	LBA_CFG_TR4_ADDR_SETUP(d, tok | pos);
-	switch(size) {
-	case 1:		WRITE_REG8 (data, data_reg + (pos & 3)); break;
-	case 2:		WRITE_REG16(data, data_reg + (pos & 2)); break;
-	case 4:		WRITE_REG32(data, data_reg);             break;
-	default: 
-		DBG_CFG("%s(%x+%2x) WTF! size %d\n", __FUNCTION__, tok, pos,
-				size);
-	}
-
-	/* flush posted write */
-	lba_t32 = READ_U32(d->hba.base_addr + LBA_PCI_CFG_ADDR);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-
-static struct pci_ops mercury_cfg_ops = {
-	.read =		mercury_cfg_read,
-	.write =	mercury_cfg_write,
-};
-#else
-#define mercury_cfg_ops lba_cfg_ops
-#endif /* CONFIG_PARISC64 */
-
-
-static int lba_cfg_read(struct pci_bus *bus, unsigned int devfn, int pos, int size, u32 *data)
-{
-	struct lba_device *d = LBA_DEV(parisc_walk_tree(bus->bridge));
-	u32 local_bus = (bus->parent == NULL) ? 0 : bus->secondary;
-	u32 tok = LBA_CFG_TOK(local_bus, devfn);
+	if ((pos > 255) || (devfn > 255))
+		return -EINVAL;
 
 /* FIXME: B2K/C3600 workaround is always use old method... */
-	/* if (!LBA_TR4PLUS(d) && !LBA_SKIP_PROBE(d)) */ {
+	/* if (!LBA_SKIP_PROBE(d)) */ {
 		/* original - Generate config cycle on broken elroy
 		  with risk we will miss PCI bus errors. */
 		*data = lba_rd_cfg(d, tok, pos, size);
-		DBG_CFG("%s(%x+%2x) -> 0x%x (a)\n", __FUNCTION__, tok, pos, *data);
-		return(*data == ~0U);
+		DBG_CFG("%s(%x+%2x) -> 0x%x (a)\n", __func__, tok, pos, *data);
+		return 0;
 	}
 
-	if (LBA_SKIP_PROBE(d) && (!lba_device_present(bus->secondary, devfn, d)))
-	{
-		DBG_CFG("%s(%x+%2x) -> -1 (b)\n", __FUNCTION__, tok, pos);
+	if (LBA_SKIP_PROBE(d) && !lba_device_present(bus->busn_res.start, devfn, d)) {
+		DBG_CFG("%s(%x+%2x) -> -1 (b)\n", __func__, tok, pos);
 		/* either don't want to look or know device isn't present. */
 		*data = ~0U;
 		return(0);
@@ -664,52 +393,32 @@ static int lba_cfg_read(struct pci_bus *bus, unsigned int devfn, int pos, int si
 	** Should only get here on fully working LBA rev.
 	** This is how simple the code should have been.
 	*/
-	LBA_CFG_TR4_ADDR_SETUP(d, tok | pos);
+	LBA_CFG_ADDR_SETUP(d, tok | pos);
 	switch(size) {
-	case 1: *(u8 *)  data = READ_REG8(d->hba.base_addr + LBA_PCI_CFG_DATA + (pos & 3));
-		break;
-	case 2: *(u16 *) data = READ_REG16(d->hba.base_addr + LBA_PCI_CFG_DATA + (pos & 2));
-		break;
-	case 4: *(u32 *) data = READ_REG32(d->hba.base_addr + LBA_PCI_CFG_DATA);
-	   break;
+	case 1: *data = READ_REG8 (data_reg + (pos & 3)); break;
+	case 2: *data = READ_REG16(data_reg + (pos & 2)); break;
+	case 4: *data = READ_REG32(data_reg); break;
 	}
-	DBG_CFG("%s(%x+%2x) -> 0x%x (c)\n", __FUNCTION__, tok, pos, *data);
-	return(*data == ~0U);
+	DBG_CFG("%s(%x+%2x) -> 0x%x (c)\n", __func__, tok, pos, *data);
+	return 0;
 }
 
 
 static void
-lba_wr_cfg( struct lba_device *d, u32 tok, u8 reg, u32 data, u32 size)
+lba_wr_cfg(struct lba_device *d, u32 tok, u8 reg, u32 data, u32 size)
 {
 	int error = 0;
 	u32 arb_mask = 0;
 	u32 error_config = 0;
 	u32 status_control = 0;
-
-	ASSERT((size == sizeof(u8)) ||
-		(size == sizeof(u16)) ||
-		(size == sizeof(u32)));
-
-	if ((size != sizeof(u8)) &&
-		(size != sizeof(u16)) &&
-		(size != sizeof(u32))) {
-			return;
-	}
+	void __iomem *data_reg = d->hba.base_addr + LBA_PCI_CFG_DATA;
 
 	LBA_CFG_SETUP(d, tok);
 	LBA_CFG_ADDR_SETUP(d, tok | reg);
 	switch (size) {
-	case sizeof(u8):
-		WRITE_REG8((u8) data, d->hba.base_addr + LBA_PCI_CFG_DATA + (reg&3));
-		break;
-	case sizeof(u16):
-		WRITE_REG16((u8) data, d->hba.base_addr + LBA_PCI_CFG_DATA +(reg&2));
-		break;
-	case sizeof(u32):
-		WRITE_REG32(data, d->hba.base_addr + LBA_PCI_CFG_DATA);
-		break;
-	default:
-		break;
+	case 1: WRITE_REG8 (data, data_reg + (reg & 3)); break;
+	case 2: WRITE_REG16(data, data_reg + (reg & 2)); break;
+	case 4: WRITE_REG32(data, data_reg);             break;
 	}
 	LBA_CFG_MASTER_ABORT_CHECK(d, d->hba.base_addr, tok, error);
 	LBA_CFG_RESTORE(d, d->hba.base_addr);
@@ -721,31 +430,31 @@ lba_wr_cfg( struct lba_device *d, u32 tok, u8 reg, u32 data, u32 size)
  * by doing a read of CONFIG ADDR after the write.
  */
 
-static int lba_cfg_write(struct pci_bus *bus, unsigned int devfn, int pos, int size, u32 data)
+static int elroy_cfg_write(struct pci_bus *bus, unsigned int devfn, int pos, int size, u32 data)
 {
 	struct lba_device *d = LBA_DEV(parisc_walk_tree(bus->bridge));
-	u32 local_bus = (bus->parent == NULL) ? 0 : bus->secondary;
+	u32 local_bus = (bus->parent == NULL) ? 0 : bus->busn_res.start;
 	u32 tok = LBA_CFG_TOK(local_bus,devfn);
 
- 	ASSERT((tok & 0xff) == 0);
-	ASSERT(pos < 0x100);
+	if ((pos > 255) || (devfn > 255))
+		return -EINVAL;
 
-	if (!LBA_TR4PLUS(d) && !LBA_SKIP_PROBE(d)) {
+	if (!LBA_SKIP_PROBE(d)) {
 		/* Original Workaround */
 		lba_wr_cfg(d, tok, pos, (u32) data, size);
-		DBG_CFG("%s(%x+%2x) = 0x%x (a)\n", __FUNCTION__, tok, pos,data);
+		DBG_CFG("%s(%x+%2x) = 0x%x (a)\n", __func__, tok, pos,data);
 		return 0;
 	}
 
-	if (LBA_SKIP_PROBE(d) && (!lba_device_present(bus->secondary, devfn, d))) {
-		DBG_CFG("%s(%x+%2x) = 0x%x (b)\n", __FUNCTION__, tok, pos,data);
+	if (LBA_SKIP_PROBE(d) && (!lba_device_present(bus->busn_res.start, devfn, d))) {
+		DBG_CFG("%s(%x+%2x) = 0x%x (b)\n", __func__, tok, pos,data);
 		return 1; /* New Workaround */
 	}
 
-	DBG_CFG("%s(%x+%2x) = 0x%x (c)\n", __FUNCTION__, tok, pos, data);
+	DBG_CFG("%s(%x+%2x) = 0x%x (c)\n", __func__, tok, pos, data);
 
 	/* Basic Algorithm */
-	LBA_CFG_TR4_ADDR_SETUP(d, tok | pos);
+	LBA_CFG_ADDR_SETUP(d, tok | pos);
 	switch(size) {
 	case 1: WRITE_REG8 (data, d->hba.base_addr + LBA_PCI_CFG_DATA + (pos & 3));
 		   break;
@@ -760,9 +469,82 @@ static int lba_cfg_write(struct pci_bus *bus, unsigned int devfn, int pos, int s
 }
 
 
-static struct pci_ops lba_cfg_ops = {
-	.read =		lba_cfg_read,
-	.write =	lba_cfg_write,
+static struct pci_ops elroy_cfg_ops = {
+	.read =		elroy_cfg_read,
+	.write =	elroy_cfg_write,
+};
+
+/*
+ * The mercury_cfg_ops are slightly misnamed; they're also used for Elroy
+ * TR4.0 as no additional bugs were found in this areea between Elroy and
+ * Mercury
+ */
+
+static int mercury_cfg_read(struct pci_bus *bus, unsigned int devfn, int pos, int size, u32 *data)
+{
+	struct lba_device *d = LBA_DEV(parisc_walk_tree(bus->bridge));
+	u32 local_bus = (bus->parent == NULL) ? 0 : bus->busn_res.start;
+	u32 tok = LBA_CFG_TOK(local_bus, devfn);
+	void __iomem *data_reg = d->hba.base_addr + LBA_PCI_CFG_DATA;
+
+	if ((pos > 255) || (devfn > 255))
+		return -EINVAL;
+
+	LBA_CFG_TR4_ADDR_SETUP(d, tok | pos);
+	switch(size) {
+	case 1:
+		*data = READ_REG8(data_reg + (pos & 3));
+		break;
+	case 2:
+		*data = READ_REG16(data_reg + (pos & 2));
+		break;
+	case 4:
+		*data = READ_REG32(data_reg);             break;
+		break;
+	}
+
+	DBG_CFG("mercury_cfg_read(%x+%2x) -> 0x%x\n", tok, pos, *data);
+	return 0;
+}
+
+/*
+ * LBA 4.0 config write code implements non-postable semantics
+ * by doing a read of CONFIG ADDR after the write.
+ */
+
+static int mercury_cfg_write(struct pci_bus *bus, unsigned int devfn, int pos, int size, u32 data)
+{
+	struct lba_device *d = LBA_DEV(parisc_walk_tree(bus->bridge));
+	void __iomem *data_reg = d->hba.base_addr + LBA_PCI_CFG_DATA;
+	u32 local_bus = (bus->parent == NULL) ? 0 : bus->busn_res.start;
+	u32 tok = LBA_CFG_TOK(local_bus,devfn);
+
+	if ((pos > 255) || (devfn > 255))
+		return -EINVAL;
+
+	DBG_CFG("%s(%x+%2x) <- 0x%x (c)\n", __func__, tok, pos, data);
+
+	LBA_CFG_TR4_ADDR_SETUP(d, tok | pos);
+	switch(size) {
+	case 1:
+		WRITE_REG8 (data, data_reg + (pos & 3));
+		break;
+	case 2:
+		WRITE_REG16(data, data_reg + (pos & 2));
+		break;
+	case 4:
+		WRITE_REG32(data, data_reg);
+		break;
+	}
+
+	/* flush posted write */
+	lba_t32 = READ_U32(d->hba.base_addr + LBA_PCI_CFG_ADDR);
+	return 0;
+}
+
+static struct pci_ops mercury_cfg_ops = {
+	.read =		mercury_cfg_read,
+	.write =	mercury_cfg_write,
 };
 
 
@@ -773,47 +555,152 @@ lba_bios_init(void)
 }
 
 
-#ifdef CONFIG_PARISC64
+#ifdef CONFIG_64BIT
 
 /*
-** Determine if a device is already configured.
-** If so, reserve it resources.
-**
-** Read PCI cfg command register and see if I/O or MMIO is enabled.
-** PAT has to enable the devices it's using.
-**
-** Note: resources are fixed up before we try to claim them.
-*/
-static void
-lba_claim_dev_resources(struct pci_dev *dev)
+ * truncate_pat_collision:  Deal with overlaps or outright collisions
+ *			between PAT PDC reported ranges.
+ *
+ *   Broken PA8800 firmware will report lmmio range that
+ *   overlaps with CPU HPA. Just truncate the lmmio range.
+ *
+ *   BEWARE: conflicts with this lmmio range may be an
+ *   elmmio range which is pointing down another rope.
+ *
+ *  FIXME: only deals with one collision per range...theoretically we
+ *  could have several. Supporting more than one collision will get messy.
+ */
+static unsigned long
+truncate_pat_collision(struct resource *root, struct resource *new)
 {
-	u16 cmd;
-	int i, srch_flags;
+	unsigned long start = new->start;
+	unsigned long end = new->end;
+	struct resource *tmp = root->child;
 
-	(void) pci_read_config_word(dev, PCI_COMMAND, &cmd);
+	if (end <= start || start < root->start || !tmp)
+		return 0;
 
-	srch_flags  = (cmd & PCI_COMMAND_IO) ? IORESOURCE_IO : 0;
-	if (cmd & PCI_COMMAND_MEMORY)
-		srch_flags |= IORESOURCE_MEM;
+	/* find first overlap */
+	while (tmp && tmp->end < start)
+		tmp = tmp->sibling;
 
-	if (!srch_flags)
-		return;
+	/* no entries overlap */
+	if (!tmp)  return 0;
 
-	for (i = 0; i <= PCI_ROM_RESOURCE; i++) {
-		if (dev->resource[i].flags & srch_flags) {
-			pci_claim_resource(dev, i);
-			DBG("   claimed %s %d [%lx,%lx]/%x\n",
-				pci_name(dev), i,
-				dev->resource[i].start,
-				dev->resource[i].end,
-				(int) dev->resource[i].flags
-				);
+	/* found one that starts behind the new one
+	** Don't need to do anything.
+	*/
+	if (tmp->start >= end) return 0;
+
+	if (tmp->start <= start) {
+		/* "front" of new one overlaps */
+		new->start = tmp->end + 1;
+
+		if (tmp->end >= end) {
+			/* AACCKK! totally overlaps! drop this range. */
+			return 1;
+		}
+	} 
+
+	if (tmp->end < end ) {
+		/* "end" of new one overlaps */
+		new->end = tmp->start - 1;
+	}
+
+	printk(KERN_WARNING "LBA: Truncating lmmio_space [%lx/%lx] "
+					"to [%lx,%lx]\n",
+			start, end,
+			(long)new->start, (long)new->end );
+
+	return 0;	/* truncation successful */
+}
+
+/*
+ * extend_lmmio_len: extend lmmio range to maximum length
+ *
+ * This is needed at least on C8000 systems to get the ATI FireGL card
+ * working. On other systems we will currently not extend the lmmio space.
+ */
+static unsigned long
+extend_lmmio_len(unsigned long start, unsigned long end, unsigned long lba_len)
+{
+	struct resource *tmp;
+
+	/* exit if not a C8000 */
+	if (boot_cpu_data.cpu_type < mako)
+		return end;
+
+	pr_debug("LMMIO mismatch: PAT length = 0x%lx, MASK register = 0x%lx\n",
+		end - start, lba_len);
+
+	lba_len = min(lba_len+1, 256UL*1024*1024); /* limit to 256 MB */
+
+	pr_debug("LBA: lmmio_space [0x%lx-0x%lx] - original\n", start, end);
+
+
+	end += lba_len;
+	if (end < start) /* fix overflow */
+		end = -1ULL;
+
+	pr_debug("LBA: lmmio_space [0x%lx-0x%lx] - current\n", start, end);
+
+	/* first overlap */
+	for (tmp = iomem_resource.child; tmp; tmp = tmp->sibling) {
+		pr_debug("LBA: testing %pR\n", tmp);
+		if (tmp->start == start)
+			continue; /* ignore ourself */
+		if (tmp->end < start)
+			continue;
+		if (tmp->start > end)
+			continue;
+		if (end >= tmp->start)
+			end = tmp->start - 1;
+	}
+
+	pr_info("LBA: lmmio_space [0x%lx-0x%lx] - new\n", start, end);
+
+	/* return new end */
+	return end;
+}
+
+#else
+#define truncate_pat_collision(r,n)  (0)
+#endif
+
+static void pcibios_allocate_bridge_resources(struct pci_dev *dev)
+{
+	int idx;
+	struct resource *r;
+
+	for (idx = PCI_BRIDGE_RESOURCES; idx < PCI_NUM_RESOURCES; idx++) {
+		r = &dev->resource[idx];
+		if (!r->flags)
+			continue;
+		if (r->parent)	/* Already allocated */
+			continue;
+		if (!r->start || pci_claim_bridge_resource(dev, idx) < 0) {
+			/*
+			 * Something is wrong with the region.
+			 * Invalidate the resource to prevent
+			 * child resource allocations in this
+			 * range.
+			 */
+			r->start = r->end = 0;
+			r->flags = 0;
 		}
 	}
 }
-#else
-#define lba_claim_dev_resources(dev)
-#endif
+
+static void pcibios_allocate_bus_resources(struct pci_bus *bus)
+{
+	struct pci_bus *child;
+
+	/* Depth-First Search on bus tree */
+	if (bus->self)
+		pcibios_allocate_bridge_resources(bus->self);
+	list_for_each_entry(child, &bus->children, node)
+		pcibios_allocate_bus_resources(child);
+}
 
 
 /*
@@ -828,35 +715,37 @@ lba_claim_dev_resources(struct pci_dev *dev)
 static void
 lba_fixup_bus(struct pci_bus *bus)
 {
-	struct list_head *ln;
+	struct pci_dev *dev;
 #ifdef FBB_SUPPORT
 	u16 status;
 #endif
 	struct lba_device *ldev = LBA_DEV(parisc_walk_tree(bus->bridge));
-	int lba_portbase = HBA_PORT_BASE(ldev->hba.hba_num);
 
-	DBG("lba_fixup_bus(0x%p) bus %d sysdata 0x%p\n",
-		bus, bus->secondary, bus->bridge->platform_data);
+	DBG("lba_fixup_bus(0x%p) bus %d platform_data 0x%p\n",
+		bus, (int)bus->busn_res.start, bus->bridge->platform_data);
 
 	/*
 	** Properly Setup MMIO resources for this bus.
 	** pci_alloc_primary_bus() mangles this.
 	*/
-	if (bus->self) {
+	if (bus->parent) {
 		/* PCI-PCI Bridge */
 		pci_read_bridge_bases(bus);
+
+		/* check and allocate bridge resources */
+		pcibios_allocate_bus_resources(bus);
 	} else {
 		/* Host-PCI Bridge */
-		int err, i;
+		int err;
 
-		DBG("lba_fixup_bus() %s [%lx/%lx]/%x\n",
+		DBG("lba_fixup_bus() %s [%lx/%lx]/%lx\n",
 			ldev->hba.io_space.name,
 			ldev->hba.io_space.start, ldev->hba.io_space.end,
-			(int) ldev->hba.io_space.flags);
-		DBG("lba_fixup_bus() %s [%lx/%lx]/%x\n",
+			ldev->hba.io_space.flags);
+		DBG("lba_fixup_bus() %s [%lx/%lx]/%lx\n",
 			ldev->hba.lmmio_space.name,
 			ldev->hba.lmmio_space.start, ldev->hba.lmmio_space.end,
-			(int) ldev->hba.lmmio_space.flags);
+			ldev->hba.lmmio_space.flags);
 
 		err = request_resource(&ioport_resource, &(ldev->hba.io_space));
 		if (err < 0) {
@@ -864,66 +753,50 @@ lba_fixup_bus(struct pci_bus *bus)
 			BUG();
 		}
 
-		if (ldev->hba.elmmio_space.start) {
+		if (ldev->hba.elmmio_space.flags) {
 			err = request_resource(&iomem_resource,
 					&(ldev->hba.elmmio_space));
 			if (err < 0) {
 
 				printk("FAILED: lba_fixup_bus() request for "
 						"elmmio_space [%lx/%lx]\n",
-						ldev->hba.elmmio_space.start,
-						ldev->hba.elmmio_space.end);
+						(long)ldev->hba.elmmio_space.start,
+						(long)ldev->hba.elmmio_space.end);
 
 				/* lba_dump_res(&iomem_resource, 2); */
 				/* BUG(); */
 			}
 		}
 
-		err = request_resource(&iomem_resource, &(ldev->hba.lmmio_space));
-		if (err < 0) {
-			/*   FIXME  overlaps with elmmio will fail here.
-			 *   Need to prune (or disable) the distributed range.
-			 *
-			 *   BEWARE: conflicts with this lmmio range may be
-			 *   elmmio range which is pointing down another rope.
-			 */
-
-			printk("FAILED: lba_fixup_bus() request for "
+		if (ldev->hba.lmmio_space.flags) {
+			err = request_resource(&iomem_resource, &(ldev->hba.lmmio_space));
+			if (err < 0) {
+				printk(KERN_ERR "FAILED: lba_fixup_bus() request for "
 					"lmmio_space [%lx/%lx]\n",
-					ldev->hba.lmmio_space.start,
-					ldev->hba.lmmio_space.end);
-			/* lba_dump_res(&iomem_resource, 2); */
+					(long)ldev->hba.lmmio_space.start,
+					(long)ldev->hba.lmmio_space.end);
+			}
 		}
 
-#ifdef CONFIG_PARISC64
+#ifdef CONFIG_64BIT
 		/* GMMIO is  distributed range. Every LBA/Rope gets part it. */
 		if (ldev->hba.gmmio_space.flags) {
 			err = request_resource(&iomem_resource, &(ldev->hba.gmmio_space));
 			if (err < 0) {
 				printk("FAILED: lba_fixup_bus() request for "
 					"gmmio_space [%lx/%lx]\n",
-					ldev->hba.gmmio_space.start,
-					ldev->hba.gmmio_space.end);
+					(long)ldev->hba.gmmio_space.start,
+					(long)ldev->hba.gmmio_space.end);
 				lba_dump_res(&iomem_resource, 2);
 				BUG();
 			}
 		}
 #endif
 
-		/* advertize Host bridge resources to PCI bus */
-		bus->resource[0] = &(ldev->hba.io_space);
-		bus->resource[1] = &(ldev->hba.lmmio_space);
-		i=2;
-		if (ldev->hba.elmmio_space.start)
-			bus->resource[i++] = &(ldev->hba.elmmio_space);
-		if (ldev->hba.gmmio_space.start)
-			bus->resource[i++] = &(ldev->hba.gmmio_space);
-			
 	}
 
-	list_for_each(ln, &bus->devices) {
+	list_for_each_entry(dev, &bus->devices, bus_list) {
 		int i;
-		struct pci_dev *dev = pci_dev_b(ln);
 
 		DBG("lba_fixup_bus() %s\n", pci_name(dev));
 
@@ -935,26 +808,12 @@ lba_fixup_bus(struct pci_bus *bus)
 			if (!res->start)
 				continue;
 
-			if (res->flags & IORESOURCE_IO) {
-				DBG("lba_fixup_bus() I/O Ports [%lx/%lx] -> ",
-					res->start, res->end);
-				res->start |= lba_portbase;
-				res->end   |= lba_portbase;
-				DBG("[%lx/%lx]\n", res->start, res->end);
-			} else if (res->flags & IORESOURCE_MEM) {
-				/*
-				** Convert PCI (IO_VIEW) addresses to
-				** processor (PA_VIEW) addresses
-				 */
-				DBG("lba_fixup_bus() MMIO [%lx/%lx] -> ",
-					res->start, res->end);
-				res->start = PCI_HOST_ADDR(HBA_DATA(ldev), res->start);
-				res->end   = PCI_HOST_ADDR(HBA_DATA(ldev), res->end);
-				DBG("[%lx/%lx]\n", res->start, res->end);
-			} else {
-				DBG("lba_fixup_bus() WTF? 0x%lx [%lx/%lx] XXX",
-					res->flags, res->start, res->end);
-			}
+			/*
+			** FIXME: this will result in whinging for devices
+			** that share expansion ROMs (think quad tulip), but
+			** isn't harmful.
+			*/
+			pci_claim_resource(dev, i);
 		}
 
 #ifdef FBB_SUPPORT
@@ -966,16 +825,13 @@ lba_fixup_bus(struct pci_bus *bus)
 		bus->bridge_ctl &= ~(status & PCI_STATUS_FAST_BACK);
 #endif
 
-		if (is_pdc_pat()) {
-			/* Claim resources for PDC's devices */
-			lba_claim_dev_resources(dev);
-		}
-
                 /*
 		** P2PB's have no IRQs. ignore them.
 		*/
-		if ((dev->class >> 8) == PCI_CLASS_BRIDGE_PCI)
+		if ((dev->class >> 8) == PCI_CLASS_BRIDGE_PCI) {
+			pcibios_init_bridge(dev);
 			continue;
+		}
 
 		/* Adjust INTERRUPT_LINE for this dev */
 		iosapic_fixup_irq(ldev->iosapic_obj, dev);
@@ -987,7 +843,7 @@ lba_fixup_bus(struct pci_bus *bus)
 ** Can't fixup here anyway....garr...
 */
 	if (fbb_enable) {
-		if (bus->self) {
+		if (bus->parent) {
 			u8 control;
 			/* enable on PPB */
 			(void) pci_read_config_byte(bus->self, PCI_BRIDGE_CONTROL, &control);
@@ -1000,7 +856,7 @@ lba_fixup_bus(struct pci_bus *bus)
 	}
 
 	/* Lastly enable FBB/PERR/SERR on all devices too */
-	list_for_each(ln, &bus->devices) {
+	list_for_each_entry(dev, &bus->devices, bus_list) {
 		(void) pci_read_config_word(dev, PCI_COMMAND, &status);
 		status |= PCI_COMMAND_PARITY | PCI_COMMAND_SERR | fbb_enable;
 		(void) pci_write_config_word(dev, PCI_COMMAND, status);
@@ -1009,7 +865,7 @@ lba_fixup_bus(struct pci_bus *bus)
 }
 
 
-struct pci_bios_ops lba_bios_ops = {
+static struct pci_bios_ops lba_bios_ops = {
 	.init =		lba_bios_init,
 	.fixup_bus =	lba_fixup_bus,
 };
@@ -1035,7 +891,7 @@ struct pci_bios_ops lba_bios_ops = {
 static u##size lba_astro_in##size (struct pci_hba_data *d, u16 addr) \
 { \
 	u##size t; \
-	t = READ_REG##size(LBA_PORT_BASE + addr); \
+	t = READ_REG##size(astro_iop_base + addr); \
 	DBG_PORT(" 0x%x\n", t); \
 	return (t); \
 }
@@ -1075,9 +931,8 @@ LBA_PORT_IN(32, 0)
 #define LBA_PORT_OUT(size, mask) \
 static void lba_astro_out##size (struct pci_hba_data *d, u16 addr, u##size val) \
 { \
-	ASSERT(d != NULL); \
-	DBG_PORT("%s(0x%p, 0x%x, 0x%x)\n", __FUNCTION__, d, addr, val); \
-	WRITE_REG##size(val, LBA_PORT_BASE + addr); \
+	DBG_PORT("%s(0x%p, 0x%x, 0x%x)\n", __func__, d, addr, val); \
+	WRITE_REG##size(val, astro_iop_base + addr); \
 	if (LBA_DEV(d)->hw_rev < 3) \
 		lba_t32 = READ_U32(d->base_addr + LBA_FUNC_ID); \
 }
@@ -1097,7 +952,7 @@ static struct pci_port_ops lba_astro_port_ops = {
 };
 
 
-#ifdef CONFIG_PARISC64
+#ifdef CONFIG_64BIT
 #define PIOP_TO_GMMIO(lba, addr) \
 	((lba)->iop_base + (((addr)&0xFFFC)<<10) + ((addr)&3))
 
@@ -1118,7 +973,7 @@ static struct pci_port_ops lba_astro_port_ops = {
 static u##size lba_pat_in##size (struct pci_hba_data *l, u16 addr) \
 { \
 	u##size t; \
-	DBG_PORT("%s(0x%p, 0x%x) ->", __FUNCTION__, l, addr); \
+	DBG_PORT("%s(0x%p, 0x%x) ->", __func__, l, addr); \
 	t = READ_REG##size(PIOP_TO_GMMIO(LBA_DEV(l), addr)); \
 	DBG_PORT(" 0x%x\n", t); \
 	return (t); \
@@ -1133,8 +988,8 @@ LBA_PORT_IN(32, 0)
 #define LBA_PORT_OUT(size, mask) \
 static void lba_pat_out##size (struct pci_hba_data *l, u16 addr, u##size val) \
 { \
-	void *where = (void *) PIOP_TO_GMMIO(LBA_DEV(l), addr); \
-	DBG_PORT("%s(0x%p, 0x%x, 0x%x)\n", __FUNCTION__, l, addr, val); \
+	void __iomem *where = PIOP_TO_GMMIO(LBA_DEV(l), addr); \
+	DBG_PORT("%s(0x%p, 0x%x, 0x%x)\n", __func__, l, addr, val); \
 	WRITE_REG##size(val, where); \
 	/* flush the I/O down to the elroy at least */ \
 	lba_t32 = READ_U32(l->base_addr + LBA_FUNC_ID); \
@@ -1166,28 +1021,38 @@ static void
 lba_pat_resources(struct parisc_device *pa_dev, struct lba_device *lba_dev)
 {
 	unsigned long bytecnt;
-	pdc_pat_cell_mod_maddr_block_t pa_pdc_cell;	/* PA_VIEW */
-	pdc_pat_cell_mod_maddr_block_t io_pdc_cell;	/* IO_VIEW */
 	long io_count;
 	long status;	/* PDC return status */
 	long pa_count;
+	pdc_pat_cell_mod_maddr_block_t *pa_pdc_cell;	/* PA_VIEW */
+	pdc_pat_cell_mod_maddr_block_t *io_pdc_cell;	/* IO_VIEW */
 	int i;
+
+	pa_pdc_cell = kzalloc(sizeof(pdc_pat_cell_mod_maddr_block_t), GFP_KERNEL);
+	if (!pa_pdc_cell)
+		return;
+
+	io_pdc_cell = kzalloc(sizeof(pdc_pat_cell_mod_maddr_block_t), GFP_KERNEL);
+	if (!io_pdc_cell) {
+		kfree(pa_pdc_cell);
+		return;
+	}
 
 	/* return cell module (IO view) */
 	status = pdc_pat_cell_module(&bytecnt, pa_dev->pcell_loc, pa_dev->mod_index,
-				PA_VIEW, & pa_pdc_cell);
-	pa_count = pa_pdc_cell.mod[1];
+				PA_VIEW, pa_pdc_cell);
+	pa_count = pa_pdc_cell->mod[1];
 
 	status |= pdc_pat_cell_module(&bytecnt, pa_dev->pcell_loc, pa_dev->mod_index,
-				IO_VIEW, &io_pdc_cell);
-	io_count = io_pdc_cell.mod[1];
+				IO_VIEW, io_pdc_cell);
+	io_count = io_pdc_cell->mod[1];
 
 	/* We've already done this once for device discovery...*/
 	if (status != PDC_OK) {
 		panic("pdc_pat_cell_module() call failed for LBA!\n");
 	}
 
-	if (PAT_GET_ENTITY(pa_pdc_cell.mod_info) != PAT_ENTITY_LBA) {
+	if (PAT_GET_ENTITY(pa_pdc_cell->mod_info) != PAT_ENTITY_LBA) {
 		panic("pdc_pat_cell_module() entity returned != PAT_ENTITY_LBA!\n");
 	}
 
@@ -1202,29 +1067,41 @@ lba_pat_resources(struct parisc_device *pa_dev, struct lba_device *lba_dev)
 		} *p, *io;
 		struct resource *r;
 
-		p = (void *) &(pa_pdc_cell.mod[2+i*3]);
-		io = (void *) &(io_pdc_cell.mod[2+i*3]);
+		p = (void *) &(pa_pdc_cell->mod[2+i*3]);
+		io = (void *) &(io_pdc_cell->mod[2+i*3]);
 
 		/* Convert the PAT range data to PCI "struct resource" */
 		switch(p->type & 0xff) {
 		case PAT_PBNUM:
 			lba_dev->hba.bus_num.start = p->start;
 			lba_dev->hba.bus_num.end   = p->end;
+			lba_dev->hba.bus_num.flags = IORESOURCE_BUS;
 			break;
 
 		case PAT_LMMIO:
 			/* used to fix up pre-initialized MEM BARs */
-			if (!lba_dev->hba.lmmio_space.start) {
-				sprintf(lba_dev->hba.lmmio_name, "PCI%02x LMMIO",
-					(int) lba_dev->hba.bus_num.start);
-				lba_dev->hba.lmmio_space_offset = p->start - io->start;
-				r = &(lba_dev->hba.lmmio_space);
-				r->name  = lba_dev->hba.lmmio_name;
-			} else if (!lba_dev->hba.elmmio_space.start) {
-				sprintf(lba_dev->hba.elmmio_name, "PCI%02x ELMMIO",
-					(int) lba_dev->hba.bus_num.start);
-				r = &(lba_dev->hba.elmmio_space);
-				r->name  = lba_dev->hba.elmmio_name;
+			if (!lba_dev->hba.lmmio_space.flags) {
+				unsigned long lba_len;
+
+				lba_len = ~READ_REG32(lba_dev->hba.base_addr
+						+ LBA_LMMIO_MASK);
+				if ((p->end - p->start) != lba_len)
+					p->end = extend_lmmio_len(p->start,
+						p->end, lba_len);
+
+				sprintf(lba_dev->hba.lmmio_name,
+						"PCI%02x LMMIO",
+						(int)lba_dev->hba.bus_num.start);
+				lba_dev->hba.lmmio_space_offset = p->start -
+					io->start;
+				r = &lba_dev->hba.lmmio_space;
+				r->name = lba_dev->hba.lmmio_name;
+			} else if (!lba_dev->hba.elmmio_space.flags) {
+				sprintf(lba_dev->hba.elmmio_name,
+						"PCI%02x ELMMIO",
+						(int)lba_dev->hba.bus_num.start);
+				r = &lba_dev->hba.elmmio_space;
+				r->name = lba_dev->hba.elmmio_name;
 			} else {
 				printk(KERN_WARNING MODULE_NAME
 					" only supports 2 LMMIO resources!\n");
@@ -1240,8 +1117,8 @@ lba_pat_resources(struct parisc_device *pa_dev, struct lba_device *lba_dev)
 		case PAT_GMMIO:
 			/* MMIO space > 4GB phys addr; for 64-bit BAR */
 			sprintf(lba_dev->hba.gmmio_name, "PCI%02x GMMIO",
-					(int) lba_dev->hba.bus_num.start);
-			r = &(lba_dev->hba.gmmio_space);
+					(int)lba_dev->hba.bus_num.start);
+			r = &lba_dev->hba.gmmio_space;
 			r->name  = lba_dev->hba.gmmio_name;
 			r->start  = p->start;
 			r->end    = p->end;
@@ -1260,11 +1137,11 @@ lba_pat_resources(struct parisc_device *pa_dev, struct lba_device *lba_dev)
 			** Postable I/O port space is per PCI host adapter.
 			** base of 64MB PIOP region
 			*/
-			lba_dev->iop_base = p->start;
+			lba_dev->iop_base = ioremap_nocache(p->start, 64 * 1024 * 1024);
 
 			sprintf(lba_dev->hba.io_name, "PCI%02x Ports",
-					(int) lba_dev->hba.bus_num.start);
-			r = &(lba_dev->hba.io_space);
+					(int)lba_dev->hba.bus_num.start);
+			r = &lba_dev->hba.io_space;
 			r->name  = lba_dev->hba.io_name;
 			r->start  = HBA_PORT_BASE(lba_dev->hba.hba_num);
 			r->end    = r->start + HBA_PORT_SPACE_SIZE - 1;
@@ -1279,12 +1156,15 @@ lba_pat_resources(struct parisc_device *pa_dev, struct lba_device *lba_dev)
 			break;
 		}
 	}
+
+	kfree(pa_pdc_cell);
+	kfree(io_pdc_cell);
 }
 #else
 /* keep compiler from complaining about missing declarations */
 #define lba_pat_port_ops lba_astro_port_ops
 #define lba_pat_resources(pa_dev, lba_dev)
-#endif	/* CONFIG_PARISC64 */
+#endif	/* CONFIG_64BIT */
 
 
 extern void sba_distributed_lmmio(struct parisc_device *, struct resource *);
@@ -1306,18 +1186,19 @@ lba_legacy_resources(struct parisc_device *pa_dev, struct lba_device *lba_dev)
 	** PCI bus walk *should* end up with the same result.
 	** FIXME: But we don't have sanity checks in PCI or LBA.
 	*/
-	lba_num = READ_REG32(pa_dev->hpa + LBA_FW_SCRATCH);
+	lba_num = READ_REG32(lba_dev->hba.base_addr + LBA_FW_SCRATCH);
 	r = &(lba_dev->hba.bus_num);
 	r->name = "LBA PCI Busses";
 	r->start = lba_num & 0xff;
 	r->end = (lba_num>>8) & 0xff;
+	r->flags = IORESOURCE_BUS;
 
 	/* Set up local PCI Bus resources - we don't need them for
 	** Legacy boxes but it's nice to see in /proc/iomem.
 	*/
 	r = &(lba_dev->hba.lmmio_space);
 	sprintf(lba_dev->hba.lmmio_name, "PCI%02x LMMIO",
-					(int) lba_dev->hba.bus_num.start);
+					(int)lba_dev->hba.bus_num.start);
 	r->name  = lba_dev->hba.lmmio_name;
 
 #if 1
@@ -1387,7 +1268,7 @@ lba_legacy_resources(struct parisc_device *pa_dev, struct lba_device *lba_dev)
 	 *
 	 * All is well now.
 	 */
-	r->start = (long) READ_REG32(pa_dev->hpa + LBA_LMMIO_BASE);
+	r->start = READ_REG32(lba_dev->hba.base_addr + LBA_LMMIO_BASE);
 	if (r->start & 1) {
 		unsigned long rsize;
 
@@ -1395,14 +1276,14 @@ lba_legacy_resources(struct parisc_device *pa_dev, struct lba_device *lba_dev)
 		/* mmio_mask also clears Enable bit */
 		r->start &= mmio_mask;
 		r->start = PCI_HOST_ADDR(HBA_DATA(lba_dev), r->start);
-		rsize = ~ READ_REG32(pa_dev->hpa + LBA_LMMIO_MASK);
+		rsize = ~ READ_REG32(lba_dev->hba.base_addr + LBA_LMMIO_MASK);
 
 		/*
 		** Each rope only gets part of the distributed range.
 		** Adjust "window" for this rope.
 		*/
 		rsize /= ROPES_PER_IOC;
-		r->start += (rsize + 1) * LBA_NUM(pa_dev->hpa);
+		r->start += (rsize + 1) * LBA_NUM(pa_dev->hpa.start);
 		r->end = r->start + rsize;
 	} else {
 		r->end = r->start = 0;	/* Not enabled. */
@@ -1426,14 +1307,14 @@ lba_legacy_resources(struct parisc_device *pa_dev, struct lba_device *lba_dev)
 	*/
 	r = &(lba_dev->hba.elmmio_space);
 	sprintf(lba_dev->hba.elmmio_name, "PCI%02x ELMMIO",
-					(int) lba_dev->hba.bus_num.start);
+					(int)lba_dev->hba.bus_num.start);
 	r->name  = lba_dev->hba.elmmio_name;
 
 #if 1
 	/* See comment which precedes call to sba_directed_lmmio() */
 	sba_directed_lmmio(pa_dev, r);
 #else
-	r->start = READ_REG32(pa_dev->hpa + LBA_ELMMIO_BASE);
+	r->start = READ_REG32(lba_dev->hba.base_addr + LBA_ELMMIO_BASE);
 
 	if (r->start & 1) {
 		unsigned long rsize;
@@ -1441,18 +1322,18 @@ lba_legacy_resources(struct parisc_device *pa_dev, struct lba_device *lba_dev)
 		/* mmio_mask also clears Enable bit */
 		r->start &= mmio_mask;
 		r->start = PCI_HOST_ADDR(HBA_DATA(lba_dev), r->start);
-		rsize = READ_REG32(pa_dev->hpa + LBA_ELMMIO_MASK);
+		rsize = READ_REG32(lba_dev->hba.base_addr + LBA_ELMMIO_MASK);
 		r->end = r->start + ~rsize;
 	}
 #endif
 
 	r = &(lba_dev->hba.io_space);
 	sprintf(lba_dev->hba.io_name, "PCI%02x Ports",
-					(int) lba_dev->hba.bus_num.start);
+					(int)lba_dev->hba.bus_num.start);
 	r->name  = lba_dev->hba.io_name;
 	r->flags = IORESOURCE_IO;
-	r->start = READ_REG32(pa_dev->hpa + LBA_IOS_BASE) & ~1L;
-	r->end   = r->start + (READ_REG32(pa_dev->hpa + LBA_IOS_MASK) ^ (HBA_PORT_SPACE_SIZE - 1));
+	r->start = READ_REG32(lba_dev->hba.base_addr + LBA_IOS_BASE) & ~1L;
+	r->end   = r->start + (READ_REG32(lba_dev->hba.base_addr + LBA_IOS_MASK) ^ (HBA_PORT_SPACE_SIZE - 1));
 
 	/* Virtualize the I/O Port space ranges */
 	lba_num = HBA_PORT_BASE(lba_dev->hba.hba_num);
@@ -1501,7 +1382,7 @@ lba_hw_init(struct lba_device *d)
 	printk("\n");
 #endif	/* DEBUG_LBA_PAT */
 
-#ifdef CONFIG_PARISC64
+#ifdef CONFIG_64BIT
 /*
  * FIXME add support for PDC_PAT_IO "Get slot status" - OLAR support
  * Only N-Class and up can really make use of Get slot status.
@@ -1556,41 +1437,35 @@ lba_hw_init(struct lba_device *d)
 	return 0;
 }
 
-
-
-static void __init
-lba_common_init(struct lba_device *lba_dev)
-{
-	pci_bios = &lba_bios_ops;
-	pcibios_register_hba(HBA_DATA(lba_dev));
-	spin_lock_init(&lba_dev->lba_lock);
-
-	/*
-	** Set flags which depend on hw_rev
-	*/
-	if (!LBA_TR4PLUS(lba_dev)) {
-		lba_dev->flags |= LBA_FLAG_NO_DMA_DURING_CFG;
-	}
-}
-
-
+/*
+ * Unfortunately, when firmware numbers busses, it doesn't take into account
+ * Cardbus bridges.  So we have to renumber the busses to suit ourselves.
+ * Elroy/Mercury don't actually know what bus number they're attached to;
+ * we use bus 0 to indicate the directly attached bus and any other bus
+ * number will be taken care of by the PCI-PCI bridge.
+ */
+static unsigned int lba_next_bus = 0;
 
 /*
-** Determine if lba should claim this chip (return 0) or not (return 1).
-** If so, initialize the chip and tell other partners in crime they
-** have work to do.
-*/
+ * Determine if lba should claim this chip (return 0) or not (return 1).
+ * If so, initialize the chip and tell other partners in crime they
+ * have work to do.
+ */
 static int __init
 lba_driver_probe(struct parisc_device *dev)
 {
 	struct lba_device *lba_dev;
+	LIST_HEAD(resources);
 	struct pci_bus *lba_bus;
+	struct pci_ops *cfg_ops;
 	u32 func_class;
 	void *tmp_obj;
 	char *version;
+	void __iomem *addr = ioremap_nocache(dev->hpa.start, 4096);
+	int max;
 
 	/* Read HW Rev First */
-	func_class = READ_REG32(dev->hpa + LBA_FCLASS);
+	func_class = READ_REG32(addr + LBA_FCLASS);
 
 	if (IS_ELROY(dev)) {	
 		func_class &= 0xf;
@@ -1603,60 +1478,74 @@ lba_driver_probe(struct parisc_device *dev)
 		case 5:	version = "TR4.0"; break;
 		default: version = "TR4+";
 		}
-		printk(KERN_INFO "%s version %s (0x%x) found at 0x%lx\n",
-			MODULE_NAME, version, func_class & 0xf, dev->hpa);
 
-		/* Just in case we find some prototypes... */
+		printk(KERN_INFO "Elroy version %s (0x%x) found at 0x%lx\n",
+		       version, func_class & 0xf, (long)dev->hpa.start);
+
+		if (func_class < 2) {
+			printk(KERN_WARNING "Can't support LBA older than "
+				"TR2.1 - continuing under adversity.\n");
+		}
+
+#if 0
+/* Elroy TR4.0 should work with simple algorithm.
+   But it doesn't.  Still missing something. *sigh*
+*/
+		if (func_class > 4) {
+			cfg_ops = &mercury_cfg_ops;
+		} else
+#endif
+		{
+			cfg_ops = &elroy_cfg_ops;
+		}
+
 	} else if (IS_MERCURY(dev) || IS_QUICKSILVER(dev)) {
+		int major, minor;
+
 		func_class &= 0xff;
-		version = kmalloc(6, GFP_KERNEL);
-		sprintf(version,"TR%d.%d",(func_class >> 4),(func_class & 0xf));
-		/* We could use one printk for both and have it outside,
+		major = func_class >> 4, minor = func_class & 0xf;
+
+		/* We could use one printk for both Elroy and Mercury,
                  * but for the mask for func_class.
                  */ 
-		printk(KERN_INFO "%s version %s (0x%x) found at 0x%lx\n",
-			MODULE_NAME, version, func_class & 0xff, dev->hpa);
+		printk(KERN_INFO "%s version TR%d.%d (0x%x) found at 0x%lx\n",
+		       IS_MERCURY(dev) ? "Mercury" : "Quicksilver", major,
+		       minor, func_class, (long)dev->hpa.start);
+
+		cfg_ops = &mercury_cfg_ops;
+	} else {
+		printk(KERN_ERR "Unknown LBA found at 0x%lx\n",
+			(long)dev->hpa.start);
+		return -ENODEV;
 	}
 
-	if (func_class < 2) {
-		printk(KERN_WARNING "Can't support LBA older than TR2.1"
-				" - continuing under adversity.\n");
-	}
-
-	/*
-	** Tell I/O SAPIC driver we have a IRQ handler/region.
-	*/
-	tmp_obj = iosapic_register(dev->hpa + LBA_IOSAPIC_BASE);
+	/* Tell I/O SAPIC driver we have a IRQ handler/region. */
+	tmp_obj = iosapic_register(dev->hpa.start + LBA_IOSAPIC_BASE);
 
 	/* NOTE: PCI devices (e.g. 103c:1005 graphics card) which don't
 	**	have an IRT entry will get NULL back from iosapic code.
 	*/
 	
-	lba_dev = kmalloc(sizeof(struct lba_device), GFP_KERNEL);
-	if (NULL == lba_dev)
-	{
+	lba_dev = kzalloc(sizeof(struct lba_device), GFP_KERNEL);
+	if (!lba_dev) {
 		printk(KERN_ERR "lba_init_chip - couldn't alloc lba_device\n");
 		return(1);
 	}
 
-	memset(lba_dev, 0, sizeof(struct lba_device));
-
 
 	/* ---------- First : initialize data we already have --------- */
 
-	/*
-	** Need hw_rev to adjust configuration space behavior.
-	** LBA_TR4PLUS macro uses hw_rev field.
-	*/
 	lba_dev->hw_rev = func_class;
-
-	lba_dev->hba.base_addr = dev->hpa;  /* faster access */
+	lba_dev->hba.base_addr = addr;
 	lba_dev->hba.dev = dev;
 	lba_dev->iosapic_obj = tmp_obj;  /* save interrupt handle */
 	lba_dev->hba.iommu = sba_get_iommu(dev);  /* get iommu data */
+	parisc_set_drvdata(dev, lba_dev);
 
 	/* ------------ Second : initialize common stuff ---------- */
-	lba_common_init(lba_dev);
+	pci_bios = &lba_bios_ops;
+	pcibios_register_hba(HBA_DATA(lba_dev));
+	spin_lock_init(&lba_dev->lba_lock);
 
 	if (lba_hw_init(lba_dev))
 		return(1);
@@ -1669,22 +1558,62 @@ lba_driver_probe(struct parisc_device *dev)
 		/* Go ask PDC PAT what resources this LBA has */
 		lba_pat_resources(dev, lba_dev);
 	} else {
-		/* Sprockets PDC uses NPIOP region */
-		pci_port = &lba_astro_port_ops;
+		if (!astro_iop_base) {
+			/* Sprockets PDC uses NPIOP region */
+			astro_iop_base = ioremap_nocache(LBA_PORT_BASE, 64 * 1024);
+			pci_port = &lba_astro_port_ops;
+		}
 
 		/* Poke the chip a bit for /proc output */
 		lba_legacy_resources(dev, lba_dev);
 	}
 
-	/* 
-	** Tell PCI support another PCI bus was found.
-	** Walks PCI bus for us too.
-	*/
+	if (lba_dev->hba.bus_num.start < lba_next_bus)
+		lba_dev->hba.bus_num.start = lba_next_bus;
+
+	/*   Overlaps with elmmio can (and should) fail here.
+	 *   We will prune (or ignore) the distributed range.
+	 *
+	 *   FIXME: SBA code should register all elmmio ranges first.
+	 *      that would take care of elmmio ranges routed
+	 *	to a different rope (already discovered) from
+	 *	getting registered *after* LBA code has already
+	 *	registered it's distributed lmmio range.
+	 */
+	if (truncate_pat_collision(&iomem_resource,
+				   &(lba_dev->hba.lmmio_space))) {
+		printk(KERN_WARNING "LBA: lmmio_space [%lx/%lx] duplicate!\n",
+				(long)lba_dev->hba.lmmio_space.start,
+				(long)lba_dev->hba.lmmio_space.end);
+		lba_dev->hba.lmmio_space.flags = 0;
+	}
+
+	pci_add_resource_offset(&resources, &lba_dev->hba.io_space,
+				HBA_PORT_BASE(lba_dev->hba.hba_num));
+	if (lba_dev->hba.elmmio_space.flags)
+		pci_add_resource_offset(&resources, &lba_dev->hba.elmmio_space,
+					lba_dev->hba.lmmio_space_offset);
+	if (lba_dev->hba.lmmio_space.flags)
+		pci_add_resource_offset(&resources, &lba_dev->hba.lmmio_space,
+					lba_dev->hba.lmmio_space_offset);
+	if (lba_dev->hba.gmmio_space.flags) {
+		/* Not registering GMMIO space - according to docs it's not
+		 * even used on HP-UX. */
+		/* pci_add_resource(&resources, &lba_dev->hba.gmmio_space); */
+	}
+
+	pci_add_resource(&resources, &lba_dev->hba.bus_num);
+
 	dev->dev.platform_data = lba_dev;
 	lba_bus = lba_dev->hba.hba_bus =
-		pci_scan_bus_parented(&dev->dev, lba_dev->hba.bus_num.start,
-				IS_ELROY(dev) ? &lba_cfg_ops : &mercury_cfg_ops,
-				NULL);
+		pci_create_root_bus(&dev->dev, lba_dev->hba.bus_num.start,
+				    cfg_ops, NULL, &resources);
+	if (!lba_bus) {
+		pci_free_resource_list(&resources);
+		return 0;
+	}
+
+	max = pci_scan_child_bus(lba_bus);
 
 	/* This is in lieu of calling pci_assign_unassigned_resources() */
 	if (is_pdc_pat()) {
@@ -1703,30 +1632,31 @@ lba_driver_probe(struct parisc_device *dev)
 		lba_dump_res(&lba_dev->hba.lmmio_space, 2);
 #endif
 	}
-	pci_enable_bridges(lba_bus);
-
 
 	/*
 	** Once PCI register ops has walked the bus, access to config
 	** space is restricted. Avoids master aborts on config cycles.
 	** Early LBA revs go fatal on *any* master abort.
 	*/
-	if (!LBA_TR4PLUS(lba_dev)) {
+	if (cfg_ops == &elroy_cfg_ops) {
 		lba_dev->flags |= LBA_FLAG_SKIP_PROBE;
 	}
+
+	lba_next_bus = max + 1;
+	pci_bus_add_devices(lba_bus);
 
 	/* Whew! Finally done! Tell services we got this one covered. */
 	return 0;
 }
 
-static struct parisc_device_id lba_tbl[] = {
+static const struct parisc_device_id lba_tbl[] __initconst = {
 	{ HPHW_BRIDGE, HVERSION_REV_ANY_ID, ELROY_HVERS, 0xa },
 	{ HPHW_BRIDGE, HVERSION_REV_ANY_ID, MERCURY_HVERS, 0xa },
 	{ HPHW_BRIDGE, HVERSION_REV_ANY_ID, QUICKSILVER_HVERS, 0xa },
 	{ 0, }
 };
 
-static struct parisc_driver lba_driver = {
+static struct parisc_driver lba_driver __refdata = {
 	.name =		MODULE_NAME,
 	.id_table =	lba_tbl,
 	.probe =	lba_driver_probe,
@@ -1746,18 +1676,52 @@ void __init lba_init(void)
 ** Only called from sba_iommu.c in order to route ranges (MMIO vs DMA).
 ** sba_iommu is responsible for locking (none needed at init time).
 */
-void
-lba_set_iregs(struct parisc_device *lba, u32 ibase, u32 imask)
+void lba_set_iregs(struct parisc_device *lba, u32 ibase, u32 imask)
 {
-	unsigned long base_addr = lba->hpa;
+	void __iomem * base_addr = ioremap_nocache(lba->hpa.start, 4096);
 
 	imask <<= 2;	/* adjust for hints - 2 more bits */
 
-	ASSERT((ibase & 0x003fffff) == 0);
-	ASSERT((imask & 0x003fffff) == 0);
+	/* Make sure we aren't trying to set bits that aren't writeable. */
+	WARN_ON((ibase & 0x001fffff) != 0);
+	WARN_ON((imask & 0x001fffff) != 0);
 	
-	DBG("%s() ibase 0x%x imask 0x%x\n", __FUNCTION__, ibase, imask);
+	DBG("%s() ibase 0x%x imask 0x%x\n", __func__, ibase, imask);
 	WRITE_REG32( imask, base_addr + LBA_IMASK);
 	WRITE_REG32( ibase, base_addr + LBA_IBASE);
+	iounmap(base_addr);
 }
 
+
+/*
+ * The design of the Diva management card in rp34x0 machines (rp3410, rp3440)
+ * seems rushed, so that many built-in components simply don't work.
+ * The following quirks disable the serial AUX port and the built-in ATI RV100
+ * Radeon 7000 graphics card which both don't have any external connectors and
+ * thus are useless, and even worse, e.g. the AUX port occupies ttyS0 and as
+ * such makes those machines the only PARISC machines on which we can't use
+ * ttyS0 as boot console.
+ */
+static void quirk_diva_ati_card(struct pci_dev *dev)
+{
+	if (dev->subsystem_vendor != PCI_VENDOR_ID_HP ||
+	    dev->subsystem_device != 0x1292)
+		return;
+
+	dev_info(&dev->dev, "Hiding Diva built-in ATI card");
+	dev->device = 0;
+}
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RADEON_QY,
+	quirk_diva_ati_card);
+
+static void quirk_diva_aux_disable(struct pci_dev *dev)
+{
+	if (dev->subsystem_vendor != PCI_VENDOR_ID_HP ||
+	    dev->subsystem_device != 0x1291)
+		return;
+
+	dev_info(&dev->dev, "Hiding Diva built-in AUX serial device");
+	dev->device = 0;
+}
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HP, PCI_DEVICE_ID_HP_DIVA_AUX,
+	quirk_diva_aux_disable);

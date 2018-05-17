@@ -2,7 +2,7 @@
  * Helper functions for indirect PCM data transfer
  *
  *  Copyright (c) by Takashi Iwai <tiwai@suse.de>
- *                   Jaroslav Kysela <perex@suse.cz>
+ *                   Jaroslav Kysela <perex@perex.cz>
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -24,7 +24,7 @@
 
 #include <sound/pcm.h>
 
-typedef struct sndrv_pcm_indirect {
+struct snd_pcm_indirect {
 	unsigned int hw_buffer_size;	/* Byte size of hardware buffer */
 	unsigned int hw_queue_size;	/* Max queue size of hw buffer (0 = buffer size) */
 	unsigned int hw_data;	/* Offset to next dst (or src) in hw ring buffer */
@@ -35,20 +35,20 @@ typedef struct sndrv_pcm_indirect {
 	unsigned int sw_io;	/* Current software pointer in bytes */
 	int sw_ready;		/* Bytes ready to be transferred to/from hw */
 	snd_pcm_uframes_t appl_ptr;	/* Last seen appl_ptr */
-} snd_pcm_indirect_t;
+};
 
-typedef void (*snd_pcm_indirect_copy_t)(snd_pcm_substream_t *substream,
-					snd_pcm_indirect_t *rec, size_t bytes);
+typedef void (*snd_pcm_indirect_copy_t)(struct snd_pcm_substream *substream,
+					struct snd_pcm_indirect *rec, size_t bytes);
 
 /*
  * helper function for playback ack callback
  */
-static inline void
-snd_pcm_indirect_playback_transfer(snd_pcm_substream_t *substream,
-				   snd_pcm_indirect_t *rec,
+static inline int
+snd_pcm_indirect_playback_transfer(struct snd_pcm_substream *substream,
+				   struct snd_pcm_indirect *rec,
 				   snd_pcm_indirect_copy_t copy)
 {
-	snd_pcm_runtime_t *runtime = substream->runtime;
+	struct snd_pcm_runtime *runtime = substream->runtime;
 	snd_pcm_uframes_t appl_ptr = runtime->control->appl_ptr;
 	snd_pcm_sframes_t diff = appl_ptr - rec->appl_ptr;
 	int qsize;
@@ -56,6 +56,8 @@ snd_pcm_indirect_playback_transfer(snd_pcm_substream_t *substream,
 	if (diff) {
 		if (diff < -(snd_pcm_sframes_t) (runtime->boundary / 2))
 			diff += runtime->boundary;
+		if (diff < 0)
+			return -EINVAL;
 		rec->sw_ready += (int)frames_to_bytes(runtime, diff);
 		rec->appl_ptr = appl_ptr;
 	}
@@ -82,6 +84,7 @@ snd_pcm_indirect_playback_transfer(snd_pcm_substream_t *substream,
 		rec->hw_ready += bytes;
 		rec->sw_ready -= bytes;
 	}
+	return 0;
 }
 
 /*
@@ -89,8 +92,8 @@ snd_pcm_indirect_playback_transfer(snd_pcm_substream_t *substream,
  * ptr = current byte pointer
  */
 static inline snd_pcm_uframes_t
-snd_pcm_indirect_playback_pointer(snd_pcm_substream_t *substream,
-				  snd_pcm_indirect_t *rec, unsigned int ptr)
+snd_pcm_indirect_playback_pointer(struct snd_pcm_substream *substream,
+				  struct snd_pcm_indirect *rec, unsigned int ptr)
 {
 	int bytes = ptr - rec->hw_io;
 	if (bytes < 0)
@@ -109,18 +112,20 @@ snd_pcm_indirect_playback_pointer(snd_pcm_substream_t *substream,
 /*
  * helper function for capture ack callback
  */
-static inline void
-snd_pcm_indirect_capture_transfer(snd_pcm_substream_t *substream,
-				  snd_pcm_indirect_t *rec,
+static inline int
+snd_pcm_indirect_capture_transfer(struct snd_pcm_substream *substream,
+				  struct snd_pcm_indirect *rec,
 				  snd_pcm_indirect_copy_t copy)
 {
-	snd_pcm_runtime_t *runtime = substream->runtime;
+	struct snd_pcm_runtime *runtime = substream->runtime;
 	snd_pcm_uframes_t appl_ptr = runtime->control->appl_ptr;
 	snd_pcm_sframes_t diff = appl_ptr - rec->appl_ptr;
 
 	if (diff) {
 		if (diff < -(snd_pcm_sframes_t) (runtime->boundary / 2))
 			diff += runtime->boundary;
+		if (diff < 0)
+			return -EINVAL;
 		rec->sw_ready -= frames_to_bytes(runtime, diff);
 		rec->appl_ptr = appl_ptr;
 	}
@@ -147,6 +152,7 @@ snd_pcm_indirect_capture_transfer(snd_pcm_substream_t *substream,
 		rec->hw_ready -= bytes;
 		rec->sw_ready += bytes;
 	}
+	return 0;
 }
 
 /*
@@ -154,8 +160,8 @@ snd_pcm_indirect_capture_transfer(snd_pcm_substream_t *substream,
  * ptr = current byte pointer
  */
 static inline snd_pcm_uframes_t
-snd_pcm_indirect_capture_pointer(snd_pcm_substream_t *substream,
-				 snd_pcm_indirect_t *rec, unsigned int ptr)
+snd_pcm_indirect_capture_pointer(struct snd_pcm_substream *substream,
+				 struct snd_pcm_indirect *rec, unsigned int ptr)
 {
 	int qsize;
 	int bytes = ptr - rec->hw_io;

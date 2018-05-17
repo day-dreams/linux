@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/arch/alpha/kernel/sys_nautilus.c
  *
@@ -35,12 +36,10 @@
 #include <linux/bitops.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
-#include <asm/pci.h>
 #include <asm/pgtable.h>
 #include <asm/core_irongate.h>
 #include <asm/hwrpb.h>
@@ -64,12 +63,18 @@ nautilus_init_irq(void)
 	common_init_isa_dma();
 }
 
-static int __init
-nautilus_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static int
+nautilus_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	/* Preserve the IRQ set up by the console.  */
 
 	u8 irq;
+	/* UP1500: AGP INTA is actually routed to IRQ 5, not IRQ 10 as
+	   console reports. Check the device id of AGP bridge to distinguish
+	   UP1500 from UP1000/1100. Note: 'pin' is 2 due to bridge swizzle. */
+	if (slot == 1 && pin == 2 &&
+	    dev->bus->self && dev->bus->self->device == 0x700f)
+		return 5;
 	pci_read_config_byte(dev, PCI_INTERRUPT_LINE, &irq);
 	return irq;
 }
@@ -124,8 +129,7 @@ naut_sys_machine_check(unsigned long vector, unsigned long la_ptr,
    in the system.  They are analysed separately but all starts here.  */
 
 void
-nautilus_machine_check(unsigned long vector, unsigned long la_ptr,
-		       struct pt_regs *regs)
+nautilus_machine_check(unsigned long vector, unsigned long la_ptr)
 {
 	char *mchk_class;
 
@@ -165,7 +169,7 @@ nautilus_machine_check(unsigned long vector, unsigned long la_ptr,
 	else if (vector == SCB_Q_SYSMCHK)
 		mchk_class = "Fatal";
 	else {
-		ev6_machine_check(vector, la_ptr, regs);
+		ev6_machine_check(vector, la_ptr);
 		return;
 	}
 
@@ -173,7 +177,7 @@ nautilus_machine_check(unsigned long vector, unsigned long la_ptr,
 			 "[%s System Machine Check (NMI)]\n",
 	       vector, mchk_class);
 
-	naut_sys_machine_check(vector, la_ptr, regs);
+	naut_sys_machine_check(vector, la_ptr, get_irq_regs());
 
 	/* Tell the PALcode to clear the machine check */
 	draina();
@@ -181,28 +185,61 @@ nautilus_machine_check(unsigned long vector, unsigned long la_ptr,
 	mb();
 }
 
-extern void free_reserved_mem(void *, void *);
+extern void pcibios_claim_one_bus(struct pci_bus *);
 
+static struct resource irongate_io = {
+	.name	= "Irongate PCI IO",
+	.flags	= IORESOURCE_IO,
+};
 static struct resource irongate_mem = {
 	.name	= "Irongate PCI MEM",
 	.flags	= IORESOURCE_MEM,
+};
+static struct resource busn_resource = {
+	.name	= "PCI busn",
+	.start	= 0,
+	.end	= 255,
+	.flags	= IORESOURCE_BUS,
 };
 
 void __init
 nautilus_init_pci(void)
 {
 	struct pci_controller *hose = hose_head;
+	struct pci_host_bridge *bridge;
 	struct pci_bus *bus;
 	struct pci_dev *irongate;
 	unsigned long bus_align, bus_size, pci_mem;
 	unsigned long memtop = max_low_pfn << PAGE_SHIFT;
+	int ret;
+
+	bridge = pci_alloc_host_bridge(0);
+	if (!bridge)
+		return;
+
+	pci_add_resource(&bridge->windows, &ioport_resource);
+	pci_add_resource(&bridge->windows, &iomem_resource);
+	pci_add_resource(&bridge->windows, &busn_resource);
+	bridge->dev.parent = NULL;
+	bridge->sysdata = hose;
+	bridge->busnr = 0;
+	bridge->ops = alpha_mv.pci_ops;
+	bridge->swizzle_irq = alpha_mv.pci_swizzle;
+	bridge->map_irq = alpha_mv.pci_map_irq;
 
 	/* Scan our single hose.  */
-	bus = pci_scan_bus(0, alpha_mv.pci_ops, hose);
-	hose->bus = bus;
+	ret = pci_scan_root_bus_bridge(bridge);
+	if (ret) {
+		pci_free_host_bridge(bridge);
+		return;
+	}
 
-	irongate = pci_find_slot(0, 0);
+	bus = hose->bus = bridge->bus;
+	pcibios_claim_one_bus(bus);
+
+	irongate = pci_get_domain_bus_and_slot(pci_domain_nr(bus), 0, 0);
 	bus->self = irongate;
+	bus->resource[0] = &irongate_io;
 	bus->resource[1] = &irongate_mem;
 
 	pci_bus_size_bridges(bus);
@@ -228,8 +265,8 @@ nautilus_init_pci(void)
 	if (pci_mem < memtop)
 		memtop = pci_mem;
 	if (memtop > alpha_mv.min_mem_address) {
-		free_reserved_mem(__va(alpha_mv.min_mem_address),
-				  __va(memtop));
+		free_reserved_area(__va(alpha_mv.min_mem_address),
+				   __va(memtop), -1, NULL);
 		printk("nautilus_init_pci: %ldk freed\n",
 			(memtop - alpha_mv.min_mem_address) >> 10);
 	}
@@ -238,7 +275,11 @@ nautilus_init_pci(void)
 		IRONGATE0->pci_mem = pci_mem;
 
 	pci_bus_assign_resources(bus);
-	pci_fixup_irqs(alpha_mv.pci_swizzle, alpha_mv.pci_map_irq);
+
+	/* pci_common_swizzle() relies on bus->self being NULL
+	   for the root bus, so just clear it. */
+	bus->self = NULL;
+	pci_bus_add_devices(bus);
 }
 
 /*

@@ -1,193 +1,209 @@
 /*
  * linux/kernel/irq/handle.c
  *
- * Copyright (C) 1992, 1998-2004 Linus Torvalds, Ingo Molnar
+ * Copyright (C) 1992, 1998-2006 Linus Torvalds, Ingo Molnar
+ * Copyright (C) 2005-2006, Thomas Gleixner, Russell King
  *
  * This file contains the core interrupt handling code.
+ *
+ * Detailed information is available in Documentation/core-api/genericirq.rst
+ *
  */
 
 #include <linux/irq.h>
-#include <linux/module.h>
 #include <linux/random.h>
+#include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
 
+#include <trace/events/irq.h>
+
 #include "internals.h"
 
-/*
- * Linux has a controller-independent interrupt architecture.
- * Every controller has a 'controller-template', that is used
- * by the main code to do the right thing. Each driver-visible
- * interrupt source is transparently wired to the apropriate
- * controller. Thus drivers need not be aware of the
- * interrupt-controller.
+/**
+ * handle_bad_irq - handle spurious and unhandled irqs
+ * @desc:      description of the interrupt
  *
- * The code is designed to be easily extended with new/different
- * interrupt controllers, without having to do assembly magic or
- * having to touch the generic code.
- *
- * Controller mappings for all interrupt sources:
+ * Handles spurious and unhandled IRQ's. It also prints a debugmessage.
  */
-irq_desc_t irq_desc[NR_IRQS] __cacheline_aligned = {
-	[0 ... NR_IRQS-1] = {
-		.handler = &no_irq_type,
-		.lock = SPIN_LOCK_UNLOCKED
-	}
-};
-
-/*
- * Generic 'no controller' code
- */
-static void end_none(unsigned int irq) { }
-static void enable_none(unsigned int irq) { }
-static void disable_none(unsigned int irq) { }
-static void shutdown_none(unsigned int irq) { }
-static unsigned int startup_none(unsigned int irq) { return 0; }
-
-static void ack_none(unsigned int irq)
+void handle_bad_irq(struct irq_desc *desc)
 {
-	/*
-	 * 'what should we do if we get a hw irq event on an illegal vector'.
-	 * each architecture has to answer this themself.
-	 */
+	unsigned int irq = irq_desc_get_irq(desc);
+
+	print_irq_desc(irq, desc);
+	kstat_incr_irqs_this_cpu(desc);
 	ack_bad_irq(irq);
 }
-
-struct hw_interrupt_type no_irq_type = {
-	.typename = 	"none",
-	.startup = 	startup_none,
-	.shutdown = 	shutdown_none,
-	.enable = 	enable_none,
-	.disable = 	disable_none,
-	.ack = 		ack_none,
-	.end = 		end_none,
-	.set_affinity = NULL
-};
+EXPORT_SYMBOL_GPL(handle_bad_irq);
 
 /*
  * Special, empty irq handler:
  */
-irqreturn_t no_action(int cpl, void *dev_id, struct pt_regs *regs)
+irqreturn_t no_action(int cpl, void *dev_id)
 {
 	return IRQ_NONE;
 }
+EXPORT_SYMBOL_GPL(no_action);
 
-/*
- * Have got an event to handle:
- */
-fastcall int handle_IRQ_event(unsigned int irq, struct pt_regs *regs,
-				struct irqaction *action)
+static void warn_no_thread(unsigned int irq, struct irqaction *action)
 {
-	int ret, retval = 0, status = 0;
+	if (test_and_set_bit(IRQTF_WARNED, &action->thread_flags))
+		return;
 
-	if (!(action->flags & SA_INTERRUPT))
-		local_irq_enable();
+	printk(KERN_WARNING "IRQ %d device %s returned IRQ_WAKE_THREAD "
+	       "but no thread function available.", irq, action->name);
+}
 
-	do {
-		ret = action->handler(irq, action->dev_id, regs);
-		if (ret == IRQ_HANDLED)
-			status |= action->flags;
-		retval |= ret;
-		action = action->next;
-	} while (action);
+void __irq_wake_thread(struct irq_desc *desc, struct irqaction *action)
+{
+	/*
+	 * In case the thread crashed and was killed we just pretend that
+	 * we handled the interrupt. The hardirq handler has disabled the
+	 * device interrupt, so no irq storm is lurking.
+	 */
+	if (action->thread->flags & PF_EXITING)
+		return;
 
-	if (status & SA_SAMPLE_RANDOM)
-		add_interrupt_randomness(irq);
-	local_irq_disable();
+	/*
+	 * Wake up the handler thread for this action. If the
+	 * RUNTHREAD bit is already set, nothing to do.
+	 */
+	if (test_and_set_bit(IRQTF_RUNTHREAD, &action->thread_flags))
+		return;
+
+	/*
+	 * It's safe to OR the mask lockless here. We have only two
+	 * places which write to threads_oneshot: This code and the
+	 * irq thread.
+	 *
+	 * This code is the hard irq context and can never run on two
+	 * cpus in parallel. If it ever does we have more serious
+	 * problems than this bitmask.
+	 *
+	 * The irq threads of this irq which clear their "running" bit
+	 * in threads_oneshot are serialized via desc->lock against
+	 * each other and they are serialized against this code by
+	 * IRQS_INPROGRESS.
+	 *
+	 * Hard irq handler:
+	 *
+	 *	spin_lock(desc->lock);
+	 *	desc->state |= IRQS_INPROGRESS;
+	 *	spin_unlock(desc->lock);
+	 *	set_bit(IRQTF_RUNTHREAD, &action->thread_flags);
+	 *	desc->threads_oneshot |= mask;
+	 *	spin_lock(desc->lock);
+	 *	desc->state &= ~IRQS_INPROGRESS;
+	 *	spin_unlock(desc->lock);
+	 *
+	 * irq thread:
+	 *
+	 * again:
+	 *	spin_lock(desc->lock);
+	 *	if (desc->state & IRQS_INPROGRESS) {
+	 *		spin_unlock(desc->lock);
+	 *		while(desc->state & IRQS_INPROGRESS)
+	 *			cpu_relax();
+	 *		goto again;
+	 *	}
+	 *	if (!test_bit(IRQTF_RUNTHREAD, &action->thread_flags))
+	 *		desc->threads_oneshot &= ~mask;
+	 *	spin_unlock(desc->lock);
+	 *
+	 * So either the thread waits for us to clear IRQS_INPROGRESS
+	 * or we are waiting in the flow handler for desc->lock to be
+	 * released before we reach this point. The thread also checks
+	 * IRQTF_RUNTHREAD under desc->lock. If set it leaves
+	 * threads_oneshot untouched and runs the thread another time.
+	 */
+	desc->threads_oneshot |= action->thread_mask;
+
+	/*
+	 * We increment the threads_active counter in case we wake up
+	 * the irq thread. The irq thread decrements the counter when
+	 * it returns from the handler or in the exit path and wakes
+	 * up waiters which are stuck in synchronize_irq() when the
+	 * active count becomes zero. synchronize_irq() is serialized
+	 * against this code (hard irq handler) via IRQS_INPROGRESS
+	 * like the finalize_oneshot() code. See comment above.
+	 */
+	atomic_inc(&desc->threads_active);
+
+	wake_up_process(action->thread);
+}
+
+irqreturn_t __handle_irq_event_percpu(struct irq_desc *desc, unsigned int *flags)
+{
+	irqreturn_t retval = IRQ_NONE;
+	unsigned int irq = desc->irq_data.irq;
+	struct irqaction *action;
+
+	record_irq_time(desc);
+
+	for_each_action_of_desc(desc, action) {
+		irqreturn_t res;
+
+		trace_irq_handler_entry(irq, action);
+		res = action->handler(irq, action->dev_id);
+		trace_irq_handler_exit(irq, action, res);
+
+		if (WARN_ONCE(!irqs_disabled(),"irq %u handler %pF enabled interrupts\n",
+			      irq, action->handler))
+			local_irq_disable();
+
+		switch (res) {
+		case IRQ_WAKE_THREAD:
+			/*
+			 * Catch drivers which return WAKE_THREAD but
+			 * did not set up a thread function
+			 */
+			if (unlikely(!action->thread_fn)) {
+				warn_no_thread(irq, action);
+				break;
+			}
+
+			__irq_wake_thread(desc, action);
+
+			/* Fall through to add to randomness */
+		case IRQ_HANDLED:
+			*flags |= action->flags;
+			break;
+
+		default:
+			break;
+		}
+
+		retval |= res;
+	}
 
 	return retval;
 }
 
-/*
- * do_IRQ handles all normal device IRQ's (the special
- * SMP cross-CPU interrupts have their own specific
- * handlers).
- */
-fastcall unsigned int __do_IRQ(unsigned int irq, struct pt_regs *regs)
+irqreturn_t handle_irq_event_percpu(struct irq_desc *desc)
 {
-	irq_desc_t *desc = irq_desc + irq;
-	struct irqaction * action;
-	unsigned int status;
+	irqreturn_t retval;
+	unsigned int flags = 0;
 
-	kstat_this_cpu.irqs[irq]++;
-	if (desc->status & IRQ_PER_CPU) {
-		irqreturn_t action_ret;
+	retval = __handle_irq_event_percpu(desc, &flags);
 
-		/*
-		 * No locking required for CPU-local interrupts:
-		 */
-		desc->handler->ack(irq);
-		action_ret = handle_IRQ_event(irq, regs, desc->action);
-		if (!noirqdebug)
-			note_interrupt(irq, desc, action_ret);
-		desc->handler->end(irq);
-		return 1;
-	}
+	add_interrupt_randomness(desc->irq_data.irq, flags);
 
-	spin_lock(&desc->lock);
-	desc->handler->ack(irq);
-	/*
-	 * REPLAY is when Linux resends an IRQ that was dropped earlier
-	 * WAITING is used by probe to mark irqs that are being tested
-	 */
-	status = desc->status & ~(IRQ_REPLAY | IRQ_WAITING);
-	status |= IRQ_PENDING; /* we _want_ to handle it */
-
-	/*
-	 * If the IRQ is disabled for whatever reason, we cannot
-	 * use the action we have.
-	 */
-	action = NULL;
-	if (likely(!(status & (IRQ_DISABLED | IRQ_INPROGRESS)))) {
-		action = desc->action;
-		status &= ~IRQ_PENDING; /* we commit to handling */
-		status |= IRQ_INPROGRESS; /* we are handling it */
-	}
-	desc->status = status;
-
-	/*
-	 * If there is no IRQ handler or it was disabled, exit early.
-	 * Since we set PENDING, if another processor is handling
-	 * a different instance of this same irq, the other processor
-	 * will take care of it.
-	 */
-	if (unlikely(!action))
-		goto out;
-
-	/*
-	 * Edge triggered interrupts need to remember
-	 * pending events.
-	 * This applies to any hw interrupts that allow a second
-	 * instance of the same irq to arrive while we are in do_IRQ
-	 * or in the handler. But the code here only handles the _second_
-	 * instance of the irq, not the third or fourth. So it is mostly
-	 * useful for irq hardware that does not mask cleanly in an
-	 * SMP environment.
-	 */
-	for (;;) {
-		irqreturn_t action_ret;
-
-		spin_unlock(&desc->lock);
-
-		action_ret = handle_IRQ_event(irq, regs, action);
-
-		spin_lock(&desc->lock);
-		if (!noirqdebug)
-			note_interrupt(irq, desc, action_ret);
-		if (likely(!(desc->status & IRQ_PENDING)))
-			break;
-		desc->status &= ~IRQ_PENDING;
-	}
-	desc->status &= ~IRQ_INPROGRESS;
-
-out:
-	/*
-	 * The ->end() handler has to deal with interrupts which got
-	 * disabled while the handler was running.
-	 */
-	desc->handler->end(irq);
-	spin_unlock(&desc->lock);
-
-	return 1;
+	if (!noirqdebug)
+		note_interrupt(desc, retval);
+	return retval;
 }
 
+irqreturn_t handle_irq_event(struct irq_desc *desc)
+{
+	irqreturn_t ret;
+
+	desc->istate &= ~IRQS_PENDING;
+	irqd_set(&desc->irq_data, IRQD_IRQ_INPROGRESS);
+	raw_spin_unlock(&desc->lock);
+
+	ret = handle_irq_event_percpu(desc);
+
+	raw_spin_lock(&desc->lock);
+	irqd_clear(&desc->irq_data, IRQD_IRQ_INPROGRESS);
+	return ret;
+}

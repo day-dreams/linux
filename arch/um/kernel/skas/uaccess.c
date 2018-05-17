@@ -1,126 +1,133 @@
 /*
- * Copyright (C) 2002 - 2003 Jeff Dike (jdike@addtoit.com)
+ * Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
-#include "linux/stddef.h"
-#include "linux/kernel.h"
-#include "linux/string.h"
-#include "linux/fs.h"
-#include "linux/highmem.h"
-#include "asm/page.h"
-#include "asm/pgtable.h"
-#include "asm/uaccess.h"
-#include "kern_util.h"
-#include "user_util.h"
+#include <linux/err.h>
+#include <linux/highmem.h>
+#include <linux/mm.h>
+#include <linux/module.h>
+#include <linux/sched.h>
+#include <asm/current.h>
+#include <asm/page.h>
+#include <asm/pgtable.h>
+#include <kern_util.h>
+#include <os.h>
 
-extern void *um_virt_to_phys(struct task_struct *task, unsigned long addr,
-			     pte_t *pte_out);
-
-static unsigned long maybe_map(unsigned long virt, int is_write)
+pte_t *virt_to_pte(struct mm_struct *mm, unsigned long addr)
 {
-	pte_t pte;
-	int err;
+	pgd_t *pgd;
+	pud_t *pud;
+	pmd_t *pmd;
 
-	void *phys = um_virt_to_phys(current, virt, &pte);
-	int dummy_code;
+	if (mm == NULL)
+		return NULL;
 
-	if(IS_ERR(phys) || (is_write && !pte_write(pte))){
-		err = handle_page_fault(virt, 0, is_write, 1, &dummy_code);
-		if(err)
-			return(0);
-		phys = um_virt_to_phys(current, virt, NULL);
-	}
-	return((unsigned long) phys);
+	pgd = pgd_offset(mm, addr);
+	if (!pgd_present(*pgd))
+		return NULL;
+
+	pud = pud_offset(pgd, addr);
+	if (!pud_present(*pud))
+		return NULL;
+
+	pmd = pmd_offset(pud, addr);
+	if (!pmd_present(*pmd))
+		return NULL;
+
+	return pte_offset_kernel(pmd, addr);
 }
 
-static int do_op(unsigned long addr, int len, int is_write,
+static pte_t *maybe_map(unsigned long virt, int is_write)
+{
+	pte_t *pte = virt_to_pte(current->mm, virt);
+	int err, dummy_code;
+
+	if ((pte == NULL) || !pte_present(*pte) ||
+	    (is_write && !pte_write(*pte))) {
+		err = handle_page_fault(virt, 0, is_write, 1, &dummy_code);
+		if (err)
+			return NULL;
+		pte = virt_to_pte(current->mm, virt);
+	}
+	if (!pte_present(*pte))
+		pte = NULL;
+
+	return pte;
+}
+
+static int do_op_one_page(unsigned long addr, int len, int is_write,
 		 int (*op)(unsigned long addr, int len, void *arg), void *arg)
 {
+	jmp_buf buf;
 	struct page *page;
-	int n;
+	pte_t *pte;
+	int n, faulted;
 
-	addr = maybe_map(addr, is_write);
-	if(addr == -1)
-		return(-1);
+	pte = maybe_map(addr, is_write);
+	if (pte == NULL)
+		return -1;
 
-	page = phys_to_page(addr);
-	addr = (unsigned long) kmap(page) + (addr & ~PAGE_MASK);
-	n = (*op)(addr, len, arg);
-	kunmap(page);
+	page = pte_page(*pte);
+	addr = (unsigned long) kmap_atomic(page) +
+		(addr & ~PAGE_MASK);
 
-	return(n);
+	current->thread.fault_catcher = &buf;
+
+	faulted = UML_SETJMP(&buf);
+	if (faulted == 0)
+		n = (*op)(addr, len, arg);
+	else
+		n = -1;
+
+	current->thread.fault_catcher = NULL;
+
+	kunmap_atomic((void *)addr);
+
+	return n;
 }
 
-static void do_buffer_op(void *jmpbuf, void *arg_ptr)
+static long buffer_op(unsigned long addr, int len, int is_write,
+		      int (*op)(unsigned long, int, void *), void *arg)
 {
-	va_list args;
-	unsigned long addr;
-	int len, is_write, size, remain, n;
-	int (*op)(unsigned long, int, void *);
-	void *arg;
-	int *res;
+	long size, remain, n;
 
-	va_copy(args, *(va_list *)arg_ptr);
-	addr = va_arg(args, unsigned long);
-	len = va_arg(args, int);
-	is_write = va_arg(args, int);
-	op = va_arg(args, void *);
-	arg = va_arg(args, void *);
-	res = va_arg(args, int *);
-	va_end(args);
 	size = min(PAGE_ALIGN(addr) - addr, (unsigned long) len);
 	remain = len;
 
-	current->thread.fault_catcher = jmpbuf;
-	n = do_op(addr, size, is_write, op, arg);
-	if(n != 0){
-		*res = (n < 0 ? remain : 0);
+	n = do_op_one_page(addr, size, is_write, op, arg);
+	if (n != 0) {
+		remain = (n < 0 ? remain : 0);
 		goto out;
 	}
 
 	addr += size;
 	remain -= size;
-	if(remain == 0){
-		*res = 0;
+	if (remain == 0)
 		goto out;
-	}
 
-	while(addr < ((addr + remain) & PAGE_MASK)){
-		n = do_op(addr, PAGE_SIZE, is_write, op, arg);
-		if(n != 0){
-			*res = (n < 0 ? remain : 0);
+	while (addr < ((addr + remain) & PAGE_MASK)) {
+		n = do_op_one_page(addr, PAGE_SIZE, is_write, op, arg);
+		if (n != 0) {
+			remain = (n < 0 ? remain : 0);
 			goto out;
 		}
 
 		addr += PAGE_SIZE;
 		remain -= PAGE_SIZE;
 	}
-	if(remain == 0){
-		*res = 0;
+	if (remain == 0)
+		goto out;
+
+	n = do_op_one_page(addr, remain, is_write, op, arg);
+	if (n != 0) {
+		remain = (n < 0 ? remain : 0);
 		goto out;
 	}
 
-	n = do_op(addr, remain, is_write, op, arg);
-	if(n != 0)
-		*res = (n < 0 ? remain : 0);
-	else *res = 0;
+	return 0;
  out:
-	current->thread.fault_catcher = NULL;
-}
-
-static int buffer_op(unsigned long addr, int len, int is_write,
-		     int (*op)(unsigned long addr, int len, void *arg),
-		     void *arg)
-{
-	int faulted, res;
-
-	faulted = setjmp_wrapper(do_buffer_op, addr, len, is_write, op, arg,
-				 &res);
-	if(!faulted)
-		return(res);
-
-	return(addr + len - (unsigned long) current->thread.fault_addr);
+	return remain;
 }
 
 static int copy_chunk_from_user(unsigned long from, int len, void *arg)
@@ -129,20 +136,19 @@ static int copy_chunk_from_user(unsigned long from, int len, void *arg)
 
 	memcpy((void *) to, (void *) from, len);
 	*to_ptr += len;
-	return(0);
+	return 0;
 }
 
-int copy_from_user_skas(void *to, const void __user *from, int n)
+unsigned long raw_copy_from_user(void *to, const void __user *from, unsigned long n)
 {
-	if(segment_eq(get_fs(), KERNEL_DS)){
+	if (uaccess_kernel()) {
 		memcpy(to, (__force void*)from, n);
-		return(0);
+		return 0;
 	}
 
-	return(access_ok_skas(VERIFY_READ, from, n) ?
-	       buffer_op((unsigned long) from, n, 0, copy_chunk_from_user, &to):
-	       n);
+	return buffer_op((unsigned long) from, n, 0, copy_chunk_from_user, &to);
 }
+EXPORT_SYMBOL(raw_copy_from_user);
 
 static int copy_chunk_to_user(unsigned long to, int len, void *arg)
 {
@@ -150,20 +156,19 @@ static int copy_chunk_to_user(unsigned long to, int len, void *arg)
 
 	memcpy((void *) to, (void *) from, len);
 	*from_ptr += len;
-	return(0);
+	return 0;
 }
 
-int copy_to_user_skas(void __user *to, const void *from, int n)
+unsigned long raw_copy_to_user(void __user *to, const void *from, unsigned long n)
 {
-	if(segment_eq(get_fs(), KERNEL_DS)){
-		memcpy((__force void*)to, from, n);
-		return(0);
+	if (uaccess_kernel()) {
+		memcpy((__force void *) to, from, n);
+		return 0;
 	}
 
-	return(access_ok_skas(VERIFY_WRITE, to, n) ?
-	       buffer_op((unsigned long) to, n, 1, copy_chunk_to_user, &from) :
-	       n);
+	return buffer_op((unsigned long) to, n, 1, copy_chunk_to_user, &from);
 }
+EXPORT_SYMBOL(raw_copy_to_user);
 
 static int strncpy_chunk_from_user(unsigned long from, int len, void *arg)
 {
@@ -174,52 +179,45 @@ static int strncpy_chunk_from_user(unsigned long from, int len, void *arg)
 	n = strnlen(to, len);
 	*to_ptr += n;
 
-	if(n < len)
-	        return(1);
-	return(0);
+	if (n < len)
+	        return 1;
+	return 0;
 }
 
-int strncpy_from_user_skas(char *dst, const char __user *src, int count)
+long __strncpy_from_user(char *dst, const char __user *src, long count)
 {
-	int n;
+	long n;
 	char *ptr = dst;
 
-	if(segment_eq(get_fs(), KERNEL_DS)){
-		strncpy(dst, (__force void*)src, count);
-		return(strnlen(dst, count));
+	if (uaccess_kernel()) {
+		strncpy(dst, (__force void *) src, count);
+		return strnlen(dst, count);
 	}
-
-	if(!access_ok_skas(VERIFY_READ, src, 1))
-		return(-EFAULT);
 
 	n = buffer_op((unsigned long) src, count, 0, strncpy_chunk_from_user,
 		      &ptr);
-	if(n != 0)
-		return(-EFAULT);
-	return(strnlen(dst, count));
+	if (n != 0)
+		return -EFAULT;
+	return strnlen(dst, count);
 }
+EXPORT_SYMBOL(__strncpy_from_user);
 
 static int clear_chunk(unsigned long addr, int len, void *unused)
 {
 	memset((void *) addr, 0, len);
-	return(0);
+	return 0;
 }
 
-int __clear_user_skas(void __user *mem, int len)
+unsigned long __clear_user(void __user *mem, unsigned long len)
 {
-	return(buffer_op((unsigned long) mem, len, 1, clear_chunk, NULL));
-}
-
-int clear_user_skas(void __user *mem, int len)
-{
-	if(segment_eq(get_fs(), KERNEL_DS)){
+	if (uaccess_kernel()) {
 		memset((__force void*)mem, 0, len);
-		return(0);
+		return 0;
 	}
 
-	return(access_ok_skas(VERIFY_WRITE, mem, len) ?
-	       buffer_op((unsigned long) mem, len, 1, clear_chunk, NULL) : len);
+	return buffer_op((unsigned long) mem, len, 1, clear_chunk, NULL);
 }
+EXPORT_SYMBOL(__clear_user);
 
 static int strnlen_chunk(unsigned long str, int len, void *arg)
 {
@@ -228,31 +226,21 @@ static int strnlen_chunk(unsigned long str, int len, void *arg)
 	n = strnlen((void *) str, len);
 	*len_ptr += n;
 
-	if(n < len)
-		return(1);
-	return(0);
+	if (n < len)
+		return 1;
+	return 0;
 }
 
-int strnlen_user_skas(const void __user *str, int len)
+long __strnlen_user(const void __user *str, long len)
 {
 	int count = 0, n;
 
-	if(segment_eq(get_fs(), KERNEL_DS))
-		return(strnlen((__force char*)str, len) + 1);
+	if (uaccess_kernel())
+		return strnlen((__force char*)str, len) + 1;
 
 	n = buffer_op((unsigned long) str, len, 0, strnlen_chunk, &count);
-	if(n == 0)
-		return(count + 1);
-	return(-EFAULT);
+	if (n == 0)
+		return count + 1;
+	return 0;
 }
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */
+EXPORT_SYMBOL(__strnlen_user);

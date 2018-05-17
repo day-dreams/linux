@@ -7,9 +7,9 @@
 
 #include <linux/types.h>
 #include <linux/kdev_t.h>
-#include <linux/tty.h>
 #include <linux/console.h>
 #include <linux/vt_kern.h>
+#include <linux/screen_info.h>
 #include <linux/init.h>
 #include <linux/module.h>
 
@@ -18,16 +18,12 @@
  */
 
 #if defined(__arm__)
-#define DUMMY_COLUMNS	ORIG_VIDEO_COLS
-#define DUMMY_ROWS	ORIG_VIDEO_LINES
-#elif defined(__hppa__)
+#define DUMMY_COLUMNS	screen_info.orig_video_cols
+#define DUMMY_ROWS	screen_info.orig_video_lines
+#else
 /* set by Kconfig. Use 80x25 for 640x480 and 160x64 for 1280x1024 */
-#include <linux/config.h>
 #define DUMMY_COLUMNS	CONFIG_DUMMY_CONSOLE_COLUMNS
 #define DUMMY_ROWS	CONFIG_DUMMY_CONSOLE_ROWS
-#else
-#define DUMMY_COLUMNS	80
-#define DUMMY_ROWS	25
 #endif
 
 static const char *dummycon_startup(void)
@@ -42,7 +38,7 @@ static void dummycon_init(struct vc_data *vc, int init)
 	vc->vc_cols = DUMMY_COLUMNS;
 	vc->vc_rows = DUMMY_ROWS;
     } else
-	vc_resize(vc->vc_num, DUMMY_COLUMNS, DUMMY_ROWS);
+	vc_resize(vc, DUMMY_COLUMNS, DUMMY_ROWS);
 }
 
 static int dummycon_dummy(void)
@@ -68,13 +64,10 @@ const struct consw dummy_con = {
     .con_putcs =	DUMMY,
     .con_cursor =	DUMMY,
     .con_scroll =	DUMMY,
-    .con_bmove =	DUMMY,
     .con_switch =	DUMMY,
     .con_blank =	DUMMY,
     .con_font_set =	DUMMY,
-    .con_font_get =	DUMMY,
     .con_font_default =	DUMMY,
     .con_font_copy =	DUMMY,
-    .con_set_palette =	DUMMY,
-    .con_scrolldelta =	DUMMY,
 };
+EXPORT_SYMBOL_GPL(dummy_con);

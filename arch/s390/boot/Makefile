@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for the linux s390-specific parts of the memory manager.
 #
@@ -6,13 +7,21 @@ COMPILE_VERSION := __linux_compile_version_id__`hostname |  \
 			tr -c '[0-9A-Za-z]' '_'`__`date | \
 			tr -c '[0-9A-Za-z]' '_'`_t
 
-EXTRA_CFLAGS  := -DCOMPILE_VERSION=$(COMPILE_VERSION) -gstabs -I.
+ccflags-y  := -DCOMPILE_VERSION=$(COMPILE_VERSION) -gstabs -I.
 
 targets := image
+targets += bzImage
+subdir- := compressed
 
 $(obj)/image: vmlinux FORCE
 	$(call if_changed,objcopy)
 
-install: $(CONFIGURE) $(obj)/image
-	sh -x  $(srctree)/$(obj)/install.sh $(KERNELRELEASE) $(obj)/image \
-	      System.map Kerntypes "$(INSTALL_PATH)"
+$(obj)/bzImage: $(obj)/compressed/vmlinux FORCE
+	$(call if_changed,objcopy)
+
+$(obj)/compressed/vmlinux: FORCE
+	$(Q)$(MAKE) $(build)=$(obj)/compressed $@
+
+install: $(CONFIGURE) $(obj)/bzImage
+	sh -x  $(srctree)/$(obj)/install.sh $(KERNELRELEASE) $(obj)/bzImage \
+	      System.map "$(INSTALL_PATH)"

@@ -1,10 +1,9 @@
-/* $Id: cache.c,v 1.4 2000/01/25 00:11:38 prumpf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1999 Helge Deller (07-13-1999)
+ * Copyright (C) 1999-2006 Helge Deller <deller@gmx.de> (07-13-1999)
  * Copyright (C) 1999 SuSE GmbH Nuernberg
  * Copyright (C) 2000 Philipp Rumpf (prumpf@tux.org)
  *
@@ -18,93 +17,98 @@
 #include <linux/module.h>
 #include <linux/seq_file.h>
 #include <linux/pagemap.h>
-
+#include <linux/sched.h>
+#include <linux/sched/mm.h>
 #include <asm/pdc.h>
 #include <asm/cache.h>
 #include <asm/cacheflush.h>
 #include <asm/tlbflush.h>
-#include <asm/system.h>
 #include <asm/page.h>
 #include <asm/pgalloc.h>
 #include <asm/processor.h>
+#include <asm/sections.h>
+#include <asm/shmparam.h>
 
-int split_tlb;
-int dcache_stride;
-int icache_stride;
+int split_tlb __read_mostly;
+int dcache_stride __read_mostly;
+int icache_stride __read_mostly;
 EXPORT_SYMBOL(dcache_stride);
 
+void flush_dcache_page_asm(unsigned long phys_addr, unsigned long vaddr);
+EXPORT_SYMBOL(flush_dcache_page_asm);
+void flush_icache_page_asm(unsigned long phys_addr, unsigned long vaddr);
 
-#if defined(CONFIG_SMP)
+
 /* On some machines (e.g. ones with the Merced bus), there can be
  * only a single PxTLB broadcast at a time; this must be guaranteed
  * by software.  We put a spinlock around all TLB flushes  to
  * ensure this.
  */
 DEFINE_SPINLOCK(pa_tlb_lock);
-EXPORT_SYMBOL(pa_tlb_lock);
-#endif
 
-struct pdc_cache_info cache_info;
+struct pdc_cache_info cache_info __read_mostly;
 #ifndef CONFIG_PA20
-static struct pdc_btlb_info btlb_info;
+static struct pdc_btlb_info btlb_info __read_mostly;
 #endif
 
 #ifdef CONFIG_SMP
 void
 flush_data_cache(void)
 {
-	on_each_cpu((void (*)(void *))flush_data_cache_local, NULL, 1, 1);
+	on_each_cpu(flush_data_cache_local, NULL, 1);
 }
 void 
 flush_instruction_cache(void)
 {
-	on_each_cpu((void (*)(void *))flush_instruction_cache_local, NULL, 1, 1);
+	on_each_cpu(flush_instruction_cache_local, NULL, 1);
 }
 #endif
 
 void
 flush_cache_all_local(void)
 {
-	flush_instruction_cache_local();
-	flush_data_cache_local();
+	flush_instruction_cache_local(NULL);
+	flush_data_cache_local(NULL);
 }
 EXPORT_SYMBOL(flush_cache_all_local);
 
-/* flushes EVERYTHING (tlb & cache) */
+/* Virtual address of pfn.  */
+#define pfn_va(pfn)	__va(PFN_PHYS(pfn))
 
 void
-flush_all_caches(void)
+update_mmu_cache(struct vm_area_struct *vma, unsigned long address, pte_t *ptep)
 {
-	flush_cache_all();
-	flush_tlb_all();
-}
-EXPORT_SYMBOL(flush_all_caches);
+	unsigned long pfn = pte_pfn(*ptep);
+	struct page *page;
 
-void
-update_mmu_cache(struct vm_area_struct *vma, unsigned long address, pte_t pte)
-{
-	struct page *page = pte_page(pte);
+	/* We don't have pte special.  As a result, we can be called with
+	   an invalid pfn and we don't need to flush the kernel dcache page.
+	   This occurs with FireGL card in C8000.  */
+	if (!pfn_valid(pfn))
+		return;
 
-	if (pfn_valid(page_to_pfn(page)) && page_mapping(page) &&
-	    test_bit(PG_dcache_dirty, &page->flags)) {
-
-		flush_kernel_dcache_page(page_address(page));
+	page = pfn_to_page(pfn);
+	if (page_mapping(page) && test_bit(PG_dcache_dirty, &page->flags)) {
+		flush_kernel_dcache_page_addr(pfn_va(pfn));
 		clear_bit(PG_dcache_dirty, &page->flags);
-	}
+	} else if (parisc_requires_coherency())
+		flush_kernel_dcache_page_addr(pfn_va(pfn));
 }
 
 void
 show_cache_info(struct seq_file *m)
 {
+	char buf[32];
+
 	seq_printf(m, "I-cache\t\t: %ld KB\n", 
 		cache_info.ic_size/1024 );
-	seq_printf(m, "D-cache\t\t: %ld KB (%s%s, %d-way associative)\n", 
+	if (cache_info.dc_loop != 1)
+		snprintf(buf, 32, "%lu-way associative", cache_info.dc_loop);
+	seq_printf(m, "D-cache\t\t: %ld KB (%s%s, %s)\n",
 		cache_info.dc_size/1024,
 		(cache_info.dc_conf.cc_wt ? "WT":"WB"),
 		(cache_info.dc_conf.cc_sh ? ", shared I/D":""),
-		(cache_info.dc_conf.cc_assoc)
-	);
-
+		((cache_info.dc_loop == 1) ? "direct mapped" : buf));
 	seq_printf(m, "ITLB entries\t: %ld\n" "DTLB entries\t: %ld%s\n",
 		cache_info.it_size,
 		cache_info.dt_size,
@@ -157,11 +161,11 @@ parisc_cache_init(void)
 		cache_info.dc_conf.cc_block,
 		cache_info.dc_conf.cc_line,
 		cache_info.dc_conf.cc_shift);
-	printk("	wt %d sh %d cst %d assoc %d\n",
+	printk("	wt %d sh %d cst %d hv %d\n",
 		cache_info.dc_conf.cc_wt,
 		cache_info.dc_conf.cc_sh,
 		cache_info.dc_conf.cc_cst,
-		cache_info.dc_conf.cc_assoc);
+		cache_info.dc_conf.cc_hv);
 
 	printk("IC  base 0x%lx stride 0x%lx count 0x%lx loop 0x%lx\n",
 		cache_info.ic_base,
@@ -169,31 +173,49 @@ parisc_cache_init(void)
 		cache_info.ic_count,
 		cache_info.ic_loop);
 
+	printk("IT  base 0x%lx stride 0x%lx count 0x%lx loop 0x%lx off_base 0x%lx off_stride 0x%lx off_count 0x%lx\n",
+		cache_info.it_sp_base,
+		cache_info.it_sp_stride,
+		cache_info.it_sp_count,
+		cache_info.it_loop,
+		cache_info.it_off_base,
+		cache_info.it_off_stride,
+		cache_info.it_off_count);
+
+	printk("DT  base 0x%lx stride 0x%lx count 0x%lx loop 0x%lx off_base 0x%lx off_stride 0x%lx off_count 0x%lx\n",
+		cache_info.dt_sp_base,
+		cache_info.dt_sp_stride,
+		cache_info.dt_sp_count,
+		cache_info.dt_loop,
+		cache_info.dt_off_base,
+		cache_info.dt_off_stride,
+		cache_info.dt_off_count);
+
 	printk("ic_conf = 0x%lx  alias %d blk %d line %d shift %d\n",
 		*(unsigned long *) (&cache_info.ic_conf),
 		cache_info.ic_conf.cc_alias,
 		cache_info.ic_conf.cc_block,
 		cache_info.ic_conf.cc_line,
 		cache_info.ic_conf.cc_shift);
-	printk("	wt %d sh %d cst %d assoc %d\n",
+	printk("	wt %d sh %d cst %d hv %d\n",
 		cache_info.ic_conf.cc_wt,
 		cache_info.ic_conf.cc_sh,
 		cache_info.ic_conf.cc_cst,
-		cache_info.ic_conf.cc_assoc);
+		cache_info.ic_conf.cc_hv);
 
-	printk("D-TLB conf: sh %d page %d cst %d aid %d pad1 %d \n",
+	printk("D-TLB conf: sh %d page %d cst %d aid %d sr %d\n",
 		cache_info.dt_conf.tc_sh,
 		cache_info.dt_conf.tc_page,
 		cache_info.dt_conf.tc_cst,
 		cache_info.dt_conf.tc_aid,
-		cache_info.dt_conf.tc_pad1);
+		cache_info.dt_conf.tc_sr);
 
-	printk("I-TLB conf: sh %d page %d cst %d aid %d pad1 %d \n",
+	printk("I-TLB conf: sh %d page %d cst %d aid %d sr %d\n",
 		cache_info.it_conf.tc_sh,
 		cache_info.it_conf.tc_page,
 		cache_info.it_conf.tc_cst,
 		cache_info.it_conf.tc_aid,
-		cache_info.it_conf.tc_pad1);
+		cache_info.it_conf.tc_sr);
 #endif
 
 	split_tlb = 0;
@@ -207,6 +229,9 @@ parisc_cache_init(void)
 
 	/* "New and Improved" version from Jim Hull 
 	 *	(1 << (cc_block-1)) * (cc_line << (4 + cnf.cc_shift))
+	 * The following CAFL_STRIDE is an optimized version, see
+	 * http://lists.parisc-linux.org/pipermail/parisc-linux/2004-June/023625.html
+	 * http://lists.parisc-linux.org/pipermail/parisc-linux/2004-June/023671.html
 	 */
 #define CAFL_STRIDE(cnf) (cnf.cc_line << (3 + cnf.cc_block + cnf.cc_shift))
 	dcache_stride = CAFL_STRIDE(cache_info.dc_conf);
@@ -230,7 +255,8 @@ parisc_cache_init(void)
 
 void disable_sr_hashing(void)
 {
-	int srhash_type;
+	int srhash_type, retval;
+	unsigned long space_bits;
 
 	switch (boot_cpu_data.cpu_type) {
 	case pcx: /* We shouldn't get this far.  setup.c should prevent it. */
@@ -256,31 +282,45 @@ void disable_sr_hashing(void)
 	}
 
 	disable_sr_hashing_asm(srhash_type);
+
+	retval = pdc_spaceid_bits(&space_bits);
+	/* If this procedure isn't implemented, don't panic. */
+	if (retval < 0 && retval != PDC_BAD_OPTION)
+		panic("pdc_spaceid_bits call failed.\n");
+	if (space_bits != 0)
+		panic("SpaceID hashing is still on!\n");
+}
+
+static inline void
+__flush_cache_page(struct vm_area_struct *vma, unsigned long vmaddr,
+		   unsigned long physaddr)
+{
+	preempt_disable();
+	flush_dcache_page_asm(physaddr, vmaddr);
+	if (vma->vm_flags & VM_EXEC)
+		flush_icache_page_asm(physaddr, vmaddr);
+	preempt_enable();
 }
 
 void flush_dcache_page(struct page *page)
 {
 	struct address_space *mapping = page_mapping(page);
 	struct vm_area_struct *mpnt;
-	struct prio_tree_iter iter;
 	unsigned long offset;
-	unsigned long addr;
+	unsigned long addr, old_addr = 0;
 	pgoff_t pgoff;
-	pte_t *pte;
-	unsigned long pfn = page_to_pfn(page);
-
 
 	if (mapping && !mapping_mapped(mapping)) {
 		set_bit(PG_dcache_dirty, &page->flags);
 		return;
 	}
 
-	flush_kernel_dcache_page(page_address(page));
+	flush_kernel_dcache_page(page);
 
 	if (!mapping)
 		return;
 
-	pgoff = page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
+	pgoff = page->index;
 
 	/* We have carefully arranged in arch_get_unmapped_area() that
 	 * *any* mappings of a file are always congruently mapped (whether
@@ -288,30 +328,27 @@ void flush_dcache_page(struct page *page)
 	 * to flush one address here for them all to become coherent */
 
 	flush_dcache_mmap_lock(mapping);
-	vma_prio_tree_foreach(mpnt, &iter, &mapping->i_mmap, pgoff, pgoff) {
+	vma_interval_tree_foreach(mpnt, &mapping->i_mmap, pgoff, pgoff) {
 		offset = (pgoff - mpnt->vm_pgoff) << PAGE_SHIFT;
 		addr = mpnt->vm_start + offset;
 
-		/* Flush instructions produce non access tlb misses.
-		 * On PA, we nullify these instructions rather than
-		 * taking a page fault if the pte doesn't exist.
-		 * This is just for speed.  If the page translation
-		 * isn't there, there's no point exciting the
-		 * nadtlb handler into a nullification frenzy */
+		/* The TLB is the engine of coherence on parisc: The
+		 * CPU is entitled to speculate any page with a TLB
+		 * mapping, so here we kill the mapping then flush the
+		 * page along a special flush only alias mapping.
+		 * This guarantees that the page is no-longer in the
+		 * cache for any process and nor may it be
+		 * speculatively read in (until the user or kernel
+		 * specifically accesses it, of course) */
 
-
-  		if(!(pte = translation_exists(mpnt, addr)))
-			continue;
-
-		/* make sure we really have this page: the private
-		 * mappings may cover this area but have COW'd this
-		 * particular page */
-		if(pte_pfn(*pte) != pfn)
-  			continue;
-
-		__flush_cache_page(mpnt, addr);
-
-		break;
+		flush_tlb_page(mpnt, addr);
+		if (old_addr == 0 || (old_addr & (SHM_COLOUR - 1))
+				      != (addr & (SHM_COLOUR - 1))) {
+			__flush_cache_page(mpnt, addr, page_to_phys(page));
+			if (old_addr)
+				printk(KERN_ERR "INEQUIVALENT ALIASES 0x%lx and 0x%lx in file %pD\n", old_addr, addr, mpnt->vm_file);
+			old_addr = addr;
+		}
 	}
 	flush_dcache_mmap_unlock(mapping);
 }
@@ -319,48 +356,306 @@ EXPORT_SYMBOL(flush_dcache_page);
 
 /* Defined in arch/parisc/kernel/pacache.S */
 EXPORT_SYMBOL(flush_kernel_dcache_range_asm);
-EXPORT_SYMBOL(flush_kernel_dcache_page);
+EXPORT_SYMBOL(flush_kernel_dcache_page_asm);
 EXPORT_SYMBOL(flush_data_cache_local);
 EXPORT_SYMBOL(flush_kernel_icache_range_asm);
 
-void clear_user_page_asm(void *page, unsigned long vaddr)
-{
-	/* This function is implemented in assembly in pacache.S */
-	extern void __clear_user_page_asm(void *page, unsigned long vaddr);
-
-	purge_tlb_start();
-	__clear_user_page_asm(page, vaddr);
-	purge_tlb_end();
-}
-
 #define FLUSH_THRESHOLD 0x80000 /* 0.5MB */
-int parisc_cache_flush_threshold = FLUSH_THRESHOLD;
+static unsigned long parisc_cache_flush_threshold __read_mostly = FLUSH_THRESHOLD;
 
-void parisc_setup_cache_timing(void)
+#define FLUSH_TLB_THRESHOLD (2*1024*1024) /* 2MB initial TLB threshold */
+static unsigned long parisc_tlb_flush_threshold __read_mostly = FLUSH_TLB_THRESHOLD;
+
+void __init parisc_setup_cache_timing(void)
 {
 	unsigned long rangetime, alltime;
-	extern char _text;	/* start of kernel code, defined by linker */
-	extern char _end;	/* end of BSS, defined by linker */
-	unsigned long size;
+	unsigned long size, start;
+	unsigned long threshold;
 
 	alltime = mfctl(16);
 	flush_data_cache();
 	alltime = mfctl(16) - alltime;
 
-	size = (unsigned long)(&_end - _text);
+	size = (unsigned long)(_end - _text);
 	rangetime = mfctl(16);
-	flush_kernel_dcache_range((unsigned long)&_text, size);
+	flush_kernel_dcache_range((unsigned long)_text, size);
 	rangetime = mfctl(16) - rangetime;
 
 	printk(KERN_DEBUG "Whole cache flush %lu cycles, flushing %lu bytes %lu cycles\n",
 		alltime, size, rangetime);
 
-	/* Racy, but if we see an intermediate value, it's ok too... */
-	parisc_cache_flush_threshold = size * alltime / rangetime;
+	threshold = L1_CACHE_ALIGN(size * alltime / rangetime);
+	if (threshold > cache_info.dc_size)
+		threshold = cache_info.dc_size;
+	if (threshold)
+		parisc_cache_flush_threshold = threshold;
+	printk(KERN_INFO "Cache flush threshold set to %lu KiB\n",
+		parisc_cache_flush_threshold/1024);
 
-	parisc_cache_flush_threshold = (parisc_cache_flush_threshold + L1_CACHE_BYTES - 1) &~ (L1_CACHE_BYTES - 1); 
-	if (!parisc_cache_flush_threshold)
-		parisc_cache_flush_threshold = FLUSH_THRESHOLD;
+	/* calculate TLB flush threshold */
 
-	printk("Setting cache flush threshold to %x (%d CPUs online)\n", parisc_cache_flush_threshold, num_online_cpus());
+	/* On SMP machines, skip the TLB measure of kernel text which
+	 * has been mapped as huge pages. */
+	if (num_online_cpus() > 1 && !parisc_requires_coherency()) {
+		threshold = max(cache_info.it_size, cache_info.dt_size);
+		threshold *= PAGE_SIZE;
+		threshold /= num_online_cpus();
+		goto set_tlb_threshold;
+	}
+
+	alltime = mfctl(16);
+	flush_tlb_all();
+	alltime = mfctl(16) - alltime;
+
+	size = 0;
+	start = (unsigned long) _text;
+	rangetime = mfctl(16);
+	while (start < (unsigned long) _end) {
+		flush_tlb_kernel_range(start, start + PAGE_SIZE);
+		start += PAGE_SIZE;
+		size += PAGE_SIZE;
+	}
+	rangetime = mfctl(16) - rangetime;
+
+	printk(KERN_DEBUG "Whole TLB flush %lu cycles, flushing %lu bytes %lu cycles\n",
+		alltime, size, rangetime);
+
+	threshold = PAGE_ALIGN(num_online_cpus() * size * alltime / rangetime);
+
+set_tlb_threshold:
+	if (threshold)
+		parisc_tlb_flush_threshold = threshold;
+	printk(KERN_INFO "TLB flush threshold set to %lu KiB\n",
+		parisc_tlb_flush_threshold/1024);
 }
+
+extern void purge_kernel_dcache_page_asm(unsigned long);
+extern void clear_user_page_asm(void *, unsigned long);
+extern void copy_user_page_asm(void *, void *, unsigned long);
+
+void flush_kernel_dcache_page_addr(void *addr)
+{
+	unsigned long flags;
+
+	flush_kernel_dcache_page_asm(addr);
+	purge_tlb_start(flags);
+	pdtlb_kernel(addr);
+	purge_tlb_end(flags);
+}
+EXPORT_SYMBOL(flush_kernel_dcache_page_addr);
+
+void copy_user_page(void *vto, void *vfrom, unsigned long vaddr,
+	struct page *pg)
+{
+       /* Copy using kernel mapping.  No coherency is needed (all in
+	  kunmap) for the `to' page.  However, the `from' page needs to
+	  be flushed through a mapping equivalent to the user mapping
+	  before it can be accessed through the kernel mapping. */
+	preempt_disable();
+	flush_dcache_page_asm(__pa(vfrom), vaddr);
+	copy_page_asm(vto, vfrom);
+	preempt_enable();
+}
+EXPORT_SYMBOL(copy_user_page);
+
+/* __flush_tlb_range()
+ *
+ * returns 1 if all TLBs were flushed.
+ */
+int __flush_tlb_range(unsigned long sid, unsigned long start,
+		      unsigned long end)
+{
+	unsigned long flags;
+
+	if ((!IS_ENABLED(CONFIG_SMP) || !arch_irqs_disabled()) &&
+	    end - start >= parisc_tlb_flush_threshold) {
+		flush_tlb_all();
+		return 1;
+	}
+
+	/* Purge TLB entries for small ranges using the pdtlb and
+	   pitlb instructions.  These instructions execute locally
+	   but cause a purge request to be broadcast to other TLBs.  */
+	if (likely(!split_tlb)) {
+		while (start < end) {
+			purge_tlb_start(flags);
+			mtsp(sid, 1);
+			pdtlb(start);
+			purge_tlb_end(flags);
+			start += PAGE_SIZE;
+		}
+		return 0;
+	}
+
+	/* split TLB case */
+	while (start < end) {
+		purge_tlb_start(flags);
+		mtsp(sid, 1);
+		pdtlb(start);
+		pitlb(start);
+		purge_tlb_end(flags);
+		start += PAGE_SIZE;
+	}
+	return 0;
+}
+
+static void cacheflush_h_tmp_function(void *dummy)
+{
+	flush_cache_all_local();
+}
+
+void flush_cache_all(void)
+{
+	on_each_cpu(cacheflush_h_tmp_function, NULL, 1);
+}
+
+static inline unsigned long mm_total_size(struct mm_struct *mm)
+{
+	struct vm_area_struct *vma;
+	unsigned long usize = 0;
+
+	for (vma = mm->mmap; vma; vma = vma->vm_next)
+		usize += vma->vm_end - vma->vm_start;
+	return usize;
+}
+
+static inline pte_t *get_ptep(pgd_t *pgd, unsigned long addr)
+{
+	pte_t *ptep = NULL;
+
+	if (!pgd_none(*pgd)) {
+		pud_t *pud = pud_offset(pgd, addr);
+		if (!pud_none(*pud)) {
+			pmd_t *pmd = pmd_offset(pud, addr);
+			if (!pmd_none(*pmd))
+				ptep = pte_offset_map(pmd, addr);
+		}
+	}
+	return ptep;
+}
+
+void flush_cache_mm(struct mm_struct *mm)
+{
+	struct vm_area_struct *vma;
+	pgd_t *pgd;
+
+	/* Flushing the whole cache on each cpu takes forever on
+	   rp3440, etc.  So, avoid it if the mm isn't too big.  */
+	if ((!IS_ENABLED(CONFIG_SMP) || !arch_irqs_disabled()) &&
+	    mm_total_size(mm) >= parisc_cache_flush_threshold) {
+		if (mm->context)
+			flush_tlb_all();
+		flush_cache_all();
+		return;
+	}
+
+	if (mm->context == mfsp(3)) {
+		for (vma = mm->mmap; vma; vma = vma->vm_next) {
+			flush_user_dcache_range_asm(vma->vm_start, vma->vm_end);
+			if (vma->vm_flags & VM_EXEC)
+				flush_user_icache_range_asm(vma->vm_start, vma->vm_end);
+			flush_tlb_range(vma, vma->vm_start, vma->vm_end);
+		}
+		return;
+	}
+
+	pgd = mm->pgd;
+	for (vma = mm->mmap; vma; vma = vma->vm_next) {
+		unsigned long addr;
+
+		for (addr = vma->vm_start; addr < vma->vm_end;
+		     addr += PAGE_SIZE) {
+			unsigned long pfn;
+			pte_t *ptep = get_ptep(pgd, addr);
+			if (!ptep)
+				continue;
+			pfn = pte_pfn(*ptep);
+			if (!pfn_valid(pfn))
+				continue;
+			if (unlikely(mm->context))
+				flush_tlb_page(vma, addr);
+			__flush_cache_page(vma, addr, PFN_PHYS(pfn));
+		}
+	}
+}
+
+void flush_cache_range(struct vm_area_struct *vma,
+		unsigned long start, unsigned long end)
+{
+	pgd_t *pgd;
+	unsigned long addr;
+
+	if ((!IS_ENABLED(CONFIG_SMP) || !arch_irqs_disabled()) &&
+	    end - start >= parisc_cache_flush_threshold) {
+		if (vma->vm_mm->context)
+			flush_tlb_range(vma, start, end);
+		flush_cache_all();
+		return;
+	}
+
+	if (vma->vm_mm->context == mfsp(3)) {
+		flush_user_dcache_range_asm(start, end);
+		if (vma->vm_flags & VM_EXEC)
+			flush_user_icache_range_asm(start, end);
+		flush_tlb_range(vma, start, end);
+		return;
+	}
+
+	pgd = vma->vm_mm->pgd;
+	for (addr = vma->vm_start; addr < vma->vm_end; addr += PAGE_SIZE) {
+		unsigned long pfn;
+		pte_t *ptep = get_ptep(pgd, addr);
+		if (!ptep)
+			continue;
+		pfn = pte_pfn(*ptep);
+		if (pfn_valid(pfn)) {
+			if (unlikely(vma->vm_mm->context))
+				flush_tlb_page(vma, addr);
+			__flush_cache_page(vma, addr, PFN_PHYS(pfn));
+		}
+	}
+}
+
+void
+flush_cache_page(struct vm_area_struct *vma, unsigned long vmaddr, unsigned long pfn)
+{
+	if (pfn_valid(pfn)) {
+		if (likely(vma->vm_mm->context))
+			flush_tlb_page(vma, vmaddr);
+		__flush_cache_page(vma, vmaddr, PFN_PHYS(pfn));
+	}
+}
+
+void flush_kernel_vmap_range(void *vaddr, int size)
+{
+	unsigned long start = (unsigned long)vaddr;
+	unsigned long end = start + size;
+
+	if ((!IS_ENABLED(CONFIG_SMP) || !arch_irqs_disabled()) &&
+	    (unsigned long)size >= parisc_cache_flush_threshold) {
+		flush_tlb_kernel_range(start, end);
+		flush_data_cache();
+		return;
+	}
+
+	flush_kernel_dcache_range_asm(start, end);
+	flush_tlb_kernel_range(start, end);
+}
+EXPORT_SYMBOL(flush_kernel_vmap_range);
+
+void invalidate_kernel_vmap_range(void *vaddr, int size)
+{
+	unsigned long start = (unsigned long)vaddr;
+	unsigned long end = start + size;
+
+	if ((!IS_ENABLED(CONFIG_SMP) || !arch_irqs_disabled()) &&
+	    (unsigned long)size >= parisc_cache_flush_threshold) {
+		flush_tlb_kernel_range(start, end);
+		flush_data_cache();
+		return;
+	}
+
+	purge_kernel_dcache_range_asm(start, end);
+	flush_tlb_kernel_range(start, end);
+}
+EXPORT_SYMBOL(invalidate_kernel_vmap_range);

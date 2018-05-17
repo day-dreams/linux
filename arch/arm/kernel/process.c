@@ -10,177 +10,122 @@
  */
 #include <stdarg.h>
 
-#include <linux/config.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/sched.h>
+#include <linux/sched/debug.h>
+#include <linux/sched/task.h>
+#include <linux/sched/task_stack.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
-#include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/user.h>
-#include <linux/a.out.h>
-#include <linux/delay.h>
-#include <linux/reboot.h>
 #include <linux/interrupt.h>
-#include <linux/kallsyms.h>
 #include <linux/init.h>
+#include <linux/elfcore.h>
+#include <linux/pm.h>
+#include <linux/tick.h>
+#include <linux/utsname.h>
+#include <linux/uaccess.h>
+#include <linux/random.h>
+#include <linux/hw_breakpoint.h>
+#include <linux/leds.h>
 
-#include <asm/system.h>
-#include <asm/io.h>
-#include <asm/leds.h>
 #include <asm/processor.h>
-#include <asm/uaccess.h>
+#include <asm/thread_notify.h>
+#include <asm/stacktrace.h>
+#include <asm/system_misc.h>
+#include <asm/mach/time.h>
+#include <asm/tls.h>
+#include <asm/vdso.h>
 
-extern const char *processor_modes[];
-extern void setup_mm_for_reboot(char mode);
+#ifdef CONFIG_CC_STACKPROTECTOR
+#include <linux/stackprotector.h>
+unsigned long __stack_chk_guard __read_mostly;
+EXPORT_SYMBOL(__stack_chk_guard);
+#endif
 
-static volatile int hlt_counter;
+static const char *processor_modes[] __maybe_unused = {
+  "USER_26", "FIQ_26" , "IRQ_26" , "SVC_26" , "UK4_26" , "UK5_26" , "UK6_26" , "UK7_26" ,
+  "UK8_26" , "UK9_26" , "UK10_26", "UK11_26", "UK12_26", "UK13_26", "UK14_26", "UK15_26",
+  "USER_32", "FIQ_32" , "IRQ_32" , "SVC_32" , "UK4_32" , "UK5_32" , "MON_32" , "ABT_32" ,
+  "UK8_32" , "UK9_32" , "HYP_32", "UND_32" , "UK12_32", "UK13_32", "UK14_32", "SYS_32"
+};
 
-#include <asm/arch/system.h>
-
-void disable_hlt(void)
-{
-	hlt_counter++;
-}
-
-EXPORT_SYMBOL(disable_hlt);
-
-void enable_hlt(void)
-{
-	hlt_counter--;
-}
-
-EXPORT_SYMBOL(enable_hlt);
-
-static int __init nohlt_setup(char *__unused)
-{
-	hlt_counter = 1;
-	return 1;
-}
-
-static int __init hlt_setup(char *__unused)
-{
-	hlt_counter = 0;
-	return 1;
-}
-
-__setup("nohlt", nohlt_setup);
-__setup("hlt", hlt_setup);
+static const char *isa_modes[] __maybe_unused = {
+  "ARM" , "Thumb" , "Jazelle", "ThumbEE"
+};
 
 /*
- * The following aren't currently used.
+ * This is our default idle handler.
  */
-void (*pm_idle)(void);
-EXPORT_SYMBOL(pm_idle);
 
-void (*pm_power_off)(void);
-EXPORT_SYMBOL(pm_power_off);
+void (*arm_pm_idle)(void);
 
 /*
- * This is our default idle handler.  We need to disable
- * interrupts here to ensure we don't miss a wakeup call.
+ * Called from the core idle loop.
  */
-void default_idle(void)
+
+void arch_cpu_idle(void)
 {
-	local_irq_disable();
-	if (!need_resched() && !hlt_counter)
-		arch_idle();
+	if (arm_pm_idle)
+		arm_pm_idle();
+	else
+		cpu_do_idle();
 	local_irq_enable();
 }
 
-/*
- * The idle thread.  We try to conserve power, while trying to keep
- * overall latency low.  The architecture specific idle is passed
- * a value to indicate the level of "idleness" of the system.
- */
-void cpu_idle(void)
+void arch_cpu_idle_prepare(void)
 {
 	local_fiq_enable();
-
-	/* endless idle loop with no priority at all */
-	while (1) {
-		void (*idle)(void) = pm_idle;
-		if (!idle)
-			idle = default_idle;
-		preempt_disable();
-		leds_event(led_idle_start);
-		while (!need_resched())
-			idle();
-		leds_event(led_idle_end);
-		preempt_enable();
-		schedule();
-	}
 }
 
-static char reboot_mode = 'h';
-
-int __init reboot_setup(char *str)
+void arch_cpu_idle_enter(void)
 {
-	reboot_mode = str[0];
-	return 1;
+	ledtrig_cpu(CPU_LED_IDLE_START);
+#ifdef CONFIG_PL310_ERRATA_769419
+	wmb();
+#endif
 }
 
-__setup("reboot=", reboot_setup);
-
-void machine_halt(void)
+void arch_cpu_idle_exit(void)
 {
+	ledtrig_cpu(CPU_LED_IDLE_END);
 }
 
-EXPORT_SYMBOL(machine_halt);
-
-void machine_power_off(void)
-{
-	if (pm_power_off)
-		pm_power_off();
-}
-
-EXPORT_SYMBOL(machine_power_off);
-
-void machine_restart(char * __unused)
-{
-	/*
-	 * Clean and disable cache, and turn off interrupts
-	 */
-	cpu_proc_fin();
-
-	/*
-	 * Tell the mm system that we are going to reboot -
-	 * we may need it to insert some 1:1 mappings so that
-	 * soft boot works.
-	 */
-	setup_mm_for_reboot(reboot_mode);
-
-	/*
-	 * Now call the architecture specific reboot code.
-	 */
-	arch_reset(reboot_mode);
-
-	/*
-	 * Whoops - the architecture was unable to reboot.
-	 * Tell the user!
-	 */
-	mdelay(1000);
-	printk("Reboot failed -- System halted\n");
-	while (1);
-}
-
-EXPORT_SYMBOL(machine_restart);
-
-void show_regs(struct pt_regs * regs)
+void __show_regs(struct pt_regs *regs)
 {
 	unsigned long flags;
+	char buf[64];
+#ifndef CONFIG_CPU_V7M
+	unsigned int domain, fs;
+#ifdef CONFIG_CPU_SW_DOMAIN_PAN
+	/*
+	 * Get the domain register for the parent context. In user
+	 * mode, we don't save the DACR, so lets use what it should
+	 * be. For other modes, we place it after the pt_regs struct.
+	 */
+	if (user_mode(regs)) {
+		domain = DACR_UACCESS_ENABLE;
+		fs = get_fs();
+	} else {
+		domain = to_svc_pt_regs(regs)->dacr;
+		fs = to_svc_pt_regs(regs)->addr_limit;
+	}
+#else
+	domain = get_domain();
+	fs = get_fs();
+#endif
+#endif
 
-	flags = condition_codes(regs);
+	show_regs_print_info(KERN_DEFAULT);
 
-	print_symbol("PC is at %s\n", instruction_pointer(regs));
-	print_symbol("LR is at %s\n", regs->ARM_lr);
-	printk("pc : [<%08lx>]    lr : [<%08lx>]    %s\n"
-	       "sp : %08lx  ip : %08lx  fp : %08lx\n",
-		instruction_pointer(regs),
-		regs->ARM_lr, print_tainted(), regs->ARM_sp,
-		regs->ARM_ip, regs->ARM_fp);
+	printk("PC is at %pS\n", (void *)instruction_pointer(regs));
+	printk("LR is at %pS\n", (void *)regs->ARM_lr);
+	printk("pc : [<%08lx>]    lr : [<%08lx>]    psr: %08lx\n",
+	       regs->ARM_pc, regs->ARM_lr, regs->ARM_cpsr);
+	printk("sp : %08lx  ip : %08lx  fp : %08lx\n",
+	       regs->ARM_sp, regs->ARM_ip, regs->ARM_fp);
 	printk("r10: %08lx  r9 : %08lx  r8 : %08lx\n",
 		regs->ARM_r10, regs->ARM_r9,
 		regs->ARM_r8);
@@ -190,172 +135,148 @@ void show_regs(struct pt_regs * regs)
 	printk("r3 : %08lx  r2 : %08lx  r1 : %08lx  r0 : %08lx\n",
 		regs->ARM_r3, regs->ARM_r2,
 		regs->ARM_r1, regs->ARM_r0);
-	printk("Flags: %c%c%c%c",
-		flags & PSR_N_BIT ? 'N' : 'n',
-		flags & PSR_Z_BIT ? 'Z' : 'z',
-		flags & PSR_C_BIT ? 'C' : 'c',
-		flags & PSR_V_BIT ? 'V' : 'v');
-	printk("  IRQs o%s  FIQs o%s  Mode %s%s  Segment %s\n",
-		interrupts_enabled(regs) ? "n" : "ff",
-		fast_interrupts_enabled(regs) ? "n" : "ff",
-		processor_modes[processor_mode(regs)],
-		thumb_mode(regs) ? " (T)" : "",
-		get_fs() == get_ds() ? "kernel" : "user");
+
+	flags = regs->ARM_cpsr;
+	buf[0] = flags & PSR_N_BIT ? 'N' : 'n';
+	buf[1] = flags & PSR_Z_BIT ? 'Z' : 'z';
+	buf[2] = flags & PSR_C_BIT ? 'C' : 'c';
+	buf[3] = flags & PSR_V_BIT ? 'V' : 'v';
+	buf[4] = '\0';
+
+#ifndef CONFIG_CPU_V7M
 	{
-		unsigned int ctrl, transbase, dac;
-		  __asm__ (
-		"	mrc p15, 0, %0, c1, c0\n"
-		"	mrc p15, 0, %1, c2, c0\n"
-		"	mrc p15, 0, %2, c3, c0\n"
-		: "=r" (ctrl), "=r" (transbase), "=r" (dac));
-		printk("Control: %04X  Table: %08X  DAC: %08X\n",
-		  	ctrl, transbase, dac);
+		const char *segment;
+
+		if ((domain & domain_mask(DOMAIN_USER)) ==
+		    domain_val(DOMAIN_USER, DOMAIN_NOACCESS))
+			segment = "none";
+		else if (fs == get_ds())
+			segment = "kernel";
+		else
+			segment = "user";
+
+		printk("Flags: %s  IRQs o%s  FIQs o%s  Mode %s  ISA %s  Segment %s\n",
+			buf, interrupts_enabled(regs) ? "n" : "ff",
+			fast_interrupts_enabled(regs) ? "n" : "ff",
+			processor_modes[processor_mode(regs)],
+			isa_modes[isa_mode(regs)], segment);
 	}
-}
+#else
+	printk("xPSR: %08lx\n", regs->ARM_cpsr);
+#endif
 
-void show_fpregs(struct user_fp *regs)
-{
-	int i;
+#ifdef CONFIG_CPU_CP15
+	{
+		unsigned int ctrl;
 
-	for (i = 0; i < 8; i++) {
-		unsigned long *p;
-		char type;
-
-		p = (unsigned long *)(regs->fpregs + i);
-
-		switch (regs->ftype[i]) {
-			case 1: type = 'f'; break;
-			case 2: type = 'd'; break;
-			case 3: type = 'e'; break;
-			default: type = '?'; break;
+		buf[0] = '\0';
+#ifdef CONFIG_CPU_CP15_MMU
+		{
+			unsigned int transbase;
+			asm("mrc p15, 0, %0, c2, c0\n\t"
+			    : "=r" (transbase));
+			snprintf(buf, sizeof(buf), "  Table: %08x  DAC: %08x",
+				transbase, domain);
 		}
-		if (regs->init_flag)
-			type = '?';
+#endif
+		asm("mrc p15, 0, %0, c1, c0\n" : "=r" (ctrl));
 
-		printk("  f%d(%c): %08lx %08lx %08lx%c",
-			i, type, p[0], p[1], p[2], i & 1 ? '\n' : ' ');
-	}
-			
-
-	printk("FPSR: %08lx FPCR: %08lx\n",
-		(unsigned long)regs->fpsr,
-		(unsigned long)regs->fpcr);
-}
-
-/*
- * Task structure and kernel stack allocation.
- */
-static unsigned long *thread_info_head;
-static unsigned int nr_thread_info;
-
-#define EXTRA_TASK_STRUCT	4
-#define ll_alloc_task_struct() ((struct thread_info *) __get_free_pages(GFP_KERNEL,1))
-#define ll_free_task_struct(p) free_pages((unsigned long)(p),1)
-
-struct thread_info *alloc_thread_info(struct task_struct *task)
-{
-	struct thread_info *thread = NULL;
-
-	if (EXTRA_TASK_STRUCT) {
-		unsigned long *p = thread_info_head;
-
-		if (p) {
-			thread_info_head = (unsigned long *)p[0];
-			nr_thread_info -= 1;
-		}
-		thread = (struct thread_info *)p;
-	}
-
-	if (!thread)
-		thread = ll_alloc_task_struct();
-
-#ifdef CONFIG_MAGIC_SYSRQ
-	/*
-	 * The stack must be cleared if you want SYSRQ-T to
-	 * give sensible stack usage information
-	 */
-	if (thread) {
-		char *p = (char *)thread;
-		memzero(p+KERNEL_STACK_SIZE, KERNEL_STACK_SIZE);
+		printk("Control: %08x%s\n", ctrl, buf);
 	}
 #endif
-	return thread;
 }
 
-void free_thread_info(struct thread_info *thread)
+void show_regs(struct pt_regs * regs)
 {
-	if (EXTRA_TASK_STRUCT && nr_thread_info < EXTRA_TASK_STRUCT) {
-		unsigned long *p = (unsigned long *)thread;
-		p[0] = (unsigned long)thread_info_head;
-		thread_info_head = p;
-		nr_thread_info += 1;
-	} else
-		ll_free_task_struct(thread);
+	__show_regs(regs);
+	dump_stack();
 }
+
+ATOMIC_NOTIFIER_HEAD(thread_notify_head);
+
+EXPORT_SYMBOL_GPL(thread_notify_head);
 
 /*
  * Free current thread data structures etc..
  */
-void exit_thread(void)
+void exit_thread(struct task_struct *tsk)
 {
+	thread_notify(THREAD_NOTIFY_EXIT, task_thread_info(tsk));
 }
-
-static void default_fp_init(union fp_state *fp)
-{
-	memset(fp, 0, sizeof(union fp_state));
-}
-
-void (*fp_init)(union fp_state *) = default_fp_init;
-EXPORT_SYMBOL(fp_init);
 
 void flush_thread(void)
 {
 	struct thread_info *thread = current_thread_info();
 	struct task_struct *tsk = current;
 
+	flush_ptrace_hw_breakpoint(tsk);
+
 	memset(thread->used_cp, 0, sizeof(thread->used_cp));
 	memset(&tsk->thread.debug, 0, sizeof(struct debug_info));
-#if defined(CONFIG_IWMMXT)
-	iwmmxt_task_release(thread);
-#endif
-	fp_init(&thread->fpstate);
-#if defined(CONFIG_VFP)
-	vfp_flush_thread(&thread->vfpstate);
-#endif
+	memset(&thread->fpstate, 0, sizeof(union fp_state));
+
+	flush_tls();
+
+	thread_notify(THREAD_NOTIFY_FLUSH, thread);
 }
 
 void release_thread(struct task_struct *dead_task)
 {
-#if defined(CONFIG_VFP)
-	vfp_release_thread(&dead_task->thread_info->vfpstate);
-#endif
-#if defined(CONFIG_IWMMXT)
-	iwmmxt_task_release(dead_task->thread_info);
-#endif
 }
 
 asmlinkage void ret_from_fork(void) __asm__("ret_from_fork");
 
 int
-copy_thread(int nr, unsigned long clone_flags, unsigned long stack_start,
-	    unsigned long stk_sz, struct task_struct *p, struct pt_regs *regs)
+copy_thread(unsigned long clone_flags, unsigned long stack_start,
+	    unsigned long stk_sz, struct task_struct *p)
 {
-	struct thread_info *thread = p->thread_info;
-	struct pt_regs *childregs;
-
-	childregs = ((struct pt_regs *)((unsigned long)thread + THREAD_SIZE - 8)) - 1;
-	*childregs = *regs;
-	childregs->ARM_r0 = 0;
-	childregs->ARM_sp = stack_start;
+	struct thread_info *thread = task_thread_info(p);
+	struct pt_regs *childregs = task_pt_regs(p);
 
 	memset(&thread->cpu_context, 0, sizeof(struct cpu_context_save));
-	thread->cpu_context.sp = (unsigned long)childregs;
+
+#ifdef CONFIG_CPU_USE_DOMAINS
+	/*
+	 * Copy the initial value of the domain access control register
+	 * from the current thread: thread->addr_limit will have been
+	 * copied from the current thread via setup_thread_stack() in
+	 * kernel/fork.c
+	 */
+	thread->cpu_domain = get_domain();
+#endif
+
+	if (likely(!(p->flags & PF_KTHREAD))) {
+		*childregs = *current_pt_regs();
+		childregs->ARM_r0 = 0;
+		if (stack_start)
+			childregs->ARM_sp = stack_start;
+	} else {
+		memset(childregs, 0, sizeof(struct pt_regs));
+		thread->cpu_context.r4 = stk_sz;
+		thread->cpu_context.r5 = stack_start;
+		childregs->ARM_cpsr = SVC_MODE;
+	}
 	thread->cpu_context.pc = (unsigned long)ret_from_fork;
+	thread->cpu_context.sp = (unsigned long)childregs;
+
+	clear_ptrace_hw_breakpoint(p);
 
 	if (clone_flags & CLONE_SETTLS)
-		thread->tp_value = regs->ARM_r3;
+		thread->tp_value[0] = childregs->ARM_r3;
+	thread->tp_value[1] = get_tpuser();
+
+	thread_notify(THREAD_NOTIFY_COPY, thread);
 
 	return 0;
+}
+
+/*
+ * Fill in the task's elfregs structure for a core dump.
+ */
+int dump_task_regs(struct task_struct *t, elf_gregset_t *elfregs)
+{
+	elf_core_copy_regs(elfregs, task_pt_regs(t));
+	return 1;
 }
 
 /*
@@ -373,88 +294,173 @@ int dump_fpu (struct pt_regs *regs, struct user_fp *fp)
 }
 EXPORT_SYMBOL(dump_fpu);
 
-/*
- * fill in the user structure for a core dump..
- */
-void dump_thread(struct pt_regs * regs, struct user * dump)
-{
-	struct task_struct *tsk = current;
-
-	dump->magic = CMAGIC;
-	dump->start_code = tsk->mm->start_code;
-	dump->start_stack = regs->ARM_sp & ~(PAGE_SIZE - 1);
-
-	dump->u_tsize = (tsk->mm->end_code - tsk->mm->start_code) >> PAGE_SHIFT;
-	dump->u_dsize = (tsk->mm->brk - tsk->mm->start_data + PAGE_SIZE - 1) >> PAGE_SHIFT;
-	dump->u_ssize = 0;
-
-	dump->u_debugreg[0] = tsk->thread.debug.bp[0].address;
-	dump->u_debugreg[1] = tsk->thread.debug.bp[1].address;
-	dump->u_debugreg[2] = tsk->thread.debug.bp[0].insn.arm;
-	dump->u_debugreg[3] = tsk->thread.debug.bp[1].insn.arm;
-	dump->u_debugreg[4] = tsk->thread.debug.nsaved;
-
-	if (dump->start_stack < 0x04000000)
-		dump->u_ssize = (0x04000000 - dump->start_stack) >> PAGE_SHIFT;
-
-	dump->regs = *regs;
-	dump->u_fpvalid = dump_fpu (regs, &dump->u_fp);
-}
-EXPORT_SYMBOL(dump_thread);
-
-/*
- * Shuffle the argument into the correct register before calling the
- * thread function.  r1 is the thread argument, r2 is the pointer to
- * the thread function, and r3 points to the exit function.
- */
-extern void kernel_thread_helper(void);
-asm(	".section .text\n"
-"	.align\n"
-"	.type	kernel_thread_helper, #function\n"
-"kernel_thread_helper:\n"
-"	mov	r0, r1\n"
-"	mov	lr, r3\n"
-"	mov	pc, r2\n"
-"	.size	kernel_thread_helper, . - kernel_thread_helper\n"
-"	.previous");
-
-/*
- * Create a kernel thread.
- */
-pid_t kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
-{
-	struct pt_regs regs;
-
-	memset(&regs, 0, sizeof(regs));
-
-	regs.ARM_r1 = (unsigned long)arg;
-	regs.ARM_r2 = (unsigned long)fn;
-	regs.ARM_r3 = (unsigned long)do_exit;
-	regs.ARM_pc = (unsigned long)kernel_thread_helper;
-	regs.ARM_cpsr = SVC_MODE;
-
-	return do_fork(flags|CLONE_VM|CLONE_UNTRACED, 0, &regs, 0, NULL, NULL);
-}
-EXPORT_SYMBOL(kernel_thread);
-
 unsigned long get_wchan(struct task_struct *p)
 {
-	unsigned long fp, lr;
+	struct stackframe frame;
 	unsigned long stack_page;
 	int count = 0;
 	if (!p || p == current || p->state == TASK_RUNNING)
 		return 0;
 
-	stack_page = 4096 + (unsigned long)p->thread_info;
-	fp = thread_saved_fp(p);
+	frame.fp = thread_saved_fp(p);
+	frame.sp = thread_saved_sp(p);
+	frame.lr = 0;			/* recovered from the stack */
+	frame.pc = thread_saved_pc(p);
+	stack_page = (unsigned long)task_stack_page(p);
 	do {
-		if (fp < stack_page || fp > 4092+stack_page)
+		if (frame.sp < stack_page ||
+		    frame.sp >= stack_page + THREAD_SIZE ||
+		    unwind_frame(&frame) < 0)
 			return 0;
-		lr = pc_pointer (((unsigned long *)fp)[-1]);
-		if (!in_sched_functions(lr))
-			return lr;
-		fp = *(unsigned long *) (fp - 12);
+		if (!in_sched_functions(frame.pc))
+			return frame.pc;
 	} while (count ++ < 16);
 	return 0;
 }
-EXPORT_SYMBOL(get_wchan);
+
+unsigned long arch_randomize_brk(struct mm_struct *mm)
+{
+	return randomize_page(mm->brk, 0x02000000);
+}
+
+#ifdef CONFIG_MMU
+#ifdef CONFIG_KUSER_HELPERS
+/*
+ * The vectors page is always readable from user space for the
+ * atomic helpers. Insert it into the gate_vma so that it is visible
+ * through ptrace and /proc/<pid>/mem.
+ */
+static struct vm_area_struct gate_vma = {
+	.vm_start	= 0xffff0000,
+	.vm_end		= 0xffff0000 + PAGE_SIZE,
+	.vm_flags	= VM_READ | VM_EXEC | VM_MAYREAD | VM_MAYEXEC,
+};
+
+static int __init gate_vma_init(void)
+{
+	gate_vma.vm_page_prot = PAGE_READONLY_EXEC;
+	return 0;
+}
+arch_initcall(gate_vma_init);
+
+struct vm_area_struct *get_gate_vma(struct mm_struct *mm)
+{
+	return &gate_vma;
+}
+
+int in_gate_area(struct mm_struct *mm, unsigned long addr)
+{
+	return (addr >= gate_vma.vm_start) && (addr < gate_vma.vm_end);
+}
+
+int in_gate_area_no_mm(unsigned long addr)
+{
+	return in_gate_area(NULL, addr);
+}
+#define is_gate_vma(vma)	((vma) == &gate_vma)
+#else
+#define is_gate_vma(vma)	0
+#endif
+
+const char *arch_vma_name(struct vm_area_struct *vma)
+{
+	return is_gate_vma(vma) ? "[vectors]" : NULL;
+}
+
+/* If possible, provide a placement hint at a random offset from the
+ * stack for the sigpage and vdso pages.
+ */
+static unsigned long sigpage_addr(const struct mm_struct *mm,
+				  unsigned int npages)
+{
+	unsigned long offset;
+	unsigned long first;
+	unsigned long last;
+	unsigned long addr;
+	unsigned int slots;
+
+	first = PAGE_ALIGN(mm->start_stack);
+
+	last = TASK_SIZE - (npages << PAGE_SHIFT);
+
+	/* No room after stack? */
+	if (first > last)
+		return 0;
+
+	/* Just enough room? */
+	if (first == last)
+		return first;
+
+	slots = ((last - first) >> PAGE_SHIFT) + 1;
+
+	offset = get_random_int() % slots;
+
+	addr = first + (offset << PAGE_SHIFT);
+
+	return addr;
+}
+
+static struct page *signal_page;
+extern struct page *get_signal_page(void);
+
+static int sigpage_mremap(const struct vm_special_mapping *sm,
+		struct vm_area_struct *new_vma)
+{
+	current->mm->context.sigpage = new_vma->vm_start;
+	return 0;
+}
+
+static const struct vm_special_mapping sigpage_mapping = {
+	.name = "[sigpage]",
+	.pages = &signal_page,
+	.mremap = sigpage_mremap,
+};
+
+int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
+{
+	struct mm_struct *mm = current->mm;
+	struct vm_area_struct *vma;
+	unsigned long npages;
+	unsigned long addr;
+	unsigned long hint;
+	int ret = 0;
+
+	if (!signal_page)
+		signal_page = get_signal_page();
+	if (!signal_page)
+		return -ENOMEM;
+
+	npages = 1; /* for sigpage */
+	npages += vdso_total_pages;
+
+	if (down_write_killable(&mm->mmap_sem))
+		return -EINTR;
+	hint = sigpage_addr(mm, npages);
+	addr = get_unmapped_area(NULL, hint, npages << PAGE_SHIFT, 0, 0);
+	if (IS_ERR_VALUE(addr)) {
+		ret = addr;
+		goto up_fail;
+	}
+
+	vma = _install_special_mapping(mm, addr, PAGE_SIZE,
+		VM_READ | VM_EXEC | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC,
+		&sigpage_mapping);
+
+	if (IS_ERR(vma)) {
+		ret = PTR_ERR(vma);
+		goto up_fail;
+	}
+
+	mm->context.sigpage = addr;
+
+	/* Unlike the sigpage, failure to install the vdso is unlikely
+	 * to be fatal to the process, so no error check needed
+	 * here.
+	 */
+	arm_install_vdso(mm, addr + PAGE_SIZE);
+
+ up_fail:
+	up_write(&mm->mmap_sem);
+	return ret;
+}
+#endif

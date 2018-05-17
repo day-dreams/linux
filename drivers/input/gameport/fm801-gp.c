@@ -27,7 +27,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/gameport.h>
 
@@ -37,10 +36,8 @@
 #define HAVE_COOKED
 
 struct fm801_gp {
-	struct gameport gameport;
+	struct gameport *gameport;
 	struct resource *res_port;
-	char phys[32];
-	char name[32];
 };
 
 #ifdef HAVE_COOKED
@@ -80,83 +77,83 @@ static int fm801_gp_open(struct gameport *gameport, int mode)
 	return 0;
 }
 
-static int __devinit fm801_gp_probe(struct pci_dev *pci, const struct pci_device_id *id)
+static int fm801_gp_probe(struct pci_dev *pci, const struct pci_device_id *id)
 {
 	struct fm801_gp *gp;
+	struct gameport *port;
+	int error;
 
-	if (! (gp = kmalloc(sizeof(*gp), GFP_KERNEL))) {
-		printk("cannot malloc for fm801-gp\n");
-		return -1;
+	gp = kzalloc(sizeof(struct fm801_gp), GFP_KERNEL);
+	port = gameport_allocate_port();
+	if (!gp || !port) {
+		printk(KERN_ERR "fm801-gp: Memory allocation failed\n");
+		error = -ENOMEM;
+		goto err_out_free;
 	}
-	memset(gp, 0, sizeof(*gp));
 
-	gp->gameport.open = fm801_gp_open;
+	error = pci_enable_device(pci);
+	if (error)
+		goto err_out_free;
+
+	port->open = fm801_gp_open;
 #ifdef HAVE_COOKED
-	gp->gameport.cooked_read = fm801_gp_cooked_read;
+	port->cooked_read = fm801_gp_cooked_read;
 #endif
+	gameport_set_name(port, "FM801");
+	gameport_set_phys(port, "pci%s/gameport0", pci_name(pci));
+	port->dev.parent = &pci->dev;
+	port->io = pci_resource_start(pci, 0);
 
-	pci_enable_device(pci);
-	gp->gameport.io = pci_resource_start(pci, 0);
-	if ((gp->res_port = request_region(gp->gameport.io, 0x10, "FM801 GP")) == NULL) {
-		printk("unable to grab region 0x%x-0x%x\n", gp->gameport.io, gp->gameport.io + 0x0f);
-		kfree(gp);
-		return -1;
+	gp->gameport = port;
+	gp->res_port = request_region(port->io, 0x10, "FM801 GP");
+	if (!gp->res_port) {
+		printk(KERN_DEBUG "fm801-gp: unable to grab region 0x%x-0x%x\n",
+			port->io, port->io + 0x0f);
+		error = -EBUSY;
+		goto err_out_disable_dev;
 	}
-
-	gp->gameport.phys = gp->phys;
-	gp->gameport.name = gp->name;
-	gp->gameport.id.bustype = BUS_PCI;
-	gp->gameport.id.vendor = pci->vendor;
-	gp->gameport.id.product = pci->device;
 
 	pci_set_drvdata(pci, gp);
 
-	outb(0x60, gp->gameport.io + 0x0d); /* enable joystick 1 and 2 */
-
-	gameport_register_port(&gp->gameport);
-
-	printk(KERN_INFO "gameport: at pci%s speed %d kHz\n",
-		pci_name(pci), gp->gameport.speed);
+	outb(0x60, port->io + 0x0d); /* enable joystick 1 and 2 */
+	gameport_register_port(port);
 
 	return 0;
+
+ err_out_disable_dev:
+	pci_disable_device(pci);
+ err_out_free:
+	gameport_free_port(port);
+	kfree(gp);
+	return error;
 }
 
-static void __devexit fm801_gp_remove(struct pci_dev *pci)
+static void fm801_gp_remove(struct pci_dev *pci)
 {
 	struct fm801_gp *gp = pci_get_drvdata(pci);
-	if (gp) {
-		gameport_unregister_port(&gp->gameport);
-		release_resource(gp->res_port);
-		kfree(gp);
-	}
+
+	gameport_unregister_port(gp->gameport);
+	release_resource(gp->res_port);
+	kfree(gp);
+
+	pci_disable_device(pci);
 }
 
-static struct pci_device_id fm801_gp_id_table[] = {
+static const struct pci_device_id fm801_gp_id_table[] = {
 	{ PCI_VENDOR_ID_FORTEMEDIA, PCI_DEVICE_ID_FM801_GP, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0  },
 	{ 0 }
 };
+MODULE_DEVICE_TABLE(pci, fm801_gp_id_table);
 
 static struct pci_driver fm801_gp_driver = {
 	.name =		"FM801_gameport",
 	.id_table =	fm801_gp_id_table,
 	.probe =	fm801_gp_probe,
-	.remove =	__devexit_p(fm801_gp_remove),
+	.remove =	fm801_gp_remove,
 };
 
-int __init fm801_gp_init(void)
-{
-	return pci_module_init(&fm801_gp_driver);
-}
+module_pci_driver(fm801_gp_driver);
 
-void __exit fm801_gp_exit(void)
-{
-	pci_unregister_driver(&fm801_gp_driver);
-}
-
-module_init(fm801_gp_init);
-module_exit(fm801_gp_exit);
-
-MODULE_DEVICE_TABLE(pci, fm801_gp_id_table);
-
+MODULE_DESCRIPTION("FM801 gameport driver");
 MODULE_AUTHOR("Takashi Iwai <tiwai@suse.de>");
 MODULE_LICENSE("GPL");

@@ -1,5 +1,4 @@
 /*
- * lib/extable.c
  * Derived from arch/ppc/mm/extable.c and arch/i386/mm/extable.c.
  *
  * Copyright (C) 2004 Paul Mackerras, IBM Corp.
@@ -10,45 +9,105 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
+#include <linux/bsearch.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <asm/uaccess.h>
+#include <linux/sort.h>
+#include <linux/uaccess.h>
 
-extern struct exception_table_entry __start___ex_table[];
-extern struct exception_table_entry __stop___ex_table[];
+#ifndef ARCH_HAS_RELATIVE_EXTABLE
+#define ex_to_insn(x)	((x)->insn)
+#else
+static inline unsigned long ex_to_insn(const struct exception_table_entry *x)
+{
+	return (unsigned long)&x->insn + x->insn;
+}
+#endif
 
 #ifndef ARCH_HAS_SORT_EXTABLE
+#ifndef ARCH_HAS_RELATIVE_EXTABLE
+#define swap_ex		NULL
+#else
+static void swap_ex(void *a, void *b, int size)
+{
+	struct exception_table_entry *x = a, *y = b, tmp;
+	int delta = b - a;
+
+	tmp = *x;
+	x->insn = y->insn + delta;
+	y->insn = tmp.insn - delta;
+
+#ifdef swap_ex_entry_fixup
+	swap_ex_entry_fixup(x, y, tmp, delta);
+#else
+	x->fixup = y->fixup + delta;
+	y->fixup = tmp.fixup - delta;
+#endif
+}
+#endif /* ARCH_HAS_RELATIVE_EXTABLE */
+
 /*
  * The exception table needs to be sorted so that the binary
  * search that we use to find entries in it works properly.
  * This is used both for the kernel exception table and for
  * the exception tables of modules that get loaded.
  */
+static int cmp_ex_sort(const void *a, const void *b)
+{
+	const struct exception_table_entry *x = a, *y = b;
+
+	/* avoid overflow */
+	if (ex_to_insn(x) > ex_to_insn(y))
+		return 1;
+	if (ex_to_insn(x) < ex_to_insn(y))
+		return -1;
+	return 0;
+}
+
 void sort_extable(struct exception_table_entry *start,
 		  struct exception_table_entry *finish)
 {
-	struct exception_table_entry el, *p, *q;
-
-	/* insertion sort */
-	for (p = start + 1; p < finish; ++p) {
-		/* start .. p-1 is sorted */
-		if (p[0].insn < p[-1].insn) {
-			/* move element p down to its right place */
-			el = *p;
-			q = p;
-			do {
-				/* el comes before q[-1], move q[-1] up one */
-				q[0] = q[-1];
-				--q;
-			} while (q > start && el.insn < q[-1].insn);
-			*q = el;
-		}
-	}
+	sort(start, finish - start, sizeof(struct exception_table_entry),
+	     cmp_ex_sort, swap_ex);
 }
-#endif
+
+#ifdef CONFIG_MODULES
+/*
+ * If the exception table is sorted, any referring to the module init
+ * will be at the beginning or the end.
+ */
+void trim_init_extable(struct module *m)
+{
+	/*trim the beginning*/
+	while (m->num_exentries &&
+	       within_module_init(ex_to_insn(&m->extable[0]), m)) {
+		m->extable++;
+		m->num_exentries--;
+	}
+	/*trim the end*/
+	while (m->num_exentries &&
+	       within_module_init(ex_to_insn(&m->extable[m->num_exentries - 1]),
+				  m))
+		m->num_exentries--;
+}
+#endif /* CONFIG_MODULES */
+#endif /* !ARCH_HAS_SORT_EXTABLE */
 
 #ifndef ARCH_HAS_SEARCH_EXTABLE
+
+static int cmp_ex_search(const void *key, const void *elt)
+{
+	const struct exception_table_entry *_elt = elt;
+	unsigned long _key = *(unsigned long *)key;
+
+	/* avoid overflow */
+	if (_key > ex_to_insn(_elt))
+		return 1;
+	if (_key < ex_to_insn(_elt))
+		return -1;
+	return 0;
+}
+
 /*
  * Search one exception table for an entry corresponding to the
  * given instruction address, and return the address of the entry,
@@ -57,25 +116,11 @@ void sort_extable(struct exception_table_entry *start,
  * already sorted.
  */
 const struct exception_table_entry *
-search_extable(const struct exception_table_entry *first,
-	       const struct exception_table_entry *last,
+search_extable(const struct exception_table_entry *base,
+	       const size_t num,
 	       unsigned long value)
 {
-	while (first <= last) {
-		const struct exception_table_entry *mid;
-
-		mid = (last - first) / 2 + first;
-		/*
-		 * careful, the distance between entries can be
-		 * larger than 2GB:
-		 */
-		if (mid->insn < value)
-			first = mid + 1;
-		else if (mid->insn > value)
-			last = mid - 1;
-		else
-			return mid;
-        }
-        return NULL;
+	return bsearch(&value, base, num,
+		       sizeof(struct exception_table_entry), cmp_ex_search);
 }
 #endif

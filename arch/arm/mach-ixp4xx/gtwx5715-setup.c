@@ -1,7 +1,7 @@
 /*
  * arch/arm/mach-ixp4xx/gtwx5715-setup.c
  *
- * Gemtek GTWX5715 (Linksys WRV54G) board settup
+ * Gemtek GTWX5715 (Linksys WRV54G) board setup
  *
  * Copyright (C) 2004 George T. Joseph
  * Derived from Coyote
@@ -27,16 +27,42 @@
 #include <linux/serial.h>
 #include <linux/tty.h>
 #include <linux/serial_8250.h>
-
 #include <asm/types.h>
 #include <asm/setup.h>
 #include <asm/memory.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/irq.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/flash.h>
-#include <asm/arch/gtwx5715.h>
+
+/* GPIO 5,6,7 and 12 are hard wired to the Kendin KS8995M Switch
+   and operate as an SPI type interface.  The details of the interface
+   are available on Kendin/Micrel's web site. */
+
+#define GTWX5715_KSSPI_SELECT	5
+#define GTWX5715_KSSPI_TXD	6
+#define GTWX5715_KSSPI_CLOCK	7
+#define GTWX5715_KSSPI_RXD	12
+
+/* The "reset" button is wired to GPIO 3.
+   The GPIO is brought "low" when the button is pushed. */
+
+#define GTWX5715_BUTTON_GPIO	3
+
+/* Board Label      Front Label
+   LED1             Power
+   LED2             Wireless-G
+   LED3             not populated but could be
+   LED4             Internet
+   LED5 - LED8      Controlled by KS8995M Switch
+   LED9             DMZ */
+
+#define GTWX5715_LED1_GPIO	2
+#define GTWX5715_LED2_GPIO	9
+#define GTWX5715_LED3_GPIO	8
+#define GTWX5715_LED4_GPIO	1
+#define GTWX5715_LED9_GPIO	4
 
 /*
  * Xscale UART registers are 32 bits wide with only the least
@@ -83,7 +109,7 @@ static struct plat_serial8250_port gtwx5715_uart_platform_data[] = {
 	.mapbase	= IXP4XX_UART2_BASE_PHYS,
 	.membase	= (char *)IXP4XX_UART2_BASE_VIRT + REG_OFFSET,
 	.irq		= IRQ_IXP4XX_UART2,
-	.flags		= UPF_BOOT_AUTOCONF,
+	.flags		= UPF_BOOT_AUTOCONF | UPF_SKIP_TEST,
 	.iotype		= UPIO_MEM,
 	.regshift	= 2,
 	.uartclk	= IXP4XX_UART_XTAL,
@@ -93,7 +119,7 @@ static struct plat_serial8250_port gtwx5715_uart_platform_data[] = {
 
 static struct platform_device gtwx5715_uart_device = {
 	.name		= "serial8250",
-	.id		= 0,
+	.id		= PLAT8250_DEV_PLATFORM,
 	.dev			= {
 		.platform_data	= gtwx5715_uart_platform_data,
 	},
@@ -101,20 +127,12 @@ static struct platform_device gtwx5715_uart_device = {
 	.resource	= gtwx5715_uart_resources,
 };
 
-
-void __init gtwx5715_map_io(void)
-{
-	ixp4xx_map_io();
-}
-
 static struct flash_platform_data gtwx5715_flash_data = {
 	.map_name	= "cfi_probe",
 	.width		= 2,
 };
 
 static struct resource gtwx5715_flash_resource = {
-	.start		= GTWX5715_FLASH_BASE,
-	.end		= GTWX5715_FLASH_BASE + GTWX5715_FLASH_SIZE,
 	.flags		= IORESOURCE_MEM,
 };
 
@@ -135,19 +153,27 @@ static struct platform_device *gtwx5715_devices[] __initdata = {
 
 static void __init gtwx5715_init(void)
 {
+	ixp4xx_sys_init();
+
+	gtwx5715_flash_resource.start = IXP4XX_EXP_BUS_BASE(0);
+	gtwx5715_flash_resource.end = IXP4XX_EXP_BUS_BASE(0) + SZ_8M - 1;
+
 	platform_add_devices(gtwx5715_devices, ARRAY_SIZE(gtwx5715_devices));
 }
 
 
 MACHINE_START(GTWX5715, "Gemtek GTWX5715 (Linksys WRV54G)")
-        MAINTAINER("George Joseph")
-        BOOT_MEM(PHYS_OFFSET, IXP4XX_UART2_BASE_PHYS,
-                IXP4XX_UART2_BASE_VIRT)
-        MAPIO(gtwx5715_map_io)
-        INITIRQ(ixp4xx_init_irq)
-		  .timer		= &ixp4xx_timer,
-        BOOT_PARAMS(0x0100)
-        INIT_MACHINE(gtwx5715_init)
+	/* Maintainer: George Joseph */
+	.map_io		= ixp4xx_map_io,
+	.init_early	= ixp4xx_init_early,
+	.init_irq	= ixp4xx_init_irq,
+	.init_time	= ixp4xx_timer_init,
+	.atag_offset	= 0x100,
+	.init_machine	= gtwx5715_init,
+#if defined(CONFIG_PCI)
+	.dma_zone_size	= SZ_64M,
+#endif
+	.restart	= ixp4xx_restart,
 MACHINE_END
 
 

@@ -1,5 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- * alpha/boot/head.S
+ * arch/alpha/kernel/head.S
  *
  * initial boot stuff.. At this point, the bootloader has already
  * switched into OSF/1 PAL-code, and loaded us at the correct address
@@ -7,14 +8,13 @@
  * the kernel global pointer and jump to the kernel entry-point.
  */
 
-#include <linux/config.h>
-#include <asm/system.h>
-#include <asm/asm_offsets.h>
+#include <linux/init.h>
+#include <asm/asm-offsets.h>
+#include <asm/pal.h>
+#include <asm/setup.h>
 
-.globl swapper_pg_dir
+__HEAD
 .globl _stext
-swapper_pg_dir=SWAPPER_PGD
-
 	.set noreorder
 	.globl	__start
 	.ent	__start

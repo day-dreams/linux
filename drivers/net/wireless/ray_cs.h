@@ -1,9 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* Raytheon wireless LAN PCMCIA card driver for Linux 
    A  PCMCIA client driver for the Raylink wireless network card
    Written by Corey Thomas
 */
 
-#ifndef RAYLINK_H
+#ifndef _RAY_CS_H_
+#define _RAY_CS_H_
 
 struct beacon_rx {
     struct mac_header mac;
@@ -25,16 +27,13 @@ struct beacon_rx {
 typedef struct ray_dev_t {
     int card_status;
     int authentication_state;
-    dev_node_t  node;
-    window_handle_t amem_handle;   /* handle to window for attribute memory  */
-    window_handle_t rmem_handle;   /* handle to window for rx buffer on card */
     void __iomem *sram;            /* pointer to beginning of shared RAM     */
     void __iomem *amem;            /* pointer to attribute mem window        */
     void __iomem *rmem;            /* pointer to receive buffer window       */
-    dev_link_t *finder;            /* pointer back to dev_link_t for card    */
+    struct pcmcia_device *finder;            /* pointer back to struct pcmcia_device for card    */
     struct timer_list timer;
-    long tx_ccs_lock;
-    long ccs_lock;
+    unsigned long tx_ccs_lock;
+    unsigned long ccs_lock;
     int   dl_param_ccs;
     union {
         struct b4_startup_params b4;
@@ -63,16 +62,13 @@ typedef struct ray_dev_t {
     UCHAR last_rsl;
     int beacon_rxed;
     struct beacon_rx last_bcn;
-#ifdef WIRELESS_EXT
     iw_stats	wstats;		/* Wireless specific stats */
-#endif
 #ifdef WIRELESS_SPY
-    int		spy_number;		/* Number of addresses to spy */
-    mac_addr	spy_address[IW_MAX_SPY + 1];	/* The addresses to spy */
-    iw_qual	spy_stat[IW_MAX_SPY + 1];	/* Statistics gathered */
+    struct iw_spy_data		spy_data;
+    struct iw_public_data	wireless_data;
 #endif	/* WIRELESS_SPY */
 
 } ray_dev_t;
 /*****************************************************************************/
 
-#endif /* RAYLINK_H */
+#endif /* _RAY_CS_H_ */

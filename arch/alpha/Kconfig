@@ -1,10 +1,32 @@
-#
-# For a description of the syntax of this configuration file,
-# see Documentation/kbuild/kconfig-language.txt.
-#
+# SPDX-License-Identifier: GPL-2.0
 config ALPHA
 	bool
 	default y
+	select ARCH_MIGHT_HAVE_PC_PARPORT
+	select ARCH_MIGHT_HAVE_PC_SERIO
+	select ARCH_USE_CMPXCHG_LOCKREF
+	select HAVE_AOUT
+	select HAVE_IDE
+	select HAVE_OPROFILE
+	select HAVE_PCSPKR_PLATFORM
+	select HAVE_PERF_EVENTS
+	select VIRT_TO_BUS
+	select GENERIC_IRQ_PROBE
+	select AUTO_IRQ_AFFINITY if SMP
+	select GENERIC_IRQ_SHOW
+	select ARCH_WANT_IPC_PARSE_VERSION
+	select ARCH_HAVE_NMI_SAFE_CMPXCHG
+	select AUDIT_ARCH
+	select GENERIC_CLOCKEVENTS
+	select GENERIC_SMP_IDLE_THREAD
+	select GENERIC_STRNCPY_FROM_USER
+	select GENERIC_STRNLEN_USER
+	select HAVE_ARCH_AUDITSYSCALL
+	select HAVE_MOD_ARCH_SPECIFIC
+	select MODULES_USE_ELF_RELA
+	select ODD_RT_SIGACTION
+	select OLD_SIGSUSPEND
+	select CPU_NO_EFFICIENT_FFS if !ALPHA_EV67
 	help
 	  The Alpha is a 64-bit general-purpose processor designed and
 	  marketed by the Digital Equipment Corporation of blessed memory,
@@ -18,9 +40,6 @@ config MMU
 	bool
 	default y
 
-config UID16
-	bool
-
 config RWSEM_GENERIC_SPINLOCK
 	bool
 
@@ -28,20 +47,44 @@ config RWSEM_XCHGADD_ALGORITHM
 	bool
 	default y
 
+config ARCH_HAS_ILOG2_U32
+	bool
+	default n
+
+config ARCH_HAS_ILOG2_U64
+	bool
+	default n
+
 config GENERIC_CALIBRATE_DELAY
 	bool
 	default y
+
+config ZONE_DMA
+	bool
+	default y
+
+config ARCH_DMA_ADDR_T_64BIT
+	def_bool y
+
+config NEED_DMA_MAP_STATE
+       def_bool y
+
+config NEED_SG_DMA_LENGTH
+	def_bool y
 
 config GENERIC_ISA_DMA
 	bool
 	default y
 
-config GENERIC_IOMAP
-	bool
-	default n
+config PGTABLE_LEVELS
+	int
+	default 3
 
 source "init/Kconfig"
+source "kernel/Kconfig.freezer"
 
+config AUDIT_ARCH
+	bool
 
 menu "System setup"
 
@@ -57,22 +100,20 @@ choice
 	  check out the Linux/Alpha FAQ, accessible on the WWW from
 	  <http://www.alphalinux.org/>. In summary:
 
-	  Alcor/Alpha-XLT     AS 600
+	  Alcor/Alpha-XLT     AS 600, AS 500, XL-300, XL-366
 	  Alpha-XL            XL-233, XL-266
 	  AlphaBook1          Alpha laptop
 	  Avanti              AS 200, AS 205, AS 250, AS 255, AS 300, AS 400
 	  Cabriolet           AlphaPC64, AlphaPCI64
-	  DP264               DP264
+	  DP264               DP264 / DS20 / ES40 / DS10 / DS10L
 	  EB164               EB164 21164 evaluation board
 	  EB64+               EB64+ 21064 evaluation board
 	  EB66                EB66 21066 evaluation board
 	  EB66+               EB66+ 21066 evaluation board
-	  Jensen              DECpc 150, DEC 2000 model 300,
-	  DEC 2000 model 500
+	  Jensen              DECpc 150, DEC 2000 models 300, 500
 	  LX164               AlphaPC164-LX
 	  Lynx                AS 2100A
-	  Miata               Personal Workstation 433a, 433au, 500a,
-	  500au, 600a, or 600au
+	  Miata               Personal Workstation 433/500/600 a/au
 	  Marvel              AlphaServer ES47 / ES80 / GS1280
 	  Mikasa              AS 1000
 	  Noname              AXPpci33, UDB (Multia)
@@ -82,15 +123,16 @@ choice
 	  Ruffian             RPX164-2, AlphaPC164-UX, AlphaPC164-BX
 	  SX164               AlphaPC164-SX
 	  Sable               AS 2000, AS 2100
-	  Shark		      DS 20L
-	  Takara              Takara
-	  Titan               AlphaServer ES45 / DS25
+	  Shark               DS 20L
+	  Takara              Takara (OEM)
+	  Titan               AlphaServer ES45 / DS25 / DS15
 	  Wildfire            AlphaServer GS 40/80/160/320
 
 	  If you don't know what to do, choose "generic".
 
 config ALPHA_GENERIC
 	bool "Generic"
+	depends on TTY
 	help
 	  A generic kernel will run on all supported Alpha hardware.
 
@@ -167,6 +209,7 @@ config ALPHA_EIGER
 
 config ALPHA_JENSEN
 	bool "Jensen"
+	depends on BROKEN
 	help
 	  DEC PC 150 AXP (aka Jensen): This is a very old Digital system - one
 	  of the first-generation Alpha systems. A number of these systems
@@ -195,8 +238,7 @@ config ALPHA_MIATA
 	bool "Miata"
 	help
 	  The Digital PersonalWorkStation (PWS 433a, 433au, 500a, 500au, 600a,
-	  or 600au).  There is an Installation HOWTO for this hardware at
-	  <http://eijk.homelinux.org/~stefan/miata.html>.
+	  or 600au).
 
 config ALPHA_MIKASA
 	bool "Mikasa"
@@ -280,9 +322,14 @@ config ISA
 	  (MCA) or VESA.  ISA is an older system, now being displaced by PCI;
 	  newer boards don't support it.  If you have ISA, say Y, otherwise N.
 
+config ISA_DMA_API
+	bool
+	default y
+
 config PCI
 	bool
 	depends on !ALPHA_JENSEN
+	select GENERIC_PCI_IOMAP
 	default y
 	help
 	  Find out whether you have a PCI motherboard. PCI is the name of a
@@ -290,19 +337,15 @@ config PCI
 	  your box. Other bus systems are ISA, EISA, MicroChannel (MCA) or
 	  VESA. If you have PCI, say Y, otherwise N.
 
-	  The PCI-HOWTO, available from
-	  <http://www.tldp.org/docs.html#howto>, contains valuable
-	  information about which PCI hardware does work under Linux and which
-	  doesn't.
-
 config PCI_DOMAINS
 	bool
 	default y
 
-config ALPHA_CORE_AGP
-	bool
-	depends on ALPHA_GENERIC || ALPHA_TITAN || ALPHA_MARVEL
-	default y
+config PCI_SYSCALL
+	def_bool PCI
+
+config IOMMU_HELPER
+	def_bool PCI
 
 config ALPHA_NONAME
 	bool
@@ -363,7 +406,7 @@ config ALPHA_EV56
 
 config ALPHA_EV56
 	prompt "EV56 CPU (speed >= 333MHz)?"
-	depends on ALPHA_NORITAKE && ALPHA_PRIMO
+	depends on ALPHA_NORITAKE || ALPHA_PRIMO
 
 config ALPHA_EV56
 	prompt "EV56 CPU (speed >= 400MHz)?"
@@ -413,11 +456,6 @@ config ALPHA_EV67
 	  Is this a machine based on the EV67 core?  If in doubt, select N here
 	  and the machine will be treated as an EV6.
 
-config ALPHA_EV7
-	bool
-	depends on ALPHA_MARVEL
-	default y
-
 config ALPHA_MCPCIA
 	bool
 	depends on ALPHA_RAWHIDE
@@ -433,6 +471,10 @@ config ALPHA_IRONGATE
 	depends on ALPHA_NAUTILUS
 	default y
 
+config GENERIC_HWEIGHT
+	bool
+	default y if !ALPHA_EV67
+
 config ALPHA_AVANTI
 	bool
 	depends on ALPHA_XL || ALPHA_AVANTI_CH
@@ -447,8 +489,32 @@ config ALPHA_BROKEN_IRQ_MASK
 	depends on ALPHA_GENERIC || ALPHA_PC164
 	default y
 
+config VGA_HOSE
+	bool
+	depends on VGA_CONSOLE && (ALPHA_GENERIC || ALPHA_TITAN || ALPHA_MARVEL || ALPHA_TSUNAMI)
+	default y
+	help
+	  Support VGA on an arbitrary hose; needed for several platforms
+	  which always have multiple hoses, and whose consoles support it.
+
+
+config ALPHA_QEMU
+	bool "Run under QEMU emulation"
+	depends on !ALPHA_GENERIC
+	---help---
+	  Assume the presence of special features supported by QEMU PALcode
+	  that reduce the overhead of system emulation.
+
+	  Generic kernels will auto-detect QEMU.  But when building a
+	  system-specific kernel, the assumption is that we want to
+	  eliminate as many runtime tests as possible.
+
+	  If unsure, say N.
+
+
 config ALPHA_SRM
 	bool "Use SRM as bootloader" if ALPHA_CABRIOLET || ALPHA_AVANTI_CH || ALPHA_EB64P || ALPHA_PC164 || ALPHA_TAKARA || ALPHA_EB164 || ALPHA_ALCOR || ALPHA_MIATA || ALPHA_LX164 || ALPHA_SX164 || ALPHA_NAUTILUS || ALPHA_NONAME
+	depends on TTY
 	default y if ALPHA_JENSEN || ALPHA_MIKASA || ALPHA_SABLE || ALPHA_LYNX || ALPHA_NORITAKE || ALPHA_DP264 || ALPHA_RAWHIDE || ALPHA_EIGER || ALPHA_WILDFIRE || ALPHA_TITAN || ALPHA_SHARK || ALPHA_MARVEL
 	---help---
 	  There are two different types of booting firmware on Alphas: SRM,
@@ -475,22 +541,25 @@ config EISA
 	depends on ALPHA_GENERIC || ALPHA_JENSEN || ALPHA_ALCOR || ALPHA_MIKASA || ALPHA_SABLE || ALPHA_LYNX || ALPHA_NORITAKE || ALPHA_RAWHIDE
 	default y
 
+config ARCH_MAY_HAVE_PC_FDC
+	def_bool y
+
 config SMP
 	bool "Symmetric multi-processing support"
 	depends on ALPHA_SABLE || ALPHA_LYNX || ALPHA_RAWHIDE || ALPHA_DP264 || ALPHA_WILDFIRE || ALPHA_TITAN || ALPHA_GENERIC || ALPHA_SHARK || ALPHA_MARVEL
 	---help---
 	  This enables support for systems with more than one CPU. If you have
-	  a system with only one CPU, like most personal computers, say N. If
-	  you have a system with more than one CPU, say Y.
+	  a system with only one CPU, say N. If you have a system with more
+	  than one CPU, say Y.
 
-	  If you say N here, the kernel will run on single and multiprocessor
+	  If you say N here, the kernel will run on uni- and multiprocessor
 	  machines, but will use only one CPU of a multiprocessor machine. If
 	  you say Y here, the kernel will run on many, but not all,
-	  singleprocessor machines. On a singleprocessor machine, the kernel
+	  uniprocessor machines. On a uniprocessor machine, the kernel
 	  will run faster if you say N here.
 
-	  See also the <file:Documentation/smp.txt>, and the SMP-HOWTO
-	  available at <http://www.tldp.org/docs.html#howto>.
+	  See also the SMP-HOWTO available at
+	  <http://www.tldp.org/docs.html#howto>.
 
 	  If you don't know what to do here, say N.
 
@@ -500,27 +569,61 @@ config HAVE_DEC_LOCK
 	default y
 
 config NR_CPUS
-	int "Maximum number of CPUs (2-64)"
-	range 2 64
+	int "Maximum number of CPUs (2-32)"
+	range 2 32
 	depends on SMP
-	default "64"
-
-config DISCONTIGMEM
-	bool "Discontiguous Memory Support (EXPERIMENTAL)"
-	depends on EXPERIMENTAL
+	default "32" if ALPHA_GENERIC || ALPHA_MARVEL
+	default "4" if !ALPHA_GENERIC && !ALPHA_MARVEL
 	help
-	  Say Y to upport efficient handling of discontiguous physical memory,
+	  MARVEL support can handle a maximum of 32 CPUs, all the others
+          with working support have a maximum of 4 CPUs.
+
+config ARCH_DISCONTIGMEM_ENABLE
+	bool "Discontiguous Memory Support"
+	help
+	  Say Y to support efficient handling of discontiguous physical memory,
 	  for architectures which are either NUMA (Non-Uniform Memory Access)
 	  or have huge holes in the physical address space for other reasons.
 	  See <file:Documentation/vm/numa> for more.
 
+source "mm/Kconfig"
+
 config NUMA
 	bool "NUMA Support (EXPERIMENTAL)"
-	depends on DISCONTIGMEM
+	depends on DISCONTIGMEM && BROKEN
 	help
 	  Say Y to compile the kernel to support NUMA (Non-Uniform Memory
 	  Access).  This option is for configuring high-end multiprocessor
 	  server machines.  If in doubt, say N.
+
+config ALPHA_WTINT
+	bool "Use WTINT" if ALPHA_SRM || ALPHA_GENERIC
+	default y if ALPHA_QEMU
+	default n if ALPHA_EV5 || ALPHA_EV56 || (ALPHA_EV4 && !ALPHA_LCA)
+	default n if !ALPHA_SRM && !ALPHA_GENERIC
+	default y if SMP
+	---help---
+	  The Wait for Interrupt (WTINT) PALcall attempts to place the CPU
+	  to sleep until the next interrupt.  This may reduce the power
+	  consumed, and the heat produced by the computer.  However, it has
+	  the side effect of making the cycle counter unreliable as a timing
+	  device across the sleep.
+
+	  For emulation under QEMU, definitely say Y here, as we have other
+	  mechanisms for measuring time than the cycle counter.
+
+	  For EV4 (but not LCA), EV5 and EV56 systems, or for systems running
+	  MILO, sleep mode is not supported so you might as well say N here.
+
+	  For SMP systems we cannot use the cycle counter for timing anyway,
+	  so you might as well say Y here.
+
+	  If unsure, say N.
+
+config NODES_SHIFT
+	int
+	default "7"
+	depends on NEED_MULTIPLE_NODES
 
 # LARGE_VMALLOC is racy, if you *really* need it then fix it first
 config ALPHA_LARGE_VMALLOC
@@ -558,6 +661,43 @@ config VERBOSE_MCHECK_ON
 
 	  Take the default (1) unless you want more control or more info.
 
+choice
+	prompt "Timer interrupt frequency (HZ)?"
+	default HZ_128 if ALPHA_QEMU
+	default HZ_1200 if ALPHA_RAWHIDE
+	default HZ_1024
+	---help---
+	  The frequency at which timer interrupts occur.  A high frequency
+	  minimizes latency, whereas a low frequency minimizes overhead of
+	  process accounting.  The later effect is especially significant
+	  when being run under QEMU.
+
+	  Note that some Alpha hardware cannot change the interrupt frequency
+	  of the timer.  If unsure, say 1024 (or 1200 for Rawhide).
+
+	config HZ_32
+		bool "32 Hz"
+	config HZ_64
+		bool "64 Hz"
+	config HZ_128
+		bool "128 Hz"
+	config HZ_256
+		bool "256 Hz"
+	config HZ_1024
+		bool "1024 Hz"
+	config HZ_1200
+		bool "1200 Hz"
+endchoice
+
+config HZ
+	int 
+	default 32 if HZ_32
+	default 64 if HZ_64
+	default 128 if HZ_128
+	default 256 if HZ_256
+	default 1200 if HZ_1200
+	default 1024
+
 source "drivers/pci/Kconfig"
 source "drivers/eisa/Kconfig"
 
@@ -590,13 +730,20 @@ source "fs/Kconfig.binfmt"
 
 endmenu
 
+source "net/Kconfig"
+
 source "drivers/Kconfig"
 
 source "fs/Kconfig"
 
-source "arch/alpha/oprofile/Kconfig"
-
 source "arch/alpha/Kconfig.debug"
+
+# DUMMY_CONSOLE may be defined in drivers/video/console/Kconfig
+# but we also need it if VGA_HOSE is set
+config DUMMY_CONSOLE
+	bool
+	depends on VGA_HOSE
+	default y
 
 source "security/Kconfig"
 

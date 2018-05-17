@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 obj-$(CONFIG_OPROFILE) += oprofile.o
 
 DRIVER_OBJS = $(addprefix ../../../drivers/oprofile/, \
@@ -6,6 +7,8 @@ DRIVER_OBJS = $(addprefix ../../../drivers/oprofile/, \
 		oprofilefs.o oprofile_stats.o \
 		timer_int.o )
 
-oprofile-y				:= $(DRIVER_OBJS) init.o
-oprofile-$(CONFIG_CPU_XSCALE)		+= common.o op_model_xscale.o
+ifeq ($(CONFIG_HW_PERF_EVENTS),y)
+DRIVER_OBJS += $(addprefix ../../../drivers/oprofile/, oprofile_perf.o)
+endif
 
+oprofile-y				:= $(DRIVER_OBJS) common.o

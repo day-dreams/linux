@@ -1,10 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *	$Header: /cvsroot/osst/Driver/osst.h,v 1.16 2005/01/01 21:13:35 wriede Exp $
  */
 
 #include <asm/byteorder.h>
-#include <linux/config.h>
 #include <linux/completion.h>
+#include <linux/mutex.h>
 
 /*	FIXME - rename and use the following two types or delete them!
  *              and the types really should go to st.h anyway...
@@ -289,11 +290,11 @@ typedef struct {
 #else
 #error "Please fix <asm/byteorder.h>"
 #endif
-        u16             max_speed;              /* Maximum speed supported in KBps */
+        __be16          max_speed;              /* Maximum speed supported in KBps */
         u8              reserved10, reserved11;
-        u16             ctl;                    /* Continuous Transfer Limit in blocks */
-        u16             speed;                  /* Current Speed, in KBps */
-        u16             buffer_size;            /* Buffer Size, in 512 bytes */
+        __be16          ctl;                    /* Continuous Transfer Limit in blocks */
+        __be16          speed;                  /* Current Speed, in KBps */
+        __be16          buffer_size;            /* Buffer Size, in 512 bytes */
         u8              reserved18, reserved19;
 } osst_capabilities_page_t;
 
@@ -353,8 +354,8 @@ typedef struct {
 	u8		reserved2;
 	u8		density;
 	u8		reserved3,reserved4;
-	u16		segtrk;
-	u16		trks;
+	__be16		segtrk;
+	__be16		trks;
 	u8		reserved5,reserved6,reserved7,reserved8,reserved9,reserved10;
 } osst_tape_paramtr_page_t;
 
@@ -370,18 +371,18 @@ typedef struct {
 typedef struct os_partition_s {
         __u8    partition_num;
         __u8    par_desc_ver;
-        __u16   wrt_pass_cntr;
-        __u32   first_frame_ppos;
-        __u32   last_frame_ppos;
-        __u32   eod_frame_ppos;
+        __be16  wrt_pass_cntr;
+        __be32  first_frame_ppos;
+        __be32  last_frame_ppos;
+        __be32  eod_frame_ppos;
 } os_partition_t;
 
 /*
  * DAT entry
  */
 typedef struct os_dat_entry_s {
-        __u32   blk_sz;
-        __u16   blk_cnt;
+        __be32  blk_sz;
+        __be16  blk_cnt;
         __u8    flags;
         __u8    reserved;
 } os_dat_entry_t;
@@ -413,23 +414,23 @@ typedef struct os_dat_s {
  * AUX
  */
 typedef struct os_aux_s {
-        __u32           format_id;              /* hardware compability AUX is based on */
+        __be32          format_id;              /* hardware compatibility AUX is based on */
         char            application_sig[4];     /* driver used to write this media */
-        __u32           hdwr;                   /* reserved */
-        __u32           update_frame_cntr;      /* for configuration frame */
+        __be32          hdwr;                   /* reserved */
+        __be32          update_frame_cntr;      /* for configuration frame */
         __u8            frame_type;
         __u8            frame_type_reserved;
         __u8            reserved_18_19[2];
         os_partition_t  partition;
         __u8            reserved_36_43[8];
-        __u32           frame_seq_num;
-        __u32           logical_blk_num_high;
-        __u32           logical_blk_num;
+        __be32          frame_seq_num;
+        __be32          logical_blk_num_high;
+        __be32          logical_blk_num;
         os_dat_t        dat;
         __u8            reserved188_191[4];
-        __u32           filemark_cnt;
-        __u32           phys_fm;
-        __u32           last_mark_ppos;
+        __be32          filemark_cnt;
+        __be32          phys_fm;
+        __be32          last_mark_ppos;
         __u8            reserved204_223[20];
 
         /*
@@ -437,8 +438,8 @@ typedef struct os_aux_s {
          *
          * Linux specific fields:
          */
-         __u32          next_mark_ppos;         /* when known, points to next marker */
-	 __u32		last_mark_lbn;		/* storing log_blk_num of last mark is extends ADR spec */
+         __be32         next_mark_ppos;         /* when known, points to next marker */
+	 __be32		last_mark_lbn;		/* storing log_blk_num of last mark is extends ADR spec */
          __u8           linux_specific[24];
 
         __u8            reserved_256_511[256];
@@ -451,19 +452,19 @@ typedef struct os_fm_tab_s {
 	__u8		reserved_1;
 	__u8		fm_tab_ent_sz;
 	__u8		reserved_3;
-	__u16		fm_tab_ent_cnt;
+	__be16		fm_tab_ent_cnt;
 	__u8		reserved6_15[10];
-	__u32		fm_tab_ent[OS_FM_TAB_MAX];
+	__be32		fm_tab_ent[OS_FM_TAB_MAX];
 } os_fm_tab_t;
 
 typedef struct os_ext_trk_ey_s {
 	__u8		et_part_num;
 	__u8		fmt;
-	__u16		fm_tab_off;
+	__be16		fm_tab_off;
 	__u8		reserved4_7[4];
-	__u32		last_hlb_hi;
-	__u32		last_hlb;
-	__u32		last_pp;
+	__be32		last_hlb_hi;
+	__be32		last_hlb;
+	__be32		last_pp;
 	__u8		reserved20_31[12];
 } os_ext_trk_ey_t;
 
@@ -480,17 +481,17 @@ typedef struct os_header_s {
         char            ident_str[8];
         __u8            major_rev;
         __u8            minor_rev;
-	__u16		ext_trk_tb_off;
+	__be16		ext_trk_tb_off;
         __u8            reserved12_15[4];
         __u8            pt_par_num;
         __u8            pt_reserved1_3[3];
         os_partition_t  partition[16];
-	__u32		cfg_col_width;
-	__u32		dat_col_width;
-	__u32		qfa_col_width;
+	__be32		cfg_col_width;
+	__be32		dat_col_width;
+	__be32		qfa_col_width;
 	__u8		cartridge[16];
 	__u8		reserved304_511[208];
-	__u32		old_filemark_list[16680/4];		/* in ADR 1.4 __u8 track_table[16680] */
+	__be32		old_filemark_list[16680/4];		/* in ADR 1.4 __u8 track_table[16680] */
 	os_ext_trk_tb_t	ext_track_tb;
 	__u8		reserved17272_17735[464];
 	os_fm_tab_t	dat_fm_tab;
@@ -518,7 +519,9 @@ struct osst_buffer {
   int writing;
   int midlevel_result;
   int syscall_result;
-  struct scsi_request *last_SRpnt;
+  struct osst_request *last_SRpnt;
+  struct st_cmdstatus cmdstat;
+  struct rq_map_data map_data;
   unsigned char *b_data;
   os_aux_t *aux;               /* onstream AUX structure at end of each block     */
   unsigned short use_sg;       /* zero or number of s/g segments for this adapter */
@@ -532,7 +535,7 @@ struct osst_tape {
   struct scsi_driver *driver;
   unsigned capacity;
   struct scsi_device *device;
-  struct semaphore lock;       /* for serialization */
+  struct mutex lock;           /* for serialization */
   struct completion wait;      /* for SCSI commands */
   struct osst_buffer * buffer;
 
@@ -625,6 +628,16 @@ struct osst_tape {
 #endif
   struct gendisk *drive;
 } ;
+
+/* scsi tape command */
+struct osst_request {
+	unsigned char cmd[MAX_COMMAND_SIZE];
+	unsigned char sense[SCSI_SENSE_BUFFERSIZE];
+	int result;
+	struct osst_tape *stp;
+	struct completion *waiting;
+	struct bio *bio;
+};
 
 /* Values of write_type */
 #define OS_WRITE_DATA      0

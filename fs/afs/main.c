@@ -1,6 +1,6 @@
-/* main.c: AFS client file system
+/* AFS client file system
  *
- * Copyright (C) 2002 Red Hat, Inc. All Rights Reserved.
+ * Copyright (C) 2002,5 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
  *
  * This program is free software; you can redistribute it and/or
@@ -12,151 +12,162 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
-#include <linux/sched.h>
 #include <linux/completion.h>
-#include <rxrpc/rxrpc.h>
-#include <rxrpc/transport.h>
-#include <rxrpc/call.h>
-#include <rxrpc/peer.h>
-#include "cache.h"
-#include "cell.h"
-#include "server.h"
-#include "fsclient.h"
-#include "cmservice.h"
-#include "kafstimod.h"
-#include "kafsasyncd.h"
+#include <linux/sched.h>
+#include <linux/random.h>
+#define CREATE_TRACE_POINTS
 #include "internal.h"
-
-struct rxrpc_transport *afs_transport;
-
-static int afs_init(void);
-static void afs_exit(void);
-static int afs_adding_peer(struct rxrpc_peer *peer);
-static void afs_discarding_peer(struct rxrpc_peer *peer);
-
-/* XXX late_initcall is kludgy, but the only alternative seems to create
- * a transport upon the first mount, which is worse. Or is it?
- */
-/* module_init(afs_init); */
-late_initcall(afs_init);	/* must be called after net/ to create socket */
-
-module_exit(afs_exit);
 
 MODULE_DESCRIPTION("AFS Client File System");
 MODULE_AUTHOR("Red Hat, Inc.");
 MODULE_LICENSE("GPL");
+
+unsigned afs_debug;
+module_param_named(debug, afs_debug, uint, S_IWUSR | S_IRUGO);
+MODULE_PARM_DESC(debug, "AFS debugging mask");
 
 static char *rootcell;
 
 module_param(rootcell, charp, 0);
 MODULE_PARM_DESC(rootcell, "root AFS cell name and VL server IP addr list");
 
+struct workqueue_struct *afs_wq;
+struct afs_net __afs_net;
 
-static struct rxrpc_peer_ops afs_peer_ops = {
-	.adding		= afs_adding_peer,
-	.discarding	= afs_discarding_peer,
-};
+/*
+ * Initialise an AFS network namespace record.
+ */
+static int __net_init afs_net_init(struct afs_net *net)
+{
+	int ret;
 
-struct list_head afs_cb_hash_tbl[AFS_CB_HASH_COUNT];
-DEFINE_SPINLOCK(afs_cb_hash_lock);
+	net->live = true;
+	generate_random_uuid((unsigned char *)&net->uuid);
 
-#ifdef AFS_CACHING_SUPPORT
-static struct cachefs_netfs_operations afs_cache_ops = {
-	.get_page_cookie	= afs_cache_get_page_cookie,
-};
+	INIT_WORK(&net->charge_preallocation_work, afs_charge_preallocation);
+	mutex_init(&net->socket_mutex);
 
-struct cachefs_netfs afs_cache_netfs = {
-	.name			= "afs",
-	.version		= 0,
-	.ops			= &afs_cache_ops,
-};
-#endif
+	net->cells = RB_ROOT;
+	seqlock_init(&net->cells_lock);
+	INIT_WORK(&net->cells_manager, afs_manage_cells);
+	timer_setup(&net->cells_timer, afs_cells_timer, 0);
 
-/*****************************************************************************/
+	spin_lock_init(&net->proc_cells_lock);
+	INIT_LIST_HEAD(&net->proc_cells);
+
+	seqlock_init(&net->fs_lock);
+	net->fs_servers = RB_ROOT;
+	INIT_LIST_HEAD(&net->fs_updates);
+	INIT_HLIST_HEAD(&net->fs_proc);
+
+	INIT_HLIST_HEAD(&net->fs_addresses4);
+	INIT_HLIST_HEAD(&net->fs_addresses6);
+	seqlock_init(&net->fs_addr_lock);
+
+	INIT_WORK(&net->fs_manager, afs_manage_servers);
+	timer_setup(&net->fs_timer, afs_servers_timer, 0);
+
+	/* Register the /proc stuff */
+	ret = afs_proc_init(net);
+	if (ret < 0)
+		goto error_proc;
+
+	/* Initialise the cell DB */
+	ret = afs_cell_init(net, rootcell);
+	if (ret < 0)
+		goto error_cell_init;
+
+	/* Create the RxRPC transport */
+	ret = afs_open_socket(net);
+	if (ret < 0)
+		goto error_open_socket;
+
+	return 0;
+
+error_open_socket:
+	net->live = false;
+	afs_cell_purge(net);
+	afs_purge_servers(net);
+error_cell_init:
+	net->live = false;
+	afs_proc_cleanup(net);
+error_proc:
+	net->live = false;
+	return ret;
+}
+
+/*
+ * Clean up and destroy an AFS network namespace record.
+ */
+static void __net_exit afs_net_exit(struct afs_net *net)
+{
+	net->live = false;
+	afs_cell_purge(net);
+	afs_purge_servers(net);
+	afs_close_socket(net);
+	afs_proc_cleanup(net);
+}
+
 /*
  * initialise the AFS client FS module
  */
-static int afs_init(void)
+static int __init afs_init(void)
 {
-	int loop, ret;
+	int ret = -ENOMEM;
 
 	printk(KERN_INFO "kAFS: Red Hat AFS client v0.1 registering.\n");
 
-	/* initialise the callback hash table */
-	spin_lock_init(&afs_cb_hash_lock);
-	for (loop = AFS_CB_HASH_COUNT - 1; loop >= 0; loop--)
-		INIT_LIST_HEAD(&afs_cb_hash_tbl[loop]);
+	afs_wq = alloc_workqueue("afs", 0, 0);
+	if (!afs_wq)
+		goto error_afs_wq;
+	afs_async_calls = alloc_workqueue("kafsd", WQ_MEM_RECLAIM, 0);
+	if (!afs_async_calls)
+		goto error_async;
+	afs_lock_manager = alloc_workqueue("kafs_lockd", WQ_MEM_RECLAIM, 0);
+	if (!afs_lock_manager)
+		goto error_lockmgr;
 
-	/* register the /proc stuff */
-	ret = afs_proc_init();
-	if (ret < 0)
-		return ret;
-
-#ifdef AFS_CACHING_SUPPORT
+#ifdef CONFIG_AFS_FSCACHE
 	/* we want to be able to cache */
-	ret = cachefs_register_netfs(&afs_cache_netfs,
-				     &afs_cache_cell_index_def);
-	if (ret < 0)
-		goto error;
-#endif
-
-#ifdef CONFIG_KEYS_TURNED_OFF
-	ret = afs_key_register();
+	ret = fscache_register_netfs(&afs_cache_netfs);
 	if (ret < 0)
 		goto error_cache;
 #endif
 
-	/* initialise the cell DB */
-	ret = afs_cell_init(rootcell);
+	ret = afs_net_init(&__afs_net);
 	if (ret < 0)
-		goto error_keys;
-
-	/* start the timeout daemon */
-	ret = afs_kafstimod_start();
-	if (ret < 0)
-		goto error_keys;
-
-	/* start the async operation daemon */
-	ret = afs_kafsasyncd_start();
-	if (ret < 0)
-		goto error_kafstimod;
-
-	/* create the RxRPC transport */
-	ret = rxrpc_create_transport(7001, &afs_transport);
-	if (ret < 0)
-		goto error_kafsasyncd;
-
-	afs_transport->peer_ops = &afs_peer_ops;
+		goto error_net;
 
 	/* register the filesystems */
 	ret = afs_fs_init();
 	if (ret < 0)
-		goto error_transport;
+		goto error_fs;
 
 	return ret;
 
- error_transport:
-	rxrpc_put_transport(afs_transport);
- error_kafsasyncd:
-	afs_kafsasyncd_stop();
- error_kafstimod:
-	afs_kafstimod_stop();
- error_keys:
-#ifdef CONFIG_KEYS_TURNED_OFF
-	afs_key_unregister();
- error_cache:
+error_fs:
+	afs_net_exit(&__afs_net);
+error_net:
+#ifdef CONFIG_AFS_FSCACHE
+	fscache_unregister_netfs(&afs_cache_netfs);
+error_cache:
 #endif
-#ifdef AFS_CACHING_SUPPORT
-	cachefs_unregister_netfs(&afs_cache_netfs);
- error:
-#endif
-	afs_cell_purge();
-	afs_proc_cleanup();
+	destroy_workqueue(afs_lock_manager);
+error_lockmgr:
+	destroy_workqueue(afs_async_calls);
+error_async:
+	destroy_workqueue(afs_wq);
+error_afs_wq:
+	rcu_barrier();
 	printk(KERN_ERR "kAFS: failed to register: %d\n", ret);
 	return ret;
-} /* end afs_init() */
+}
 
-/*****************************************************************************/
+/* XXX late_initcall is kludgy, but the only alternative seems to create
+ * a transport upon the first mount, which is worse. Or is it?
+ */
+late_initcall(afs_init);	/* must be called after net/ to create socket */
+
 /*
  * clean up on module removal
  */
@@ -165,125 +176,15 @@ static void __exit afs_exit(void)
 	printk(KERN_INFO "kAFS: Red Hat AFS client v0.1 unregistering.\n");
 
 	afs_fs_exit();
-	rxrpc_put_transport(afs_transport);
-	afs_kafstimod_stop();
-	afs_kafsasyncd_stop();
-	afs_cell_purge();
-#ifdef CONFIG_KEYS_TURNED_OFF
-	afs_key_unregister();
+	afs_net_exit(&__afs_net);
+#ifdef CONFIG_AFS_FSCACHE
+	fscache_unregister_netfs(&afs_cache_netfs);
 #endif
-#ifdef AFS_CACHING_SUPPORT
-	cachefs_unregister_netfs(&afs_cache_netfs);
-#endif
-	afs_proc_cleanup();
-
-} /* end afs_exit() */
-
-/*****************************************************************************/
-/*
- * notification that new peer record is being added
- * - called from krxsecd
- * - return an error to induce an abort
- * - mustn't sleep (caller holds an rwlock)
- */
-static int afs_adding_peer(struct rxrpc_peer *peer)
-{
-	struct afs_server *server;
-	int ret;
-
-	_debug("kAFS: Adding new peer %08x\n", ntohl(peer->addr.s_addr));
-
-	/* determine which server the peer resides in (if any) */
-	ret = afs_server_find_by_peer(peer, &server);
-	if (ret < 0)
-		return ret; /* none that we recognise, so abort */
-
-	_debug("Server %p{u=%d}\n", server, atomic_read(&server->usage));
-
-	_debug("Cell %p{u=%d}\n",
-	       server->cell, atomic_read(&server->cell->usage));
-
-	/* cross-point the structs under a global lock */
-	spin_lock(&afs_server_peer_lock);
-	peer->user = server;
-	server->peer = peer;
-	spin_unlock(&afs_server_peer_lock);
-
-	afs_put_server(server);
-
-	return 0;
-} /* end afs_adding_peer() */
-
-/*****************************************************************************/
-/*
- * notification that a peer record is being discarded
- * - called from krxiod or krxsecd
- */
-static void afs_discarding_peer(struct rxrpc_peer *peer)
-{
-	struct afs_server *server;
-
-	_enter("%p",peer);
-
-	_debug("Discarding peer %08x (rtt=%lu.%lumS)\n",
-	       ntohl(peer->addr.s_addr),
-	       (long) (peer->rtt / 1000),
-	       (long) (peer->rtt % 1000));
-
-	/* uncross-point the structs under a global lock */
-	spin_lock(&afs_server_peer_lock);
-	server = peer->user;
-	if (server) {
-		peer->user = NULL;
-		server->peer = NULL;
-	}
-	spin_unlock(&afs_server_peer_lock);
-
-	_leave("");
-
-} /* end afs_discarding_peer() */
-
-/*****************************************************************************/
-/*
- * clear the dead space between task_struct and kernel stack
- * - called by supplying -finstrument-functions to gcc
- */
-#if 0
-void __cyg_profile_func_enter (void *this_fn, void *call_site)
-__attribute__((no_instrument_function));
-
-void __cyg_profile_func_enter (void *this_fn, void *call_site)
-{
-       asm volatile("  movl    %%esp,%%edi     \n"
-                    "  andl    %0,%%edi        \n"
-                    "  addl    %1,%%edi        \n"
-                    "  movl    %%esp,%%ecx     \n"
-                    "  subl    %%edi,%%ecx     \n"
-                    "  shrl    $2,%%ecx        \n"
-                    "  movl    $0xedededed,%%eax     \n"
-                    "  rep stosl               \n"
-                    :
-                    : "i"(~(THREAD_SIZE - 1)), "i"(sizeof(struct thread_info))
-                    : "eax", "ecx", "edi", "memory", "cc"
-                    );
+	destroy_workqueue(afs_lock_manager);
+	destroy_workqueue(afs_async_calls);
+	destroy_workqueue(afs_wq);
+	afs_clean_up_permit_cache();
+	rcu_barrier();
 }
 
-void __cyg_profile_func_exit(void *this_fn, void *call_site)
-__attribute__((no_instrument_function));
-
-void __cyg_profile_func_exit(void *this_fn, void *call_site)
-{
-       asm volatile("  movl    %%esp,%%edi     \n"
-                    "  andl    %0,%%edi        \n"
-                    "  addl    %1,%%edi        \n"
-                    "  movl    %%esp,%%ecx     \n"
-                    "  subl    %%edi,%%ecx     \n"
-                    "  shrl    $2,%%ecx        \n"
-                    "  movl    $0xdadadada,%%eax     \n"
-                    "  rep stosl               \n"
-                    :
-                    : "i"(~(THREAD_SIZE - 1)), "i"(sizeof(struct thread_info))
-                    : "eax", "ecx", "edi", "memory", "cc"
-                    );
-}
-#endif
+module_exit(afs_exit);

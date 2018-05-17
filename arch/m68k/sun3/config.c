@@ -8,55 +8,47 @@
  * for more details.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/seq_file.h>
 #include <linux/tty.h>
 #include <linux/console.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
+#include <linux/platform_device.h>
 
 #include <asm/oplib.h>
 #include <asm/setup.h>
 #include <asm/contregs.h>
 #include <asm/movs.h>
 #include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 #include <asm/sun3-head.h>
 #include <asm/sun3mmu.h>
-#include <asm/rtc.h>
 #include <asm/machdep.h>
+#include <asm/machines.h>
+#include <asm/idprom.h>
 #include <asm/intersil.h>
 #include <asm/irq.h>
+#include <asm/sections.h>
 #include <asm/segment.h>
 #include <asm/sun3ints.h>
 
-extern char _text, _end;
-
 char sun3_reserved_pmeg[SUN3_PMEGS_NUM];
 
-extern unsigned long sun3_gettimeoffset(void);
-extern int show_sun3_interrupts (struct seq_file *, void *);
-extern void sun3_sched_init(irqreturn_t (*handler)(int, void *, struct pt_regs *));
+extern u32 sun3_gettimeoffset(void);
+static void sun3_sched_init(irq_handler_t handler);
 extern void sun3_get_model (char* model);
-extern void idprom_init (void);
 extern int sun3_hwclk(int set, struct rtc_time *t);
 
 volatile char* clock_va;
-extern volatile unsigned char* sun3_intreg;
 extern unsigned long availmem;
 unsigned long num_pages;
 
-static int sun3_get_hardware_list(char *buffer)
+static void sun3_get_hardware_list(struct seq_file *m)
 {
-
-	int len = 0;
-
-	len += sprintf(buffer + len, "PROM Revision:\t%s\n",
-		       romvec->pv_monid);
-
-	return len;
-
+	seq_printf(m, "PROM Revision:\t%s\n", romvec->pv_monid);
 }
 
 void __init sun3_init(void)
@@ -115,7 +107,8 @@ static void sun3_halt (void)
 
 /* sun3 bootmem allocation */
 
-void __init sun3_bootmem_alloc(unsigned long memory_start, unsigned long memory_end)
+static void __init sun3_bootmem_alloc(unsigned long memory_start,
+				      unsigned long memory_end)
 {
 	unsigned long start_page;
 
@@ -124,12 +117,13 @@ void __init sun3_bootmem_alloc(unsigned long memory_start, unsigned long memory_
 	memory_end = memory_end & PAGE_MASK;
 
 	start_page = __pa(memory_start) >> PAGE_SHIFT;
-	num_pages = __pa(memory_end) >> PAGE_SHIFT;
+	max_pfn = num_pages = __pa(memory_end) >> PAGE_SHIFT;
 
 	high_memory = (void *)memory_end;
 	availmem = memory_start;
 
-	availmem += init_bootmem_node(NODE_DATA(0), start_page, 0, num_pages);
+	m68k_setup_node(0);
+	availmem += init_bootmem(start_page, num_pages);
 	availmem = (availmem + (PAGE_SIZE-1)) & PAGE_MASK;
 
 	free_bootmem(__pa(availmem), memory_end - (availmem));
@@ -140,31 +134,21 @@ void __init config_sun3(void)
 {
 	unsigned long memory_start, memory_end;
 
-	printk("ARCH: SUN3\n");
+	pr_info("ARCH: SUN3\n");
 	idprom_init();
 
 	/* Subtract kernel memory from available memory */
 
         mach_sched_init      =  sun3_sched_init;
         mach_init_IRQ        =  sun3_init_IRQ;
-        mach_default_handler = &sun3_default_handler;
-        mach_request_irq     =  sun3_request_irq;
-        mach_free_irq        =  sun3_free_irq;
-	enable_irq	     =  sun3_enable_irq;
-        disable_irq	     =  sun3_disable_irq;
-	mach_process_int     =  sun3_process_int;
-        mach_get_irq_list    =  show_sun3_interrupts;
         mach_reset           =  sun3_reboot;
-	mach_gettimeoffset   =  sun3_gettimeoffset;
+	arch_gettimeoffset   =  sun3_gettimeoffset;
 	mach_get_model	     =  sun3_get_model;
 	mach_hwclk           =  sun3_hwclk;
 	mach_halt	     =  sun3_halt;
 	mach_get_hardware_list = sun3_get_hardware_list;
-#if defined(CONFIG_DUMMY_CONSOLE)
-	conswitchp	     = &dummy_con;
-#endif
 
-	memory_start = ((((int)&_end) + 0x2000) & ~0x1fff);
+	memory_start = ((((unsigned long)_end) + 0x2000) & ~0x1fff);
 // PROM seems to want the last couple of physical pages. --m
 	memory_end   = *(romvec->pv_sun3mem) + PAGE_OFFSET - 2*PAGE_SIZE;
 
@@ -174,7 +158,7 @@ void __init config_sun3(void)
 	sun3_bootmem_alloc(memory_start, memory_end);
 }
 
-void __init sun3_sched_init(irqreturn_t (*timer_routine)(int, void *, struct pt_regs *))
+static void __init sun3_sched_init(irq_handler_t timer_routine)
 {
 	sun3_disable_interrupts();
         intersil_clock->cmd_reg=(INTERSIL_RUN|INTERSIL_INT_DISABLE|INTERSIL_24H_MODE);
@@ -186,3 +170,61 @@ void __init sun3_sched_init(irqreturn_t (*timer_routine)(int, void *, struct pt_
         intersil_clear();
 }
 
+#if IS_ENABLED(CONFIG_SUN3_SCSI)
+
+static const struct resource sun3_scsi_vme_rsrc[] __initconst = {
+	{
+		.flags = IORESOURCE_IRQ,
+		.start = SUN3_VEC_VMESCSI0,
+		.end   = SUN3_VEC_VMESCSI0,
+	}, {
+		.flags = IORESOURCE_MEM,
+		.start = 0xff200000,
+		.end   = 0xff200021,
+	}, {
+		.flags = IORESOURCE_IRQ,
+		.start = SUN3_VEC_VMESCSI1,
+		.end   = SUN3_VEC_VMESCSI1,
+	}, {
+		.flags = IORESOURCE_MEM,
+		.start = 0xff204000,
+		.end   = 0xff204021,
+	},
+};
+
+/*
+ * Int: level 2 autovector
+ * IO: type 1, base 0x00140000, 5 bits phys space: A<4..0>
+ */
+static const struct resource sun3_scsi_rsrc[] __initconst = {
+	{
+		.flags = IORESOURCE_IRQ,
+		.start = 2,
+		.end   = 2,
+	}, {
+		.flags = IORESOURCE_MEM,
+		.start = 0x00140000,
+		.end   = 0x0014001f,
+	},
+};
+
+int __init sun3_platform_init(void)
+{
+	switch (idprom->id_machtype) {
+	case SM_SUN3 | SM_3_160:
+	case SM_SUN3 | SM_3_260:
+		platform_device_register_simple("sun3_scsi_vme", -1,
+			sun3_scsi_vme_rsrc, ARRAY_SIZE(sun3_scsi_vme_rsrc));
+		break;
+	case SM_SUN3 | SM_3_50:
+	case SM_SUN3 | SM_3_60:
+		platform_device_register_simple("sun3_scsi", -1,
+			sun3_scsi_rsrc, ARRAY_SIZE(sun3_scsi_rsrc));
+		break;
+	}
+	return 0;
+}
+
+arch_initcall(sun3_platform_init);
+
+#endif

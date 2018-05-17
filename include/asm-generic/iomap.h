@@ -1,7 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __GENERIC_IO_H
 #define __GENERIC_IO_H
 
 #include <linux/linkage.h>
+#include <asm/byteorder.h>
 
 /*
  * These are the "generic" interfaces for doing new-style
@@ -24,13 +26,25 @@
  * in the low address range. Architectures for which this is not
  * true can't use this generic implementation.
  */
-extern unsigned int fastcall ioread8(void __iomem *);
-extern unsigned int fastcall ioread16(void __iomem *);
-extern unsigned int fastcall ioread32(void __iomem *);
+extern unsigned int ioread8(void __iomem *);
+extern unsigned int ioread16(void __iomem *);
+extern unsigned int ioread16be(void __iomem *);
+extern unsigned int ioread32(void __iomem *);
+extern unsigned int ioread32be(void __iomem *);
+#ifdef CONFIG_64BIT
+extern u64 ioread64(void __iomem *);
+extern u64 ioread64be(void __iomem *);
+#endif
 
-extern void fastcall iowrite8(u8, void __iomem *);
-extern void fastcall iowrite16(u16, void __iomem *);
-extern void fastcall iowrite32(u32, void __iomem *);
+extern void iowrite8(u8, void __iomem *);
+extern void iowrite16(u16, void __iomem *);
+extern void iowrite16be(u16, void __iomem *);
+extern void iowrite32(u32, void __iomem *);
+extern void iowrite32be(u32, void __iomem *);
+#ifdef CONFIG_64BIT
+extern void iowrite64(u64, void __iomem *);
+extern void iowrite64be(u64, void __iomem *);
+#endif
 
 /*
  * "string" versions of the above. Note that they
@@ -43,21 +57,38 @@ extern void fastcall iowrite32(u32, void __iomem *);
  * memory across multiple ports, use "memcpy_toio()"
  * and friends.
  */
-extern void fastcall ioread8_rep(void __iomem *port, void *buf, unsigned long count);
-extern void fastcall ioread16_rep(void __iomem *port, void *buf, unsigned long count);
-extern void fastcall ioread32_rep(void __iomem *port, void *buf, unsigned long count);
+extern void ioread8_rep(void __iomem *port, void *buf, unsigned long count);
+extern void ioread16_rep(void __iomem *port, void *buf, unsigned long count);
+extern void ioread32_rep(void __iomem *port, void *buf, unsigned long count);
 
-extern void fastcall iowrite8_rep(void __iomem *port, const void *buf, unsigned long count);
-extern void fastcall iowrite16_rep(void __iomem *port, const void *buf, unsigned long count);
-extern void fastcall iowrite32_rep(void __iomem *port, const void *buf, unsigned long count);
+extern void iowrite8_rep(void __iomem *port, const void *buf, unsigned long count);
+extern void iowrite16_rep(void __iomem *port, const void *buf, unsigned long count);
+extern void iowrite32_rep(void __iomem *port, const void *buf, unsigned long count);
 
+#ifdef CONFIG_HAS_IOPORT_MAP
 /* Create a virtual mapping cookie for an IO port range */
 extern void __iomem *ioport_map(unsigned long port, unsigned int nr);
 extern void ioport_unmap(void __iomem *);
+#endif
 
-/* Create a virtual mapping cookie for a PCI BAR (memory or IO) */
+#ifndef ARCH_HAS_IOREMAP_WC
+#define ioremap_wc ioremap_nocache
+#endif
+
+#ifndef ARCH_HAS_IOREMAP_WT
+#define ioremap_wt ioremap_nocache
+#endif
+
+#ifdef CONFIG_PCI
+/* Destroy a virtual mapping cookie for a PCI BAR (memory or IO) */
 struct pci_dev;
-extern void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long max);
 extern void pci_iounmap(struct pci_dev *dev, void __iomem *);
+#elif defined(CONFIG_GENERIC_IOMAP)
+struct pci_dev;
+static inline void pci_iounmap(struct pci_dev *dev, void __iomem *addr)
+{ }
+#endif
+
+#include <asm-generic/pci_iomap.h>
 
 #endif

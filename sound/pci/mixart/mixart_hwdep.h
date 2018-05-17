@@ -25,11 +25,21 @@
 
 #include <sound/hwdep.h>
 
+#ifndef readl_be
 #define readl_be(x) be32_to_cpu(__raw_readl(x))
-#define writel_be(data,addr) __raw_writel(cpu_to_be32(data),addr)
+#endif
 
+#ifndef writel_be
+#define writel_be(data,addr) __raw_writel(cpu_to_be32(data),addr)
+#endif
+
+#ifndef readl_le
 #define readl_le(x) le32_to_cpu(__raw_readl(x))
+#endif
+
+#ifndef writel_le
 #define writel_le(data,addr) __raw_writel(cpu_to_le32(data),addr)
+#endif
 
 #define MIXART_MEM(mgr,x)	((mgr)->mem[0].virt + (x))
 #define MIXART_REG(mgr,x)	((mgr)->mem[1].virt + (x))
@@ -140,6 +150,6 @@
 #define MIXART_OIDI                             0x008   /* 0000 0000 1000 */
 
 
-int snd_mixart_setup_firmware(mixart_mgr_t *mgr);
+int snd_mixart_setup_firmware(struct mixart_mgr *mgr);
 
 #endif /* __SOUND_MIXART_HWDEP_H */

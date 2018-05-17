@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *  Universal interface for Audio Codec '97
  *
  *  For more details look to AC '97 component specification revision 2.2
@@ -23,16 +23,17 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/mutex.h>
+#include <linux/export.h>
+
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/control.h>
 #include <sound/ac97_codec.h>
 #include <sound/asoundef.h>
-#include "ac97_patch.h"
 #include "ac97_id.h"
 #include "ac97_local.h"
 
@@ -170,7 +171,7 @@ static unsigned char get_slot_reg(struct ac97_pcm *pcm, unsigned short cidx,
 		return rate_cregs[slot - 3];
 }
 
-static int set_spdif_rate(ac97_t *ac97, unsigned short rate)
+static int set_spdif_rate(struct snd_ac97 *ac97, unsigned short rate)
 {
 	unsigned short old, bits, reg, mask;
 	unsigned int sbits;
@@ -206,7 +207,7 @@ static int set_spdif_rate(ac97_t *ac97, unsigned short rate)
 		mask = AC97_SC_SPSR_MASK;
 	}
 
-	down(&ac97->reg_mutex);
+	mutex_lock(&ac97->reg_mutex);
 	old = snd_ac97_read(ac97, reg) & mask;
 	if (old != bits) {
 		snd_ac97_update_bits_nolock(ac97, AC97_EXTENDED_STATUS, AC97_EA_SPDIF, 0);
@@ -231,7 +232,7 @@ static int set_spdif_rate(ac97_t *ac97, unsigned short rate)
 		ac97->spdif_status = sbits;
 	}
 	snd_ac97_update_bits_nolock(ac97, AC97_EXTENDED_STATUS, AC97_EA_SPDIF, AC97_EA_SPDIF);
-	up(&ac97->reg_mutex);
+	mutex_unlock(&ac97->reg_mutex);
 	return 0;
 }
 
@@ -252,9 +253,9 @@ static int set_spdif_rate(ac97_t *ac97, unsigned short rate)
  * AC97_SPDIF is accepted as a pseudo register to modify the SPDIF
  * status bits.
  *
- * Returns zero if successful, or a negative error code on failure.
+ * Return: Zero if successful, or a negative error code on failure.
  */
-int snd_ac97_set_rate(ac97_t *ac97, int reg, unsigned int rate)
+int snd_ac97_set_rate(struct snd_ac97 *ac97, int reg, unsigned int rate)
 {
 	int dbl;
 	unsigned int tmp;
@@ -267,6 +268,7 @@ int snd_ac97_set_rate(ac97_t *ac97, int reg, unsigned int rate)
 			return -EINVAL;
 	}
 
+	snd_ac97_update_power(ac97, reg, 1);
 	switch (reg) {
 	case AC97_PCM_MIC_ADC_RATE:
 		if ((ac97->regs[AC97_EXTENDED_STATUS] & AC97_EA_VRM) == 0)	/* MIC VRA */
@@ -303,10 +305,21 @@ int snd_ac97_set_rate(ac97_t *ac97, int reg, unsigned int rate)
 				     AC97_EA_DRA, dbl ? AC97_EA_DRA : 0);
 	snd_ac97_update(ac97, reg, tmp & 0xffff);
 	snd_ac97_read(ac97, reg);
+	if ((ac97->ext_id & AC97_EI_DRA) && reg == AC97_PCM_FRONT_DAC_RATE) {
+		/* Intel controllers require double rate data to be put in
+		 * slots 7+8
+		 */
+		snd_ac97_update_bits(ac97, AC97_GENERAL_PURPOSE,
+				     AC97_GP_DRSS_MASK,
+				     dbl ? AC97_GP_DRSS_78 : 0);
+		snd_ac97_read(ac97, AC97_GENERAL_PURPOSE);
+	}
 	return 0;
 }
 
-static unsigned short get_pslots(ac97_t *ac97, unsigned char *rate_table, unsigned short *spdif_slots)
+EXPORT_SYMBOL(snd_ac97_set_rate);
+
+static unsigned short get_pslots(struct snd_ac97 *ac97, unsigned char *rate_table, unsigned short *spdif_slots)
 {
 	if (!ac97_is_audio(ac97))
 		return 0;
@@ -381,7 +394,7 @@ static unsigned short get_pslots(ac97_t *ac97, unsigned char *rate_table, unsign
 	}
 }
 
-static unsigned short get_cslots(ac97_t *ac97)
+static unsigned short get_cslots(struct snd_ac97 *ac97)
 {
 	unsigned short slots;
 
@@ -427,8 +440,10 @@ static unsigned int get_rates(struct ac97_pcm *pcm, unsigned int cidx, unsigned 
  * It assigns available AC97 slots for given PCMs. If none or only
  * some slots are available, pcm->xxx.slots and pcm->xxx.rslots[] members
  * are reduced and might be zero.
+ *
+ * Return: Zero if successful, or a negative error code on failure.
  */
-int snd_ac97_pcm_assign(ac97_bus_t *bus,
+int snd_ac97_pcm_assign(struct snd_ac97_bus *bus,
 			unsigned short pcms_count,
 			const struct ac97_pcm *pcms)
 {
@@ -440,7 +455,7 @@ int snd_ac97_pcm_assign(ac97_bus_t *bus,
 	unsigned short tmp, slots;
 	unsigned short spdif_slots[4];
 	unsigned int rates;
-	ac97_t *codec;
+	struct snd_ac97 *codec;
 
 	rpcms = kcalloc(pcms_count, sizeof(struct ac97_pcm), GFP_KERNEL);
 	if (rpcms == NULL)
@@ -539,6 +554,8 @@ int snd_ac97_pcm_assign(ac97_bus_t *bus,
 	return 0;
 }
 
+EXPORT_SYMBOL(snd_ac97_pcm_assign);
+
 /**
  * snd_ac97_pcm_open - opens the given AC97 pcm
  * @pcm: the ac97 pcm instance
@@ -547,20 +564,21 @@ int snd_ac97_pcm_assign(ac97_bus_t *bus,
  * @slots: a subset of allocated slots (snd_ac97_pcm_assign) for this pcm
  *
  * It locks the specified slots and sets the given rate to AC97 registers.
+ *
+ * Return: Zero if successful, or a negative error code on failure.
  */
 int snd_ac97_pcm_open(struct ac97_pcm *pcm, unsigned int rate,
 		      enum ac97_pcm_cfg cfg, unsigned short slots)
 {
-	ac97_bus_t *bus;
+	struct snd_ac97_bus *bus;
 	int i, cidx, r, ok_flag;
-	unsigned int reg_ok = 0;
+	unsigned int reg_ok[4] = {0,0,0,0};
 	unsigned char reg;
 	int err = 0;
 
 	r = rate > 48000;
 	bus = pcm->bus;
 	if (cfg == AC97_PCM_CFG_SPDIF) {
-		int err;
 		for (cidx = 0; cidx < 4; cidx++)
 			if (bus->codec[cidx] && (bus->codec[cidx]->ext_id & AC97_EI_SPDIF)) {
 				err = set_spdif_rate(bus->codec[cidx], rate);
@@ -586,11 +604,14 @@ int snd_ac97_pcm_open(struct ac97_pcm *pcm, unsigned int rate,
 		}
 		if (!ok_flag) {
 			spin_unlock_irq(&pcm->bus->bus_lock);
-			snd_printk(KERN_ERR "cannot find configuration for AC97 slot %i\n", i);
+			dev_err(bus->card->dev,
+				"cannot find configuration for AC97 slot %i\n",
+				i);
 			err = -EAGAIN;
 			goto error;
 		}
 	}
+	pcm->cur_dbl = r;
 	spin_unlock_irq(&pcm->bus->bus_lock);
 	for (i = 3; i < 12; i++) {
 		if (!(slots & (1 << i)))
@@ -599,17 +620,22 @@ int snd_ac97_pcm_open(struct ac97_pcm *pcm, unsigned int rate,
 			if (pcm->r[r].rslots[cidx] & (1 << i)) {
 				reg = get_slot_reg(pcm, cidx, i, r);
 				if (reg == 0xff) {
-					snd_printk(KERN_ERR "invalid AC97 slot %i?\n", i);
+					dev_err(bus->card->dev,
+						"invalid AC97 slot %i?\n", i);
 					continue;
 				}
-				if (reg_ok & (1 << (reg - AC97_PCM_FRONT_DAC_RATE)))
+				if (reg_ok[cidx] & (1 << (reg - AC97_PCM_FRONT_DAC_RATE)))
 					continue;
-				//printk(KERN_DEBUG "setting ac97 reg 0x%x to rate %d\n", reg, rate);
+				dev_dbg(bus->card->dev,
+					"setting ac97 reg 0x%x to rate %d\n",
+					reg, rate);
 				err = snd_ac97_set_rate(pcm->r[r].codec[cidx], reg, rate);
 				if (err < 0)
-					snd_printk(KERN_ERR "error in snd_ac97_set_rate: cidx=%d, reg=0x%x, rate=%d, err=%d\n", cidx, reg, rate, err);
+					dev_err(bus->card->dev,
+						"error in snd_ac97_set_rate: cidx=%d, reg=0x%x, rate=%d, err=%d\n",
+						cidx, reg, rate, err);
 				else
-					reg_ok |= (1 << (reg - AC97_PCM_FRONT_DAC_RATE));
+					reg_ok[cidx] |= (1 << (reg - AC97_PCM_FRONT_DAC_RATE));
 			}
 		}
 	}
@@ -622,17 +648,36 @@ int snd_ac97_pcm_open(struct ac97_pcm *pcm, unsigned int rate,
 	return err;
 }
 
+EXPORT_SYMBOL(snd_ac97_pcm_open);
+
 /**
  * snd_ac97_pcm_close - closes the given AC97 pcm
  * @pcm: the ac97 pcm instance
  *
  * It frees the locked AC97 slots.
+ *
+ * Return: Zero.
  */
 int snd_ac97_pcm_close(struct ac97_pcm *pcm)
 {
-	ac97_bus_t *bus;
+	struct snd_ac97_bus *bus;
 	unsigned short slots = pcm->aslots;
 	int i, cidx;
+
+#ifdef CONFIG_SND_AC97_POWER_SAVE
+	int r = pcm->cur_dbl;
+	for (i = 3; i < 12; i++) {
+		if (!(slots & (1 << i)))
+			continue;
+		for (cidx = 0; cidx < 4; cidx++) {
+			if (pcm->r[r].rslots[cidx] & (1 << i)) {
+				int reg = get_slot_reg(pcm, cidx, i, r);
+				snd_ac97_update_power(pcm->r[r].codec[cidx],
+						      reg, 0);
+			}
+		}
+	}
+#endif
 
 	bus = pcm->bus;
 	spin_lock_irq(&pcm->bus->bus_lock);
@@ -643,35 +688,38 @@ int snd_ac97_pcm_close(struct ac97_pcm *pcm)
 			bus->used_slots[pcm->stream][cidx] &= ~(1 << i);
 	}
 	pcm->aslots = 0;
+	pcm->cur_dbl = 0;
 	spin_unlock_irq(&pcm->bus->bus_lock);
 	return 0;
 }
 
-static int double_rate_hw_constraint_rate(snd_pcm_hw_params_t *params,
-					  snd_pcm_hw_rule_t *rule)
+EXPORT_SYMBOL(snd_ac97_pcm_close);
+
+static int double_rate_hw_constraint_rate(struct snd_pcm_hw_params *params,
+					  struct snd_pcm_hw_rule *rule)
 {
-	snd_interval_t *channels = hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS);
+	struct snd_interval *channels = hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS);
 	if (channels->min > 2) {
-		static const snd_interval_t single_rates = {
+		static const struct snd_interval single_rates = {
 			.min = 1,
 			.max = 48000,
 		};
-		snd_interval_t *rate = hw_param_interval(params, SNDRV_PCM_HW_PARAM_RATE);
+		struct snd_interval *rate = hw_param_interval(params, SNDRV_PCM_HW_PARAM_RATE);
 		return snd_interval_refine(rate, &single_rates);
 	}
 	return 0;
 }
 
-static int double_rate_hw_constraint_channels(snd_pcm_hw_params_t *params,
-					      snd_pcm_hw_rule_t *rule)
+static int double_rate_hw_constraint_channels(struct snd_pcm_hw_params *params,
+					      struct snd_pcm_hw_rule *rule)
 {
-	snd_interval_t *rate = hw_param_interval(params, SNDRV_PCM_HW_PARAM_RATE);
+	struct snd_interval *rate = hw_param_interval(params, SNDRV_PCM_HW_PARAM_RATE);
 	if (rate->min > 48000) {
-		static const snd_interval_t double_rate_channels = {
+		static const struct snd_interval double_rate_channels = {
 			.min = 2,
 			.max = 2,
 		};
-		snd_interval_t *channels = hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS);
+		struct snd_interval *channels = hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS);
 		return snd_interval_refine(channels, &double_rate_channels);
 	}
 	return 0;
@@ -683,8 +731,10 @@ static int double_rate_hw_constraint_channels(snd_pcm_hw_params_t *params,
  *
  * Installs the hardware constraint rules to prevent using double rates and
  * more than two channels at the same time.
+ *
+ * Return: Zero if successful, or a negative error code on failure.
  */
-int snd_ac97_pcm_double_rate_rules(snd_pcm_runtime_t *runtime)
+int snd_ac97_pcm_double_rate_rules(struct snd_pcm_runtime *runtime)
 {
 	int err;
 
@@ -698,3 +748,5 @@ int snd_ac97_pcm_double_rate_rules(snd_pcm_runtime_t *runtime)
 				  SNDRV_PCM_HW_PARAM_RATE, -1);
 	return err;
 }
+
+EXPORT_SYMBOL(snd_ac97_pcm_double_rate_rules);

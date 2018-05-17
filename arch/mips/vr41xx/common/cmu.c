@@ -2,8 +2,8 @@
  *  cmu.c, Clock Mask Unit routines for the NEC VR4100 series.
  *
  *  Copyright (C) 2001-2002  MontaVista Software Inc.
- *    Author: Yoichi Yuasa <yyuasa@mvista.com or source@mvista.com>
- *  Copuright (C) 2003-2004  Yoichi Yuasa <yuasa@hh.iij4u.or.jp>
+ *    Author: Yoichi Yuasa <source@mvista.com>
+ *  Copyright (C) 2003-2005  Yoichi Yuasa <yuasa@linux-mips.org>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -21,14 +21,16 @@
  */
 /*
  * Changes:
- *  MontaVista Software Inc. <yyuasa@mvista.com> or <source@mvista.com>
+ *  MontaVista Software Inc. <source@mvista.com>
  *  - New creation, NEC VR4122 and VR4131 are supported.
  *  - Added support for NEC VR4111 and VR4121.
  *
- *  Yoichi Yuasa <yuasa@hh.iij4u.or.jp>
+ *  Yoichi Yuasa <yuasa@linux-mips.org>
  *  - Added support for NEC VR4133.
  */
+#include <linux/export.h>
 #include <linux/init.h>
+#include <linux/ioport.h>
 #include <linux/smp.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
@@ -37,8 +39,16 @@
 #include <asm/io.h>
 #include <asm/vr41xx/vr41xx.h>
 
-#define CMUCLKMSK_TYPE1	KSEG1ADDR(0x0b000060)
-#define CMUCLKMSK_TYPE2	KSEG1ADDR(0x0f000060)
+#define CMU_TYPE1_BASE	0x0b000060UL
+#define CMU_TYPE1_SIZE	0x4
+
+#define CMU_TYPE2_BASE	0x0f000060UL
+#define CMU_TYPE2_SIZE	0x4
+
+#define CMU_TYPE3_BASE	0x0f000060UL
+#define CMU_TYPE3_SIZE	0x8
+
+#define CMUCLKMSK	0x0
  #define MSKPIU		0x0001
  #define MSKSIU		0x0002
  #define MSKAIU		0x0004
@@ -52,19 +62,17 @@
  #define MSKFFIR	0x0400
  #define MSKSCSI	0x1000
  #define MSKPPCIU	0x2000
-#define CMUCLKMSK2	KSEG1ADDR(0x0f000064)
+#define CMUCLKMSK2	0x4
  #define MSKCEU		0x0001
  #define MSKMAC0	0x0002
  #define MSKMAC1	0x0004
 
-static uint32_t cmu_base;
+static void __iomem *cmu_base;
 static uint16_t cmuclkmsk, cmuclkmsk2;
-static spinlock_t cmu_lock;
+static DEFINE_SPINLOCK(cmu_lock);
 
-#define read_cmuclkmsk()	readw(cmu_base)
-#define read_cmuclkmsk2()	readw(CMUCLKMSK2)
-#define write_cmuclkmsk()	writew(cmuclkmsk, cmu_base)
-#define write_cmuclkmsk2()	writew(cmuclkmsk2, CMUCLKMSK2)
+#define cmu_read(offset)		readw(cmu_base + (offset))
+#define cmu_write(offset, value)	writew((value), cmu_base + (offset))
 
 void vr41xx_supply_clock(vr41xx_clock_t clock)
 {
@@ -87,8 +95,8 @@ void vr41xx_supply_clock(vr41xx_clock_t clock)
 		cmuclkmsk |= MSKFIR | MSKFFIR;
 		break;
 	case DSIU_CLOCK:
-		if (current_cpu_data.cputype == CPU_VR4111 ||
-		    current_cpu_data.cputype == CPU_VR4121)
+		if (current_cpu_type() == CPU_VR4111 ||
+		    current_cpu_type() == CPU_VR4121)
 			cmuclkmsk |= MSKDSIU;
 		else
 			cmuclkmsk |= MSKSIU | MSKDSIU;
@@ -120,12 +128,14 @@ void vr41xx_supply_clock(vr41xx_clock_t clock)
 
 	if (clock == CEU_CLOCK || clock == ETHER0_CLOCK ||
 	    clock == ETHER1_CLOCK)
-		write_cmuclkmsk2();
+		cmu_write(CMUCLKMSK2, cmuclkmsk2);
 	else
-		write_cmuclkmsk();
+		cmu_write(CMUCLKMSK, cmuclkmsk);
 
 	spin_unlock_irq(&cmu_lock);
 }
+
+EXPORT_SYMBOL_GPL(vr41xx_supply_clock);
 
 void vr41xx_mask_clock(vr41xx_clock_t clock)
 {
@@ -136,8 +146,8 @@ void vr41xx_mask_clock(vr41xx_clock_t clock)
 		cmuclkmsk &= ~MSKPIU;
 		break;
 	case SIU_CLOCK:
-		if (current_cpu_data.cputype == CPU_VR4111 ||
-		    current_cpu_data.cputype == CPU_VR4121) {
+		if (current_cpu_type() == CPU_VR4111 ||
+		    current_cpu_type() == CPU_VR4121) {
 			cmuclkmsk &= ~(MSKSIU | MSKSSIU);
 		} else {
 			if (cmuclkmsk & MSKDSIU)
@@ -156,11 +166,11 @@ void vr41xx_mask_clock(vr41xx_clock_t clock)
 		cmuclkmsk &= ~(MSKFIR | MSKFFIR);
 		break;
 	case DSIU_CLOCK:
-		if (current_cpu_data.cputype == CPU_VR4111 ||
-		    current_cpu_data.cputype == CPU_VR4121) {
+		if (current_cpu_type() == CPU_VR4111 ||
+		    current_cpu_type() == CPU_VR4121) {
 			cmuclkmsk &= ~MSKDSIU;
 		} else {
-			if (cmuclkmsk & MSKSIU)
+			if (cmuclkmsk & MSKSSIU)
 				cmuclkmsk &= ~MSKDSIU;
 			else
 				cmuclkmsk &= ~(MSKSIU | MSKDSIU);
@@ -193,38 +203,55 @@ void vr41xx_mask_clock(vr41xx_clock_t clock)
 
 	if (clock == CEU_CLOCK || clock == ETHER0_CLOCK ||
 	    clock == ETHER1_CLOCK)
-		write_cmuclkmsk2();
+		cmu_write(CMUCLKMSK2, cmuclkmsk2);
 	else
-		write_cmuclkmsk();
+		cmu_write(CMUCLKMSK, cmuclkmsk);
 
 	spin_unlock_irq(&cmu_lock);
 }
 
+EXPORT_SYMBOL_GPL(vr41xx_mask_clock);
+
 static int __init vr41xx_cmu_init(void)
 {
-	switch (current_cpu_data.cputype) {
-        case CPU_VR4111:
-        case CPU_VR4121:
-                cmu_base = CMUCLKMSK_TYPE1;
-                break;
-        case CPU_VR4122:
-        case CPU_VR4131:
-                cmu_base = CMUCLKMSK_TYPE2;
-                break;
-        case CPU_VR4133:
-                cmu_base = CMUCLKMSK_TYPE2;
-		cmuclkmsk2 = read_cmuclkmsk2();
-                break;
+	unsigned long start, size;
+
+	switch (current_cpu_type()) {
+	case CPU_VR4111:
+	case CPU_VR4121:
+		start = CMU_TYPE1_BASE;
+		size = CMU_TYPE1_SIZE;
+		break;
+	case CPU_VR4122:
+	case CPU_VR4131:
+		start = CMU_TYPE2_BASE;
+		size = CMU_TYPE2_SIZE;
+		break;
+	case CPU_VR4133:
+		start = CMU_TYPE3_BASE;
+		size = CMU_TYPE3_SIZE;
+		break;
 	default:
 		panic("Unexpected CPU of NEC VR4100 series");
 		break;
-        }
+	}
 
-	cmuclkmsk = read_cmuclkmsk();
+	if (request_mem_region(start, size, "CMU") == NULL)
+		return -EBUSY;
+
+	cmu_base = ioremap(start, size);
+	if (cmu_base == NULL) {
+		release_mem_region(start, size);
+		return -EBUSY;
+	}
+
+	cmuclkmsk = cmu_read(CMUCLKMSK);
+	if (current_cpu_type() == CPU_VR4133)
+		cmuclkmsk2 = cmu_read(CMUCLKMSK2);
 
 	spin_lock_init(&cmu_lock);
 
 	return 0;
 }
 
-early_initcall(vr41xx_cmu_init);
+core_initcall(vr41xx_cmu_init);

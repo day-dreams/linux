@@ -1,6 +1,6 @@
-/* server.c: AFS server record management
+/* AFS server record management
  *
- * Copyright (C) 2002 Red Hat, Inc. All Rights Reserved.
+ * Copyright (C) 2002, 2007 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
  *
  * This program is free software; you can redistribute it and/or
@@ -11,492 +11,689 @@
 
 #include <linux/sched.h>
 #include <linux/slab.h>
-#include <rxrpc/peer.h>
-#include <rxrpc/connection.h>
-#include "volume.h"
-#include "cell.h"
-#include "server.h"
-#include "transport.h"
-#include "vlclient.h"
-#include "kafstimod.h"
+#include "afs_fs.h"
 #include "internal.h"
 
-DEFINE_SPINLOCK(afs_server_peer_lock);
+static unsigned afs_server_gc_delay = 10;	/* Server record timeout in seconds */
+static unsigned afs_server_update_delay = 30;	/* Time till VLDB recheck in secs */
 
-#define FS_SERVICE_ID		1	/* AFS Volume Location Service ID */
-#define VL_SERVICE_ID		52	/* AFS Volume Location Service ID */
-
-static void __afs_server_timeout(struct afs_timer *timer)
+static void afs_inc_servers_outstanding(struct afs_net *net)
 {
-	struct afs_server *server =
-		list_entry(timer, struct afs_server, timeout);
-
-	_debug("SERVER TIMEOUT [%p{u=%d}]",
-	       server, atomic_read(&server->usage));
-
-	afs_server_do_timeout(server);
+	atomic_inc(&net->servers_outstanding);
 }
 
-static const struct afs_timer_ops afs_server_timer_ops = {
-	.timed_out	= __afs_server_timeout,
-};
-
-/*****************************************************************************/
-/*
- * lookup a server record in a cell
- * - TODO: search the cell's server list
- */
-int afs_server_lookup(struct afs_cell *cell, const struct in_addr *addr,
-		      struct afs_server **_server)
+static void afs_dec_servers_outstanding(struct afs_net *net)
 {
-	struct afs_server *server, *active, *zombie;
-	int loop;
+	if (atomic_dec_and_test(&net->servers_outstanding))
+		wake_up_atomic_t(&net->servers_outstanding);
+}
 
-	_enter("%p,%08x,", cell, ntohl(addr->s_addr));
+/*
+ * Find a server by one of its addresses.
+ */
+struct afs_server *afs_find_server(struct afs_net *net,
+				   const struct sockaddr_rxrpc *srx)
+{
+	const struct sockaddr_in6 *a = &srx->transport.sin6, *b;
+	const struct afs_addr_list *alist;
+	struct afs_server *server = NULL;
+	unsigned int i;
+	bool ipv6 = true;
+	int seq = 0, diff;
 
-	/* allocate and initialise a server record */
-	server = kmalloc(sizeof(struct afs_server), GFP_KERNEL);
-	if (!server) {
-		_leave(" = -ENOMEM");
-		return -ENOMEM;
+	if (srx->transport.sin6.sin6_addr.s6_addr32[0] == 0 ||
+	    srx->transport.sin6.sin6_addr.s6_addr32[1] == 0 ||
+	    srx->transport.sin6.sin6_addr.s6_addr32[2] == htonl(0xffff))
+		ipv6 = false;
+
+	rcu_read_lock();
+
+	do {
+		if (server)
+			afs_put_server(net, server);
+		server = NULL;
+		read_seqbegin_or_lock(&net->fs_addr_lock, &seq);
+
+		if (ipv6) {
+			hlist_for_each_entry_rcu(server, &net->fs_addresses6, addr6_link) {
+				alist = rcu_dereference(server->addresses);
+				for (i = alist->nr_ipv4; i < alist->nr_addrs; i++) {
+					b = &alist->addrs[i].transport.sin6;
+					diff = (u16)a->sin6_port - (u16)b->sin6_port;
+					if (diff == 0)
+						diff = memcmp(&a->sin6_addr,
+							      &b->sin6_addr,
+							      sizeof(struct in6_addr));
+					if (diff == 0)
+						goto found;
+					if (diff < 0) {
+						// TODO: Sort the list
+						//if (i == alist->nr_ipv4)
+						//	goto not_found;
+						break;
+					}
+				}
+			}
+		} else {
+			hlist_for_each_entry_rcu(server, &net->fs_addresses4, addr4_link) {
+				alist = rcu_dereference(server->addresses);
+				for (i = 0; i < alist->nr_ipv4; i++) {
+					b = &alist->addrs[i].transport.sin6;
+					diff = (u16)a->sin6_port - (u16)b->sin6_port;
+					if (diff == 0)
+						diff = ((u32)a->sin6_addr.s6_addr32[3] -
+							(u32)b->sin6_addr.s6_addr32[3]);
+					if (diff == 0)
+						goto found;
+					if (diff < 0) {
+						// TODO: Sort the list
+						//if (i == 0)
+						//	goto not_found;
+						break;
+					}
+				}
+			}
+		}
+
+	//not_found:
+		server = NULL;
+	found:
+		if (server && !atomic_inc_not_zero(&server->usage))
+			server = NULL;
+
+	} while (need_seqretry(&net->fs_addr_lock, seq));
+
+	done_seqretry(&net->fs_addr_lock, seq);
+
+	rcu_read_unlock();
+	return server;
+}
+
+/*
+ * Look up a server by its UUID
+ */
+struct afs_server *afs_find_server_by_uuid(struct afs_net *net, const uuid_t *uuid)
+{
+	struct afs_server *server = NULL;
+	struct rb_node *p;
+	int diff, seq = 0;
+
+	_enter("%pU", uuid);
+
+	do {
+		/* Unfortunately, rbtree walking doesn't give reliable results
+		 * under just the RCU read lock, so we have to check for
+		 * changes.
+		 */
+		if (server)
+			afs_put_server(net, server);
+		server = NULL;
+
+		read_seqbegin_or_lock(&net->fs_lock, &seq);
+
+		p = net->fs_servers.rb_node;
+		while (p) {
+			server = rb_entry(p, struct afs_server, uuid_rb);
+
+			diff = memcmp(uuid, &server->uuid, sizeof(*uuid));
+			if (diff < 0) {
+				p = p->rb_left;
+			} else if (diff > 0) {
+				p = p->rb_right;
+			} else {
+				afs_get_server(server);
+				break;
+			}
+
+			server = NULL;
+		}
+	} while (need_seqretry(&net->fs_lock, seq));
+
+	done_seqretry(&net->fs_lock, seq);
+
+	_leave(" = %p", server);
+	return server;
+}
+
+/*
+ * Install a server record in the namespace tree
+ */
+static struct afs_server *afs_install_server(struct afs_net *net,
+					     struct afs_server *candidate)
+{
+	const struct afs_addr_list *alist;
+	struct afs_server *server;
+	struct rb_node **pp, *p;
+	int ret = -EEXIST, diff;
+
+	_enter("%p", candidate);
+
+	write_seqlock(&net->fs_lock);
+
+	/* Firstly install the server in the UUID lookup tree */
+	pp = &net->fs_servers.rb_node;
+	p = NULL;
+	while (*pp) {
+		p = *pp;
+		_debug("- consider %p", p);
+		server = rb_entry(p, struct afs_server, uuid_rb);
+		diff = memcmp(&candidate->uuid, &server->uuid, sizeof(uuid_t));
+		if (diff < 0)
+			pp = &(*pp)->rb_left;
+		else if (diff > 0)
+			pp = &(*pp)->rb_right;
+		else
+			goto exists;
 	}
 
-	memset(server, 0, sizeof(struct afs_server));
+	server = candidate;
+	rb_link_node(&server->uuid_rb, p, pp);
+	rb_insert_color(&server->uuid_rb, &net->fs_servers);
+	hlist_add_head_rcu(&server->proc_link, &net->fs_proc);
+
+	write_seqlock(&net->fs_addr_lock);
+	alist = rcu_dereference_protected(server->addresses,
+					  lockdep_is_held(&net->fs_addr_lock.lock));
+
+	/* Secondly, if the server has any IPv4 and/or IPv6 addresses, install
+	 * it in the IPv4 and/or IPv6 reverse-map lists.
+	 *
+	 * TODO: For speed we want to use something other than a flat list
+	 * here; even sorting the list in terms of lowest address would help a
+	 * bit, but anything we might want to do gets messy and memory
+	 * intensive.
+	 */
+	if (alist->nr_ipv4 > 0)
+		hlist_add_head_rcu(&server->addr4_link, &net->fs_addresses4);
+	if (alist->nr_addrs > alist->nr_ipv4)
+		hlist_add_head_rcu(&server->addr6_link, &net->fs_addresses6);
+
+	write_sequnlock(&net->fs_addr_lock);
+	ret = 0;
+
+exists:
+	afs_get_server(server);
+	write_sequnlock(&net->fs_lock);
+	return server;
+}
+
+/*
+ * allocate a new server record
+ */
+static struct afs_server *afs_alloc_server(struct afs_net *net,
+					   const uuid_t *uuid,
+					   struct afs_addr_list *alist)
+{
+	struct afs_server *server;
+
+	_enter("");
+
+	server = kzalloc(sizeof(struct afs_server), GFP_KERNEL);
+	if (!server)
+		goto enomem;
+
 	atomic_set(&server->usage, 1);
+	RCU_INIT_POINTER(server->addresses, alist);
+	server->addr_version = alist->version;
+	server->uuid = *uuid;
+	server->flags = (1UL << AFS_SERVER_FL_NEW);
+	server->update_at = ktime_get_real_seconds() + afs_server_update_delay;
+	rwlock_init(&server->fs_lock);
+	INIT_LIST_HEAD(&server->cb_interests);
+	rwlock_init(&server->cb_break_lock);
 
-	INIT_LIST_HEAD(&server->link);
-	init_rwsem(&server->sem);
-	INIT_LIST_HEAD(&server->fs_callq);
-	spin_lock_init(&server->fs_lock);
-	INIT_LIST_HEAD(&server->cb_promises);
-	spin_lock_init(&server->cb_lock);
+	afs_inc_servers_outstanding(net);
+	_leave(" = %p", server);
+	return server;
 
-	for (loop = 0; loop < AFS_SERVER_CONN_LIST_SIZE; loop++)
-		server->fs_conn_cnt[loop] = 4;
+enomem:
+	_leave(" = NULL [nomem]");
+	return NULL;
+}
 
-	memcpy(&server->addr, addr, sizeof(struct in_addr));
-	server->addr.s_addr = addr->s_addr;
-
-	afs_timer_init(&server->timeout, &afs_server_timer_ops);
-
-	/* add to the cell */
-	write_lock(&cell->sv_lock);
-
-	/* check the active list */
-	list_for_each_entry(active, &cell->sv_list, link) {
-		if (active->addr.s_addr == addr->s_addr)
-			goto use_active_server;
-	}
-
-	/* check the inactive list */
-	spin_lock(&cell->sv_gylock);
-	list_for_each_entry(zombie, &cell->sv_graveyard, link) {
-		if (zombie->addr.s_addr == addr->s_addr)
-			goto resurrect_server;
-	}
-	spin_unlock(&cell->sv_gylock);
-
-	afs_get_cell(cell);
-	server->cell = cell;
-	list_add_tail(&server->link, &cell->sv_list);
-
-	write_unlock(&cell->sv_lock);
-
-	*_server = server;
-	_leave(" = 0 (%p)", server);
-	return 0;
-
-	/* found a matching active server */
- use_active_server:
-	_debug("active server");
-	afs_get_server(active);
-	write_unlock(&cell->sv_lock);
-
-	kfree(server);
-
-	*_server = active;
-	_leave(" = 0 (%p)", active);
-	return 0;
-
-	/* found a matching server in the graveyard, so resurrect it and
-	 * dispose of the new record */
- resurrect_server:
-	_debug("resurrecting server");
-
-	list_del(&zombie->link);
-	list_add_tail(&zombie->link, &cell->sv_list);
-	afs_get_server(zombie);
-	afs_kafstimod_del_timer(&zombie->timeout);
-	spin_unlock(&cell->sv_gylock);
-	write_unlock(&cell->sv_lock);
-
-	kfree(server);
-
-	*_server = zombie;
-	_leave(" = 0 (%p)", zombie);
-	return 0;
-
-} /* end afs_server_lookup() */
-
-/*****************************************************************************/
 /*
- * destroy a server record
- * - removes from the cell list
+ * Look up an address record for a server
  */
-void afs_put_server(struct afs_server *server)
+static struct afs_addr_list *afs_vl_lookup_addrs(struct afs_cell *cell,
+						 struct key *key, const uuid_t *uuid)
 {
-	struct afs_cell *cell;
+	struct afs_addr_cursor ac;
+	struct afs_addr_list *alist;
+	int ret;
+
+	ret = afs_set_vl_cursor(&ac, cell);
+	if (ret < 0)
+		return ERR_PTR(ret);
+
+	while (afs_iterate_addresses(&ac)) {
+		if (test_bit(ac.index, &ac.alist->yfs))
+			alist = afs_yfsvl_get_endpoints(cell->net, &ac, key, uuid);
+		else
+			alist = afs_vl_get_addrs_u(cell->net, &ac, key, uuid);
+		switch (ac.error) {
+		case 0:
+			afs_end_cursor(&ac);
+			return alist;
+		case -ECONNABORTED:
+			ac.error = afs_abort_to_error(ac.abort_code);
+			goto error;
+		case -ENOMEM:
+		case -ENONET:
+			goto error;
+		case -ENETUNREACH:
+		case -EHOSTUNREACH:
+		case -ECONNREFUSED:
+			break;
+		default:
+			ac.error = -EIO;
+			goto error;
+		}
+	}
+
+error:
+	return ERR_PTR(afs_end_cursor(&ac));
+}
+
+/*
+ * Get or create a fileserver record.
+ */
+struct afs_server *afs_lookup_server(struct afs_cell *cell, struct key *key,
+				     const uuid_t *uuid)
+{
+	struct afs_addr_list *alist;
+	struct afs_server *server, *candidate;
+
+	_enter("%p,%pU", cell->net, uuid);
+
+	server = afs_find_server_by_uuid(cell->net, uuid);
+	if (server)
+		return server;
+
+	alist = afs_vl_lookup_addrs(cell, key, uuid);
+	if (IS_ERR(alist))
+		return ERR_CAST(alist);
+
+	candidate = afs_alloc_server(cell->net, uuid, alist);
+	if (!candidate) {
+		afs_put_addrlist(alist);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	server = afs_install_server(cell->net, candidate);
+	if (server != candidate) {
+		afs_put_addrlist(alist);
+		kfree(candidate);
+	}
+
+	_leave(" = %p{%d}", server, atomic_read(&server->usage));
+	return server;
+}
+
+/*
+ * Set the server timer to fire after a given delay, assuming it's not already
+ * set for an earlier time.
+ */
+static void afs_set_server_timer(struct afs_net *net, time64_t delay)
+{
+	if (net->live) {
+		afs_inc_servers_outstanding(net);
+		if (timer_reduce(&net->fs_timer, jiffies + delay * HZ))
+			afs_dec_servers_outstanding(net);
+	}
+}
+
+/*
+ * Server management timer.  We have an increment on fs_outstanding that we
+ * need to pass along to the work item.
+ */
+void afs_servers_timer(struct timer_list *timer)
+{
+	struct afs_net *net = container_of(timer, struct afs_net, fs_timer);
+
+	_enter("");
+	if (!queue_work(afs_wq, &net->fs_manager))
+		afs_dec_servers_outstanding(net);
+}
+
+/*
+ * Release a reference on a server record.
+ */
+void afs_put_server(struct afs_net *net, struct afs_server *server)
+{
+	unsigned int usage;
 
 	if (!server)
 		return;
 
-	_enter("%p", server);
+	server->put_time = ktime_get_real_seconds();
 
-	cell = server->cell;
+	usage = atomic_dec_return(&server->usage);
 
-	/* sanity check */
-	BUG_ON(atomic_read(&server->usage) <= 0);
+	_enter("{%u}", usage);
 
-	/* to prevent a race, the decrement and the dequeue must be effectively
-	 * atomic */
-	write_lock(&cell->sv_lock);
-
-	if (likely(!atomic_dec_and_test(&server->usage))) {
-		write_unlock(&cell->sv_lock);
-		_leave("");
+	if (likely(usage > 0))
 		return;
-	}
 
-	spin_lock(&cell->sv_gylock);
-	list_del(&server->link);
-	list_add_tail(&server->link, &cell->sv_graveyard);
+	afs_set_server_timer(net, afs_server_gc_delay);
+}
 
-	/* time out in 10 secs */
-	afs_kafstimod_add_timer(&server->timeout, 10 * HZ);
-
-	spin_unlock(&cell->sv_gylock);
-	write_unlock(&cell->sv_lock);
-
-	_leave(" [killed]");
-} /* end afs_put_server() */
-
-/*****************************************************************************/
-/*
- * timeout server record
- * - removes from the cell's graveyard if the usage count is zero
- */
-void afs_server_do_timeout(struct afs_server *server)
+static void afs_server_rcu(struct rcu_head *rcu)
 {
-	struct rxrpc_peer *peer;
-	struct afs_cell *cell;
-	int loop;
+	struct afs_server *server = container_of(rcu, struct afs_server, rcu);
 
+	afs_put_addrlist(server->addresses);
+	kfree(server);
+}
+
+/*
+ * destroy a dead server
+ */
+static void afs_destroy_server(struct afs_net *net, struct afs_server *server)
+{
+	struct afs_addr_list *alist = server->addresses;
+	struct afs_addr_cursor ac = {
+		.alist	= alist,
+		.addr	= &alist->addrs[0],
+		.start	= alist->index,
+		.index	= alist->index,
+		.error	= 0,
+	};
 	_enter("%p", server);
 
-	cell = server->cell;
+	afs_fs_give_up_all_callbacks(net, server, &ac, NULL);
+	call_rcu(&server->rcu, afs_server_rcu);
+	afs_dec_servers_outstanding(net);
+}
 
-	BUG_ON(atomic_read(&server->usage) < 0);
-
-	/* remove from graveyard if still dead */
-	spin_lock(&cell->vl_gylock);
-	if (atomic_read(&server->usage) == 0)
-		list_del_init(&server->link);
-	else
-		server = NULL;
-	spin_unlock(&cell->vl_gylock);
-
-	if (!server) {
-		_leave("");
-		return; /* resurrected */
-	}
-
-	/* we can now destroy it properly */
-	afs_put_cell(cell);
-
-	/* uncross-point the structs under a global lock */
-	spin_lock(&afs_server_peer_lock);
-	peer = server->peer;
-	if (peer) {
-		server->peer = NULL;
-		peer->user = NULL;
-	}
-	spin_unlock(&afs_server_peer_lock);
-
-	/* finish cleaning up the server */
-	for (loop = AFS_SERVER_CONN_LIST_SIZE - 1; loop >= 0; loop--)
-		if (server->fs_conn[loop])
-			rxrpc_put_connection(server->fs_conn[loop]);
-
-	if (server->vlserver)
-		rxrpc_put_connection(server->vlserver);
-
-	kfree(server);
-
-	_leave(" [destroyed]");
-} /* end afs_server_do_timeout() */
-
-/*****************************************************************************/
 /*
- * get a callslot on a connection to the fileserver on the specified server
+ * Garbage collect any expired servers.
  */
-int afs_server_request_callslot(struct afs_server *server,
-				struct afs_server_callslot *callslot)
+static void afs_gc_servers(struct afs_net *net, struct afs_server *gc_list)
 {
-	struct afs_server_callslot *pcallslot;
-	struct rxrpc_connection *conn;
-	int nconn, ret;
+	struct afs_server *server;
+	bool deleted;
+	int usage;
 
-	_enter("%p,",server);
+	while ((server = gc_list)) {
+		gc_list = server->gc_next;
 
-	INIT_LIST_HEAD(&callslot->link);
-	callslot->task = current;
-	callslot->conn = NULL;
-	callslot->nconn = -1;
-	callslot->ready = 0;
-
-	ret = 0;
-	conn = NULL;
-
-	/* get hold of a callslot first */
-	spin_lock(&server->fs_lock);
-
-	/* resurrect the server if it's death timeout has expired */
-	if (server->fs_state) {
-		if (time_before(jiffies, server->fs_dead_jif)) {
-			ret = server->fs_state;
-			spin_unlock(&server->fs_lock);
-			_leave(" = %d [still dead]", ret);
-			return ret;
+		write_seqlock(&net->fs_lock);
+		usage = 1;
+		deleted = atomic_try_cmpxchg(&server->usage, &usage, 0);
+		if (deleted) {
+			rb_erase(&server->uuid_rb, &net->fs_servers);
+			hlist_del_rcu(&server->proc_link);
 		}
+		write_sequnlock(&net->fs_lock);
 
-		server->fs_state = 0;
+		if (deleted)
+			afs_destroy_server(net, server);
 	}
+}
 
-	/* try and find a connection that has spare callslots */
-	for (nconn = 0; nconn < AFS_SERVER_CONN_LIST_SIZE; nconn++) {
-		if (server->fs_conn_cnt[nconn] > 0) {
-			server->fs_conn_cnt[nconn]--;
-			spin_unlock(&server->fs_lock);
-			callslot->nconn = nconn;
-			goto obtained_slot;
-		}
-	}
-
-	/* none were available - wait interruptibly for one to become
-	 * available */
-	set_current_state(TASK_INTERRUPTIBLE);
-	list_add_tail(&callslot->link, &server->fs_callq);
-	spin_unlock(&server->fs_lock);
-
-	while (!callslot->ready && !signal_pending(current)) {
-		schedule();
-		set_current_state(TASK_INTERRUPTIBLE);
-	}
-
-	set_current_state(TASK_RUNNING);
-
-	/* even if we were interrupted we may still be queued */
-	if (!callslot->ready) {
-		spin_lock(&server->fs_lock);
-		list_del_init(&callslot->link);
-		spin_unlock(&server->fs_lock);
-	}
-
-	nconn = callslot->nconn;
-
-	/* if interrupted, we must release any slot we also got before
-	 * returning an error */
-	if (signal_pending(current)) {
-		ret = -EINTR;
-		goto error_release;
-	}
-
-	/* if we were woken up with an error, then pass that error back to the
-	 * called */
-	if (nconn < 0) {
-		_leave(" = %d", callslot->errno);
-		return callslot->errno;
-	}
-
-	/* were we given a connection directly? */
-	if (callslot->conn) {
-		/* yes - use it */
-		_leave(" = 0 (nc=%d)", nconn);
-		return 0;
-	}
-
-	/* got a callslot, but no connection */
- obtained_slot:
-
-	/* need to get hold of the RxRPC connection */
-	down_write(&server->sem);
-
-	/* quick check to see if there's an outstanding error */
-	ret = server->fs_state;
-	if (ret)
-		goto error_release_upw;
-
-	if (server->fs_conn[nconn]) {
-		/* reuse an existing connection */
-		rxrpc_get_connection(server->fs_conn[nconn]);
-		callslot->conn = server->fs_conn[nconn];
-	}
-	else {
-		/* create a new connection */
-		ret = rxrpc_create_connection(afs_transport,
-					      htons(7000),
-					      server->addr.s_addr,
-					      FS_SERVICE_ID,
-					      NULL,
-					      &server->fs_conn[nconn]);
-
-		if (ret < 0)
-			goto error_release_upw;
-
-		callslot->conn = server->fs_conn[0];
-		rxrpc_get_connection(callslot->conn);
-	}
-
-	up_write(&server->sem);
-
- 	_leave(" = 0");
-	return 0;
-
-	/* handle an error occurring */
- error_release_upw:
-	up_write(&server->sem);
-
- error_release:
-	/* either release the callslot or pass it along to another deserving
-	 * task */
-	spin_lock(&server->fs_lock);
-
-	if (nconn < 0) {
-		/* no callslot allocated */
-	}
-	else if (list_empty(&server->fs_callq)) {
-		/* no one waiting */
-		server->fs_conn_cnt[nconn]++;
-		spin_unlock(&server->fs_lock);
-	}
-	else {
-		/* someone's waiting - dequeue them and wake them up */
-		pcallslot = list_entry(server->fs_callq.next,
-				       struct afs_server_callslot, link);
-		list_del_init(&pcallslot->link);
-
-		pcallslot->errno = server->fs_state;
-		if (!pcallslot->errno) {
-			/* pass them out callslot details */
-			callslot->conn = xchg(&pcallslot->conn,
-					      callslot->conn);
-			pcallslot->nconn = nconn;
-			callslot->nconn = nconn = -1;
-		}
-		pcallslot->ready = 1;
-		wake_up_process(pcallslot->task);
-		spin_unlock(&server->fs_lock);
-	}
-
-	rxrpc_put_connection(callslot->conn);
-	callslot->conn = NULL;
-
-	_leave(" = %d", ret);
-	return ret;
-
-} /* end afs_server_request_callslot() */
-
-/*****************************************************************************/
 /*
- * release a callslot back to the server
- * - transfers the RxRPC connection to the next pending callslot if possible
+ * Manage the records of servers known to be within a network namespace.  This
+ * includes garbage collecting unused servers.
+ *
+ * Note also that we were given an increment on net->servers_outstanding by
+ * whoever queued us that we need to deal with before returning.
  */
-void afs_server_release_callslot(struct afs_server *server,
-				 struct afs_server_callslot *callslot)
+void afs_manage_servers(struct work_struct *work)
 {
-	struct afs_server_callslot *pcallslot;
+	struct afs_net *net = container_of(work, struct afs_net, fs_manager);
+	struct afs_server *gc_list = NULL;
+	struct rb_node *cursor;
+	time64_t now = ktime_get_real_seconds(), next_manage = TIME64_MAX;
+	bool purging = !net->live;
 
-	_enter("{ad=%08x,cnt=%u},{%d}",
-	       ntohl(server->addr.s_addr),
-	       server->fs_conn_cnt[callslot->nconn],
-	       callslot->nconn);
+	_enter("");
 
-	BUG_ON(callslot->nconn < 0);
+	/* Trawl the server list looking for servers that have expired from
+	 * lack of use.
+	 */
+	read_seqlock_excl(&net->fs_lock);
 
-	spin_lock(&server->fs_lock);
+	for (cursor = rb_first(&net->fs_servers); cursor; cursor = rb_next(cursor)) {
+		struct afs_server *server =
+			rb_entry(cursor, struct afs_server, uuid_rb);
+		int usage = atomic_read(&server->usage);
 
-	if (list_empty(&server->fs_callq)) {
-		/* no one waiting */
-		server->fs_conn_cnt[callslot->nconn]++;
-		spin_unlock(&server->fs_lock);
-	}
-	else {
-		/* someone's waiting - dequeue them and wake them up */
-		pcallslot = list_entry(server->fs_callq.next,
-				       struct afs_server_callslot, link);
-		list_del_init(&pcallslot->link);
+		_debug("manage %pU %u", &server->uuid, usage);
 
-		pcallslot->errno = server->fs_state;
-		if (!pcallslot->errno) {
-			/* pass them out callslot details */
-			callslot->conn = xchg(&pcallslot->conn, callslot->conn);
-			pcallslot->nconn = callslot->nconn;
-			callslot->nconn = -1;
+		ASSERTCMP(usage, >=, 1);
+		ASSERTIFCMP(purging, usage, ==, 1);
+
+		if (usage == 1) {
+			time64_t expire_at = server->put_time;
+
+			if (!test_bit(AFS_SERVER_FL_VL_FAIL, &server->flags) &&
+			    !test_bit(AFS_SERVER_FL_NOT_FOUND, &server->flags))
+				expire_at += afs_server_gc_delay;
+			if (purging || expire_at <= now) {
+				server->gc_next = gc_list;
+				gc_list = server;
+			} else if (expire_at < next_manage) {
+				next_manage = expire_at;
+			}
 		}
-
-		pcallslot->ready = 1;
-		wake_up_process(pcallslot->task);
-		spin_unlock(&server->fs_lock);
 	}
 
-	rxrpc_put_connection(callslot->conn);
+	read_sequnlock_excl(&net->fs_lock);
 
+	/* Update the timer on the way out.  We have to pass an increment on
+	 * servers_outstanding in the namespace that we are in to the timer or
+	 * the work scheduler.
+	 */
+	if (!purging && next_manage < TIME64_MAX) {
+		now = ktime_get_real_seconds();
+
+		if (next_manage - now <= 0) {
+			if (queue_work(afs_wq, &net->fs_manager))
+				afs_inc_servers_outstanding(net);
+		} else {
+			afs_set_server_timer(net, next_manage - now);
+		}
+	}
+
+	afs_gc_servers(net, gc_list);
+
+	afs_dec_servers_outstanding(net);
+	_leave(" [%d]", atomic_read(&net->servers_outstanding));
+}
+
+static void afs_queue_server_manager(struct afs_net *net)
+{
+	afs_inc_servers_outstanding(net);
+	if (!queue_work(afs_wq, &net->fs_manager))
+		afs_dec_servers_outstanding(net);
+}
+
+/*
+ * Purge list of servers.
+ */
+void afs_purge_servers(struct afs_net *net)
+{
+	_enter("");
+
+	if (del_timer_sync(&net->fs_timer))
+		atomic_dec(&net->servers_outstanding);
+
+	afs_queue_server_manager(net);
+
+	_debug("wait");
+	wait_on_atomic_t(&net->servers_outstanding, atomic_t_wait,
+			 TASK_UNINTERRUPTIBLE);
 	_leave("");
-} /* end afs_server_release_callslot() */
+}
 
-/*****************************************************************************/
 /*
- * get a handle to a connection to the vlserver (volume location) on the
- * specified server
+ * Probe a fileserver to find its capabilities.
+ *
+ * TODO: Try service upgrade.
  */
-int afs_server_get_vlconn(struct afs_server *server,
-			  struct rxrpc_connection **_conn)
+static bool afs_do_probe_fileserver(struct afs_fs_cursor *fc)
 {
-	struct rxrpc_connection *conn;
-	int ret;
+	_enter("");
 
-	_enter("%p,", server);
+	fc->ac.addr = NULL;
+	fc->ac.start = READ_ONCE(fc->ac.alist->index);
+	fc->ac.index = fc->ac.start;
+	fc->ac.error = 0;
+	fc->ac.begun = false;
 
-	ret = 0;
-	conn = NULL;
-	down_read(&server->sem);
-
-	if (server->vlserver) {
-		/* reuse an existing connection */
-		rxrpc_get_connection(server->vlserver);
-		conn = server->vlserver;
-		up_read(&server->sem);
-	}
-	else {
-		/* create a new connection */
-		up_read(&server->sem);
-		down_write(&server->sem);
-		if (!server->vlserver) {
-			ret = rxrpc_create_connection(afs_transport,
-						      htons(7003),
-						      server->addr.s_addr,
-						      VL_SERVICE_ID,
-						      NULL,
-						      &server->vlserver);
+	while (afs_iterate_addresses(&fc->ac)) {
+		afs_fs_get_capabilities(afs_v2net(fc->vnode), fc->cbi->server,
+					&fc->ac, fc->key);
+		switch (fc->ac.error) {
+		case 0:
+			afs_end_cursor(&fc->ac);
+			set_bit(AFS_SERVER_FL_PROBED, &fc->cbi->server->flags);
+			return true;
+		case -ECONNABORTED:
+			fc->ac.error = afs_abort_to_error(fc->ac.abort_code);
+			goto error;
+		case -ENOMEM:
+		case -ENONET:
+			goto error;
+		case -ENETUNREACH:
+		case -EHOSTUNREACH:
+		case -ECONNREFUSED:
+		case -ETIMEDOUT:
+		case -ETIME:
+			break;
+		default:
+			fc->ac.error = -EIO;
+			goto error;
 		}
-		if (ret == 0) {
-			rxrpc_get_connection(server->vlserver);
-			conn = server->vlserver;
-		}
-		up_write(&server->sem);
 	}
 
-	*_conn = conn;
-	_leave(" = %d", ret);
-	return ret;
-} /* end afs_server_get_vlconn() */
+error:
+	afs_end_cursor(&fc->ac);
+	return false;
+}
+
+/*
+ * If we haven't already, try probing the fileserver to get its capabilities.
+ * We try not to instigate parallel probes, but it's possible that the parallel
+ * probes will fail due to authentication failure when ours would succeed.
+ *
+ * TODO: Try sending an anonymous probe if an authenticated probe fails.
+ */
+bool afs_probe_fileserver(struct afs_fs_cursor *fc)
+{
+	bool success;
+	int ret, retries = 0;
+
+	_enter("");
+
+retry:
+	if (test_bit(AFS_SERVER_FL_PROBED, &fc->cbi->server->flags)) {
+		_leave(" = t");
+		return true;
+	}
+
+	if (!test_and_set_bit_lock(AFS_SERVER_FL_PROBING, &fc->cbi->server->flags)) {
+		success = afs_do_probe_fileserver(fc);
+		clear_bit_unlock(AFS_SERVER_FL_PROBING, &fc->cbi->server->flags);
+		wake_up_bit(&fc->cbi->server->flags, AFS_SERVER_FL_PROBING);
+		_leave(" = t");
+		return success;
+	}
+
+	_debug("wait");
+	ret = wait_on_bit(&fc->cbi->server->flags, AFS_SERVER_FL_PROBING,
+			  TASK_INTERRUPTIBLE);
+	if (ret == -ERESTARTSYS) {
+		fc->ac.error = ret;
+		_leave(" = f [%d]", ret);
+		return false;
+	}
+
+	retries++;
+	if (retries == 4) {
+		fc->ac.error = -ESTALE;
+		_leave(" = f [stale]");
+		return false;
+	}
+	_debug("retry");
+	goto retry;
+}
+
+/*
+ * Get an update for a server's address list.
+ */
+static noinline bool afs_update_server_record(struct afs_fs_cursor *fc, struct afs_server *server)
+{
+	struct afs_addr_list *alist, *discard;
+
+	_enter("");
+
+	alist = afs_vl_lookup_addrs(fc->vnode->volume->cell, fc->key,
+				    &server->uuid);
+	if (IS_ERR(alist)) {
+		fc->ac.error = PTR_ERR(alist);
+		_leave(" = f [%d]", fc->ac.error);
+		return false;
+	}
+
+	discard = alist;
+	if (server->addr_version != alist->version) {
+		write_lock(&server->fs_lock);
+		discard = rcu_dereference_protected(server->addresses,
+						    lockdep_is_held(&server->fs_lock));
+		rcu_assign_pointer(server->addresses, alist);
+		server->addr_version = alist->version;
+		write_unlock(&server->fs_lock);
+	}
+
+	server->update_at = ktime_get_real_seconds() + afs_server_update_delay;
+	afs_put_addrlist(discard);
+	_leave(" = t");
+	return true;
+}
+
+/*
+ * See if a server's address list needs updating.
+ */
+bool afs_check_server_record(struct afs_fs_cursor *fc, struct afs_server *server)
+{
+	time64_t now = ktime_get_real_seconds();
+	long diff;
+	bool success;
+	int ret, retries = 0;
+
+	_enter("");
+
+	ASSERT(server);
+
+retry:
+	diff = READ_ONCE(server->update_at) - now;
+	if (diff > 0) {
+		_leave(" = t [not now %ld]", diff);
+		return true;
+	}
+
+	if (!test_and_set_bit_lock(AFS_SERVER_FL_UPDATING, &server->flags)) {
+		success = afs_update_server_record(fc, server);
+		clear_bit_unlock(AFS_SERVER_FL_UPDATING, &server->flags);
+		wake_up_bit(&server->flags, AFS_SERVER_FL_UPDATING);
+		_leave(" = %d", success);
+		return success;
+	}
+
+	ret = wait_on_bit(&server->flags, AFS_SERVER_FL_UPDATING,
+			  TASK_INTERRUPTIBLE);
+	if (ret == -ERESTARTSYS) {
+		fc->ac.error = ret;
+		_leave(" = f [intr]");
+		return false;
+	}
+
+	retries++;
+	if (retries == 4) {
+		_leave(" = f [stale]");
+		ret = -ESTALE;
+		return false;
+	}
+	goto retry;
+}

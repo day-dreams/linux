@@ -147,25 +147,6 @@ DPRINTK(KERN_DEBUG "frob_control mask %02x, value %02x\n",mask,val);
 	return old;
 }
 
-#if 0 /* currently unused */
-static unsigned char status_pc_to_mfc3(unsigned char status)
-{
-	unsigned char ret = 1;
-
-	if (status & PARPORT_STATUS_BUSY) /* Busy */
-		ret &= ~1;
-	if (status & PARPORT_STATUS_ACK) /* Ack */
-		ret |= 8;
-	if (status & PARPORT_STATUS_PAPEROUT) /* PaperOut */
-		ret |= 2;
-	if (status & PARPORT_STATUS_SELECT) /* select */
-		ret |= 4;
-	if (status & PARPORT_STATUS_ERROR) /* error */
-		ret |= 16;
-	return ret;
-}
-#endif
-
 static unsigned char status_mfc3_to_pc(unsigned char status)
 {
 	unsigned char ret = PARPORT_STATUS_BUSY;
@@ -184,14 +165,6 @@ static unsigned char status_mfc3_to_pc(unsigned char status)
 	return ret;
 }
 
-#if 0 /* currently unused */
-static void mfc3_write_status( struct parport *p, unsigned char status)
-{
-DPRINTK(KERN_DEBUG "write_status %02x\n",status);
-	pia(p)->ppra = (pia(p)->ppra & 0xe0) | status_pc_to_mfc3(status);
-}
-#endif
-
 static unsigned char mfc3_read_status(struct parport *p)
 {
 	unsigned char status;
@@ -201,17 +174,9 @@ DPRINTK(KERN_DEBUG "read_status %02x\n", status);
 	return status;
 }
 
-#if 0 /* currently unused */
-static void mfc3_change_mode( struct parport *p, int m)
-{
-	/* XXX: This port only has one mode, and I am
-	not sure about the corresponding PC-style mode*/
-}
-#endif
+static int use_cnt;
 
-static int use_cnt = 0;
-
-static irqreturn_t mfc3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t mfc3_interrupt(int irq, void *dev_id)
 {
 	int i;
 
@@ -219,7 +184,7 @@ static irqreturn_t mfc3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		if (this_port[i] != NULL)
 			if (pia(this_port[i])->crb & 128) { /* Board caused interrupt */
 				dummy = pia(this_port[i])->pprb; /* clear irq bit */
-				parport_generic_irq(irq, this_port[i], regs);
+				parport_generic_irq(this_port[i]);
 			}
 	return IRQ_HANDLED;
 }
@@ -335,7 +300,7 @@ static int __init parport_mfc3_init(void)
 		if (!request_mem_region(piabase, sizeof(struct pia), "PIA"))
 			continue;
 
-		pp = (struct pia *)ZTWO_VADDR(piabase);
+		pp = ZTWO_VADDR(piabase);
 		pp->crb = 0;
 		pp->pddrb = 255; /* all data pins output */
 		pp->crb = PIA_DDR|32|8;
@@ -353,9 +318,10 @@ static int __init parport_mfc3_init(void)
 
 		if (p->irq != PARPORT_IRQ_NONE) {
 			if (use_cnt++ == 0)
-				if (request_irq(IRQ_AMIGA_PORTS, mfc3_interrupt, SA_SHIRQ, p->name, &pp_mfc3_ops))
+				if (request_irq(IRQ_AMIGA_PORTS, mfc3_interrupt, IRQF_SHARED, p->name, &pp_mfc3_ops))
 					goto out_irq;
 		}
+		p->dev = &z->dev;
 
 		this_port[pias++] = p;
 		printk(KERN_INFO "%s: Multiface III port using irq\n", p->name);
@@ -385,7 +351,7 @@ static void __exit parport_mfc3_exit(void)
 		if (!this_port[i])
 			continue;
 		parport_remove_port(this_port[i]);
-		if (!this_port[i]->irq != PARPORT_IRQ_NONE) {
+		if (this_port[i]->irq != PARPORT_IRQ_NONE) {
 			if (--use_cnt == 0) 
 				free_irq(IRQ_AMIGA_PORTS, &pp_mfc3_ops);
 		}
@@ -396,7 +362,7 @@ static void __exit parport_mfc3_exit(void)
 
 
 MODULE_AUTHOR("Joerg Dorchain <joerg@dorchain.net>");
-MODULE_DESCRIPTION("Parport Driver for Multiface 3 expansion cards Paralllel Port");
+MODULE_DESCRIPTION("Parport Driver for Multiface 3 expansion cards Parallel Port");
 MODULE_SUPPORTED_DEVICE("Multiface 3 Parallel Port");
 MODULE_LICENSE("GPL");
 

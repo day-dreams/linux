@@ -1,10 +1,9 @@
-/* $Id: parport_sunbpp.c,v 1.12 2001/05/26 03:01:42 davem Exp $
- * Parallel-port routines for Sun architecture
+/* parport_sunbpp.c: Parallel-port routines for SBUS
  * 
  * Author: Derrick J. Brashear <shadow@dementia.org>
  *
  * based on work by:
- *          Phil Blundell <Philip.Blundell@pobox.com>
+ *          Phil Blundell <philb@gnu.org>
  *          Tim Waugh <tim@cyberelk.demon.co.uk>
  *	    Jose Renau <renau@acm.org>
  *          David Campbell <campbell@tirian.che.curtin.edu.au>
@@ -14,6 +13,9 @@
  *          Gus Baldauf (gbaldauf@ix.netcom.com)
  *          Peter Zaitcev
  *          Tom Dyas
+ *
+ * Updated to new SBUS device framework: David S. Miller <davem@davemloft.net>
+ * 
  */
 
 #include <linux/string.h>
@@ -24,6 +26,8 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/init.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
 
 #include <linux/parport.h>
 
@@ -32,7 +36,6 @@
 
 #include <asm/io.h>
 #include <asm/oplib.h>           /* OpenProm Library */
-#include <asm/sbus.h>
 #include <asm/dma.h>             /* BPP uses LSI 64854 for DMA */
 #include <asm/irq.h>
 #include <asm/sunbpp.h>
@@ -43,12 +46,6 @@
 #else
 #define dprintk(x)
 #endif
-
-static irqreturn_t parport_sunbpp_interrupt(int irq, void *dev_id, struct pt_regs *regs)
-{
-	parport_generic_irq(irq, (struct parport *) dev_id, regs);
-	return IRQ_HANDLED;
-}
 
 static void parport_sunbpp_disable_irq(struct parport *p)
 {
@@ -85,27 +82,6 @@ static unsigned char parport_sunbpp_read_data(struct parport *p)
 	return sbus_readb(&regs->p_dr);
 }
 
-#if 0
-static void control_pc_to_sunbpp(struct parport *p, unsigned char status)
-{
-	struct bpp_regs __iomem *regs = (struct bpp_regs __iomem *)p->base;
-	unsigned char value_tcr = sbus_readb(&regs->p_tcr);
-	unsigned char value_or = sbus_readb(&regs->p_or);
-
-	if (status & PARPORT_CONTROL_STROBE) 
-		value_tcr |= P_TCR_DS;
-	if (status & PARPORT_CONTROL_AUTOFD) 
-		value_or |= P_OR_AFXN;
-	if (status & PARPORT_CONTROL_INIT) 
-		value_or |= P_OR_INIT;
-	if (status & PARPORT_CONTROL_SELECT) 
-		value_or |= P_OR_SLCT_IN;
-
-	sbus_writeb(value_or, &regs->p_or);
-	sbus_writeb(value_tcr, &regs->p_tcr);
-}
-#endif
-
 static unsigned char status_sunbpp_to_pc(struct parport *p)
 {
 	struct bpp_regs __iomem *regs = (struct bpp_regs __iomem *)p->base;
@@ -124,7 +100,7 @@ static unsigned char status_sunbpp_to_pc(struct parport *p)
 	if (!(value_tcr & P_TCR_BUSY))
 		bits |= PARPORT_STATUS_BUSY;
 
-	dprintk((KERN_DEBUG "tcr 0x%x ir 0x%x\n", regs->p_tcr, regs->p_ir));
+	dprintk((KERN_DEBUG "tcr 0x%x ir 0x%x\n", value_tcr, value_ir));
 	dprintk((KERN_DEBUG "read status 0x%x\n", bits));
 	return bits;
 }
@@ -145,7 +121,7 @@ static unsigned char control_sunbpp_to_pc(struct parport *p)
 	if (value_or & P_OR_SLCT_IN)
 		bits |= PARPORT_CONTROL_SELECT;
 
-	dprintk((KERN_DEBUG "tcr 0x%x or 0x%x\n", regs->p_tcr, regs->p_or));
+	dprintk((KERN_DEBUG "tcr 0x%x or 0x%x\n", value_tcr, value_or));
 	dprintk((KERN_DEBUG "read control 0x%x\n", bits));
 	return bits;
 }
@@ -163,7 +139,8 @@ static unsigned char parport_sunbpp_frob_control(struct parport *p,
 	unsigned char value_tcr = sbus_readb(&regs->p_tcr);
 	unsigned char value_or = sbus_readb(&regs->p_or);
 
-	dprintk((KERN_DEBUG "frob1: tcr 0x%x or 0x%x\n", regs->p_tcr, regs->p_or));
+	dprintk((KERN_DEBUG "frob1: tcr 0x%x or 0x%x\n",
+		 value_tcr, value_or));
 	if (mask & PARPORT_CONTROL_STROBE) {
 		if (val & PARPORT_CONTROL_STROBE) {
 			value_tcr &= ~P_TCR_DS;
@@ -195,7 +172,8 @@ static unsigned char parport_sunbpp_frob_control(struct parport *p,
 
 	sbus_writeb(value_or, &regs->p_or);
 	sbus_writeb(value_tcr, &regs->p_tcr);
-	dprintk((KERN_DEBUG "frob2: tcr 0x%x or 0x%x\n", regs->p_tcr, regs->p_or));
+	dprintk((KERN_DEBUG "frob2: tcr 0x%x or 0x%x\n",
+		 value_tcr, value_or));
 	return parport_sunbpp_read_control(p);
 }
 
@@ -287,126 +265,113 @@ static struct parport_operations parport_sunbpp_ops =
 	.owner		= THIS_MODULE,
 };
 
-typedef struct {
-	struct list_head list;
-	struct parport *port;
-} Node;
-/* no locks, everything's serialized */
-static LIST_HEAD(port_list);
-
-static int __init init_one_port(struct sbus_dev *sdev)
+static int bpp_probe(struct platform_device *op)
 {
-	struct parport *p;
-	/* at least in theory there may be a "we don't dma" case */
 	struct parport_operations *ops;
-	void __iomem *base;
-	int irq, dma, err = 0, size;
 	struct bpp_regs __iomem *regs;
+	int irq, dma, err = 0, size;
 	unsigned char value_tcr;
-	Node *node;
+	void __iomem *base;
+	struct parport *p;
 
-	dprintk((KERN_DEBUG "init_one_port(%p): ranges, alloc_io, ", sdev));
-	node = kmalloc(sizeof(Node), GFP_KERNEL);
-	if (!node)
-		goto out0;
-
-	irq = sdev->irqs[0];
-	base = sbus_ioremap(&sdev->resource[0], 0,
-			    sdev->reg_addrs[0].reg_size, 
-			    "sunbpp");
+	irq = op->archdata.irqs[0];
+	base = of_ioremap(&op->resource[0], 0,
+			  resource_size(&op->resource[0]),
+			  "sunbpp");
 	if (!base)
-		goto out1;
+		return -ENODEV;
 
-	size = sdev->reg_addrs[0].reg_size;
+	size = resource_size(&op->resource[0]);
 	dma = PARPORT_DMA_NONE;
 
-	dprintk(("alloc(ppops), "));
-	ops = kmalloc (sizeof (struct parport_operations), GFP_KERNEL);
+	ops = kmemdup(&parport_sunbpp_ops, sizeof(struct parport_operations),
+		      GFP_KERNEL);
         if (!ops)
-		goto out2;
-
-        memcpy (ops, &parport_sunbpp_ops, sizeof (struct parport_operations));
+		goto out_unmap;
 
 	dprintk(("register_port\n"));
 	if (!(p = parport_register_port((unsigned long)base, irq, dma, ops)))
-		goto out3;
+		goto out_free_ops;
 
 	p->size = size;
+	p->dev = &op->dev;
 
-	dprintk((KERN_DEBUG "init_one_port: request_irq(%08x:%p:%x:%s:%p) ",
-		p->irq, parport_sunbpp_interrupt, SA_SHIRQ, p->name, p));
-	if ((err = request_irq(p->irq, parport_sunbpp_interrupt,
-			       SA_SHIRQ, p->name, p)) != 0) {
-		dprintk(("ERROR %d\n", err));
-		goto out4;
+	if ((err = request_irq(p->irq, parport_irq_handler,
+			       IRQF_SHARED, p->name, p)) != 0) {
+		goto out_put_port;
 	}
-	dprintk(("OK\n"));
+
 	parport_sunbpp_enable_irq(p);
 
 	regs = (struct bpp_regs __iomem *)p->base;
-	dprintk((KERN_DEBUG "forward\n"));
+
 	value_tcr = sbus_readb(&regs->p_tcr);
 	value_tcr &= ~P_TCR_DIR;
 	sbus_writeb(value_tcr, &regs->p_tcr);
 
 	printk(KERN_INFO "%s: sunbpp at 0x%lx\n", p->name, p->base);
-	node->port = p;
-	list_add(&node->list, &port_list);
-	parport_announce_port (p);
 
-	return 1;
+	dev_set_drvdata(&op->dev, p);
 
-out4:
+	parport_announce_port(p);
+
+	return 0;
+
+out_put_port:
 	parport_put_port(p);
-out3:
+
+out_free_ops:
 	kfree(ops);
-out2:
-	sbus_iounmap(base, size);
-out1:
-	kfree(node);
-out0:
+
+out_unmap:
+	of_iounmap(&op->resource[0], base, size);
+
 	return err;
 }
 
-static int __init parport_sunbpp_init(void)
+static int bpp_remove(struct platform_device *op)
 {
-        struct sbus_bus *sbus;
-        struct sbus_dev *sdev;
-	int count = 0;
+	struct parport *p = dev_get_drvdata(&op->dev);
+	struct parport_operations *ops = p->ops;
 
-	for_each_sbus(sbus) {
-		for_each_sbusdev(sdev, sbus) {
-			if (!strcmp(sdev->prom_name, "SUNW,bpp"))
-				count += init_one_port(sdev);
-		}
+	parport_remove_port(p);
+
+	if (p->irq != PARPORT_IRQ_NONE) {
+		parport_sunbpp_disable_irq(p);
+		free_irq(p->irq, p);
 	}
-	return count ? 0 : -ENODEV;
+
+	of_iounmap(&op->resource[0], (void __iomem *) p->base, p->size);
+	parport_put_port(p);
+	kfree(ops);
+
+	dev_set_drvdata(&op->dev, NULL);
+
+	return 0;
 }
 
-static void __exit parport_sunbpp_exit(void)
-{
-	while (!list_empty(&port_list)) {
-		Node *node = list_entry(port_list.next, Node, list);
-		struct parport *p = node->port;
-		struct parport_operations *ops = p->ops;
-		parport_remove_port(p);
+static const struct of_device_id bpp_match[] = {
+	{
+		.name = "SUNW,bpp",
+	},
+	{},
+};
 
-		if (p->irq != PARPORT_IRQ_NONE) {
-			parport_sunbpp_disable_irq(p);
-			free_irq(p->irq, p);
-		}
-		sbus_iounmap((void __iomem *)p->base, p->size);
-		parport_put_port(p);
-		kfree (ops);
-		list_del(&node->list);
-		kfree (node);
-	}
-}
+MODULE_DEVICE_TABLE(of, bpp_match);
+
+static struct platform_driver bpp_sbus_driver = {
+	.driver = {
+		.name = "bpp",
+		.of_match_table = bpp_match,
+	},
+	.probe		= bpp_probe,
+	.remove		= bpp_remove,
+};
+
+module_platform_driver(bpp_sbus_driver);
 
 MODULE_AUTHOR("Derrick J Brashear");
 MODULE_DESCRIPTION("Parport Driver for Sparc bidirectional Port");
 MODULE_SUPPORTED_DEVICE("Sparc Bidirectional Parallel Port");
+MODULE_VERSION("2.0");
 MODULE_LICENSE("GPL");
-
-module_init(parport_sunbpp_init)
-module_exit(parport_sunbpp_exit)

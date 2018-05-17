@@ -12,7 +12,6 @@
  */
 #include <linux/linkage.h>
 #include <asm/assembler.h>
-#include <asm/hardware.h>
 
 #define CPSR2SPSR(rt) \
 		mrs	rt, cpsr; \
@@ -29,7 +28,7 @@ ENTRY(ecard_loader_read)
 		CPSR2SPSR(r0)
 		mov	lr, pc
 		mov	pc, r2
-		LOADREGS(fd, sp!, {r4 - r12, pc})
+		ldmfd	sp!, {r4 - r12, pc}
 
 @ Purpose: call an expansion card loader to reset the card
 @ Proto  : void read_loader(int card_base, char *loader);
@@ -41,5 +40,5 @@ ENTRY(ecard_loader_reset)
 		CPSR2SPSR(r0)
 		mov	lr, pc
 		add	pc, r1, #8
-		LOADREGS(fd, sp!, {r4 - r12, pc})
+		ldmfd	sp!, {r4 - r12, pc}
 

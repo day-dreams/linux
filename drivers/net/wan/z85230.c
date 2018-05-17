@@ -18,7 +18,8 @@
  *	DMA now uses get_free_page as kmalloc buffers may span a 64K 
  *	boundary.
  *
- *	Modified for SMP safety and SMP locking by Alan Cox <alan@redhat.com>
+ *	Modified for SMP safety and SMP locking by Alan Cox
+ *					<alan@lxorguk.ukuu.org.uk>
  *
  *	Performance
  *
@@ -35,6 +36,8 @@
  *	Synchronous mode without DMA is unlikely to pass about 2400 baud.
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -43,15 +46,16 @@
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>
 #include <linux/delay.h>
+#include <linux/hdlc.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
+#include <linux/gfp.h>
 #include <asm/dma.h>
 #include <asm/io.h>
 #define RT_LOCK
 #define RT_UNLOCK
 #include <linux/spinlock.h>
 
-#include <net/syncppp.h>
 #include "z85230.h"
 
 
@@ -331,8 +335,7 @@ static void z8530_rtsdtr(struct z8530_channel *c, int set)
 static void z8530_rx(struct z8530_channel *c)
 {
 	u8 ch,stat;
-	spin_lock(c->lock);
- 
+
 	while(1)
 	{
 		/* FIFO empty ? */
@@ -364,7 +367,7 @@ static void z8530_rx(struct z8530_channel *c)
 				c->count=0;
 				if(stat&Rx_OVR)
 				{
-					printk(KERN_WARNING "%s: overrun\n", c->dev->name);
+					pr_warn("%s: overrun\n", c->dev->name);
 					c->rx_overrun++;
 				}
 				if(stat&CRC_ERR)
@@ -390,7 +393,6 @@ static void z8530_rx(struct z8530_channel *c)
 	 */
 	write_zsctrl(c, ERR_RES);
 	write_zsctrl(c, RES_H_IUS);
-	spin_unlock(c->lock);
 }
 
 
@@ -406,11 +408,10 @@ static void z8530_rx(struct z8530_channel *c)
  
 static void z8530_tx(struct z8530_channel *c)
 {
-	spin_lock(c->lock);
 	while(c->txcount) {
 		/* FIFO full ? */
 		if(!(read_zsreg(c, R0)&4))
-			break;
+			return;
 		c->txcount--;
 		/*
 		 *	Shovel out the byte
@@ -434,7 +435,6 @@ static void z8530_tx(struct z8530_channel *c)
 
 	z8530_tx_done(c);	 
 	write_zsctrl(c, RES_H_IUS);
-	spin_unlock(c->lock);
 }
 
 /**
@@ -444,57 +444,49 @@ static void z8530_tx(struct z8530_channel *c)
  *	A status event occurred in PIO synchronous mode. There are several
  *	reasons the chip will bother us here. A transmit underrun means we
  *	failed to feed the chip fast enough and just broke a packet. A DCD
- *	change is a line up or down. We communicate that back to the protocol
- *	layer for synchronous PPP to renegotiate.
+ *	change is a line up or down.
  */
 
 static void z8530_status(struct z8530_channel *chan)
 {
 	u8 status, altered;
 
-	spin_lock(chan->lock);
-	status=read_zsreg(chan, R0);
-	altered=chan->status^status;
-	
-	chan->status=status;
-	
-	if(status&TxEOM)
-	{
+	status = read_zsreg(chan, R0);
+	altered = chan->status ^ status;
+
+	chan->status = status;
+
+	if (status & TxEOM) {
 /*		printk("%s: Tx underrun.\n", chan->dev->name); */
-		chan->stats.tx_fifo_errors++;
+		chan->netdevice->stats.tx_fifo_errors++;
 		write_zsctrl(chan, ERR_RES);
 		z8530_tx_done(chan);
 	}
-		
-	if(altered&chan->dcdcheck)
+
+	if (altered & chan->dcdcheck)
 	{
-		if(status&chan->dcdcheck)
-		{
-			printk(KERN_INFO "%s: DCD raised\n", chan->dev->name);
-			write_zsreg(chan, R3, chan->regs[3]|RxENABLE);
-			if(chan->netdevice &&
-			    ((chan->netdevice->type == ARPHRD_HDLC) ||
-			    (chan->netdevice->type == ARPHRD_PPP)))
-				sppp_reopen(chan->netdevice);
-		}
-		else
-		{
-			printk(KERN_INFO "%s: DCD lost\n", chan->dev->name);
-			write_zsreg(chan, R3, chan->regs[3]&~RxENABLE);
+		if (status & chan->dcdcheck) {
+			pr_info("%s: DCD raised\n", chan->dev->name);
+			write_zsreg(chan, R3, chan->regs[3] | RxENABLE);
+			if (chan->netdevice)
+				netif_carrier_on(chan->netdevice);
+		} else {
+			pr_info("%s: DCD lost\n", chan->dev->name);
+			write_zsreg(chan, R3, chan->regs[3] & ~RxENABLE);
 			z8530_flush_fifo(chan);
+			if (chan->netdevice)
+				netif_carrier_off(chan->netdevice);
 		}
-		
-	}	
+
+	}
 	write_zsctrl(chan, RES_EXT_INT);
 	write_zsctrl(chan, RES_H_IUS);
-	spin_unlock(chan->lock);
 }
 
-struct z8530_irqhandler z8530_sync=
-{
-	z8530_rx,
-	z8530_tx,
-	z8530_status
+struct z8530_irqhandler z8530_sync = {
+	.rx = z8530_rx,
+	.tx = z8530_tx,
+	.status = z8530_status,
 };
 
 EXPORT_SYMBOL(z8530_sync);
@@ -511,7 +503,6 @@ EXPORT_SYMBOL(z8530_sync);
  
 static void z8530_dma_rx(struct z8530_channel *chan)
 {
-	spin_lock(chan->lock);
 	if(chan->rxdma_on)
 	{
 		/* Special condition check only */
@@ -534,7 +525,6 @@ static void z8530_dma_rx(struct z8530_channel *chan)
 		/* DMA is off right now, drain the slow way */
 		z8530_rx(chan);
 	}	
-	spin_unlock(chan->lock);
 }
 
 /**
@@ -547,17 +537,15 @@ static void z8530_dma_rx(struct z8530_channel *chan)
  
 static void z8530_dma_tx(struct z8530_channel *chan)
 {
-	spin_lock(chan->lock);
 	if(!chan->dma_tx)
 	{
-		printk(KERN_WARNING "Hey who turned the DMA off?\n");
+		pr_warn("Hey who turned the DMA off?\n");
 		z8530_tx(chan);
 		return;
 	}
-	/* This shouldnt occur in DMA mode */
-	printk(KERN_ERR "DMA tx - bogus event!\n");
+	/* This shouldn't occur in DMA mode */
+	pr_err("DMA tx - bogus event!\n");
 	z8530_tx(chan);
-	spin_unlock(chan->lock);
 }
 
 /**
@@ -566,8 +554,7 @@ static void z8530_dma_tx(struct z8530_channel *chan)
  *	
  *	A status event occurred on the Z8530. We receive these for two reasons
  *	when in DMA mode. Firstly if we finished a packet transfer we get one
- *	and kick the next packet out. Secondly we may see a DCD change and
- *	have to poke the protocol layer.
+ *	and kick the next packet out. Secondly we may see a DCD change.
  *
  */
  
@@ -596,48 +583,37 @@ static void z8530_dma_status(struct z8530_channel *chan)
 		}
 	}
 
-	spin_lock(chan->lock);
-	if(altered&chan->dcdcheck)
+	if (altered & chan->dcdcheck)
 	{
-		if(status&chan->dcdcheck)
-		{
-			printk(KERN_INFO "%s: DCD raised\n", chan->dev->name);
-			write_zsreg(chan, R3, chan->regs[3]|RxENABLE);
-			if(chan->netdevice &&
-			    ((chan->netdevice->type == ARPHRD_HDLC) ||
-			    (chan->netdevice->type == ARPHRD_PPP)))
-				sppp_reopen(chan->netdevice);
-		}
-		else
-		{
-			printk(KERN_INFO "%s:DCD lost\n", chan->dev->name);
-			write_zsreg(chan, R3, chan->regs[3]&~RxENABLE);
+		if (status & chan->dcdcheck) {
+			pr_info("%s: DCD raised\n", chan->dev->name);
+			write_zsreg(chan, R3, chan->regs[3] | RxENABLE);
+			if (chan->netdevice)
+				netif_carrier_on(chan->netdevice);
+		} else {
+			pr_info("%s: DCD lost\n", chan->dev->name);
+			write_zsreg(chan, R3, chan->regs[3] & ~RxENABLE);
 			z8530_flush_fifo(chan);
+			if (chan->netdevice)
+				netif_carrier_off(chan->netdevice);
 		}
-	}	
+	}
 
 	write_zsctrl(chan, RES_EXT_INT);
 	write_zsctrl(chan, RES_H_IUS);
-	spin_unlock(chan->lock);
 }
 
-struct z8530_irqhandler z8530_dma_sync=
-{
-	z8530_dma_rx,
-	z8530_dma_tx,
-	z8530_dma_status
+static struct z8530_irqhandler z8530_dma_sync = {
+	.rx = z8530_dma_rx,
+	.tx = z8530_dma_tx,
+	.status = z8530_dma_status,
 };
 
-EXPORT_SYMBOL(z8530_dma_sync);
-
-struct z8530_irqhandler z8530_txdma_sync=
-{
-	z8530_rx,
-	z8530_dma_tx,
-	z8530_dma_status
+static struct z8530_irqhandler z8530_txdma_sync = {
+	.rx = z8530_rx,
+	.tx = z8530_dma_tx,
+	.status = z8530_dma_status,
 };
-
-EXPORT_SYMBOL(z8530_txdma_sync);
 
 /**
  *	z8530_rx_clear - Handle RX events from a stopped chip
@@ -701,11 +677,10 @@ static void z8530_status_clear(struct z8530_channel *chan)
 	write_zsctrl(chan, RES_H_IUS);
 }
 
-struct z8530_irqhandler z8530_nop=
-{
-	z8530_rx_clear,
-	z8530_tx_clear,
-	z8530_status_clear
+struct z8530_irqhandler z8530_nop = {
+	.rx = z8530_rx_clear,
+	.tx = z8530_tx_clear,
+	.status = z8530_status_clear,
 };
 
 
@@ -715,7 +690,6 @@ EXPORT_SYMBOL(z8530_nop);
  *	z8530_interrupt - Handle an interrupt from a Z8530
  *	@irq: 	Interrupt number
  *	@dev_id: The Z8530 device that is interrupting.
- *	@regs: unused
  *
  *	A Z85[2]30 device has stuck its hand in the air for attention.
  *	We scan both the channels on the chip for events and then call
@@ -728,17 +702,17 @@ EXPORT_SYMBOL(z8530_nop);
  *	channel). c->lock for both channels points to dev->lock
  */
 
-irqreturn_t z8530_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t z8530_interrupt(int irq, void *dev_id)
 {
 	struct z8530_dev *dev=dev_id;
-	u8 intr;
+	u8 uninitialized_var(intr);
 	static volatile int locker=0;
 	int work=0;
-	struct z8530_irqhandler *irqs=dev->chanA.irqs;
+	struct z8530_irqhandler *irqs;
 	
 	if(locker)
 	{
-		printk(KERN_ERR "IRQ re-enter\n");
+		pr_err("IRQ re-enter\n");
 		return IRQ_NONE;
 	}
 	locker=1;
@@ -758,6 +732,8 @@ irqreturn_t z8530_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		/* Now walk the chip and see what it is wanting - it may be
 		   an IRQ for someone else remember */
 		   
+		irqs=dev->chanA.irqs;
+
 		if(intr & (CHARxIP|CHATxIP|CHAEXT))
 		{
 			if(intr&CHARxIP)
@@ -782,7 +758,8 @@ irqreturn_t z8530_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	}
 	spin_unlock(&dev->lock);
 	if(work==5000)
-		printk(KERN_ERR "%s: interrupt jammed - abort(0x%X)!\n", dev->name, intr);
+		pr_err("%s: interrupt jammed - abort(0x%X)!\n",
+		       dev->name, intr);
 	/* Ok all done */
 	locker=0;
 	return IRQ_HANDLED;
@@ -790,7 +767,7 @@ irqreturn_t z8530_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 EXPORT_SYMBOL(z8530_interrupt);
 
-static char reg_init[16]=
+static const u8 reg_init[16]=
 {
 	0,0,0,0,
 	0,0,0,0,
@@ -1065,7 +1042,7 @@ EXPORT_SYMBOL(z8530_sync_dma_close);
  *	@dev: The network device to attach
  *	@c: The Z8530 channel to configure in sync DMA mode.
  *
- *	Set up a Z85x30 device for synchronous DMA tranmission. One
+ *	Set up a Z85x30 device for synchronous DMA transmission. One
  *	ISA DMA channel must be available for this to work. The receive
  *	side is run in PIO mode, but then it has the bigger FIFO.
  */
@@ -1230,7 +1207,7 @@ EXPORT_SYMBOL(z8530_sync_txdma_close);
  *	it exists...
  */
  
-static char *z8530_type_name[]={
+static const char *z8530_type_name[]={
 	"Z8530",
 	"Z85C30",
 	"Z85230"
@@ -1243,13 +1220,13 @@ static char *z8530_type_name[]={
  *	@io: the port value in question
  *
  *	Describe a Z8530 in a standard format. We must pass the I/O as
- *	the port offset isnt predictable. The main reason for this function
+ *	the port offset isn't predictable. The main reason for this function
  *	is to try and get a common format of report.
  */
 
 void z8530_describe(struct z8530_dev *dev, char *mapping, unsigned long io)
 {
-	printk(KERN_INFO "%s: %s found at %s 0x%lX, IRQ %d.\n",
+	pr_info("%s: %s found at %s 0x%lX, IRQ %d\n",
 		dev->name, 
 		z8530_type_name[dev->type],
 		mapping,
@@ -1469,10 +1446,10 @@ static void z8530_tx_begin(struct z8530_channel *c)
 			/*
 			 *	Check if we crapped out.
 			 */
-			if(get_dma_residue(c->txdma))
+			if (get_dma_residue(c->txdma))
 			{
-				c->stats.tx_dropped++;
-				c->stats.tx_fifo_errors++;
+				c->netdevice->stats.tx_dropped++;
+				c->netdevice->stats.tx_fifo_errors++;
 			}
 			release_dma_lock(flags);
 		}
@@ -1544,21 +1521,21 @@ static void z8530_tx_begin(struct z8530_channel *c)
  *	packet. This code is fairly timing sensitive.
  *
  *	Called with the register lock held.
- */ 
- 
+ */
+
 static void z8530_tx_done(struct z8530_channel *c)
 {
 	struct sk_buff *skb;
 
 	/* Actually this can happen.*/
-	if(c->tx_skb==NULL)
+	if (c->tx_skb == NULL)
 		return;
 
-	skb=c->tx_skb;
-	c->tx_skb=NULL;
+	skb = c->tx_skb;
+	c->tx_skb = NULL;
 	z8530_tx_begin(c);
-	c->stats.tx_packets++;
-	c->stats.tx_bytes+=skb->len;
+	c->netdevice->stats.tx_packets++;
+	c->netdevice->stats.tx_bytes += skb->len;
 	dev_kfree_skb_irq(skb);
 }
 
@@ -1568,7 +1545,7 @@ static void z8530_tx_done(struct z8530_channel *c)
  *	@skb: The buffer
  *
  *	We point the receive handler at this function when idle. Instead
- *	of syncppp processing the frames we get to throw them away.
+ *	of processing the frames we get to throw them away.
  */
  
 void z8530_null_rx(struct z8530_channel *c, struct sk_buff *skb)
@@ -1612,7 +1589,7 @@ static void z8530_rx_done(struct z8530_channel *c)
 		unsigned long flags;
 		
 		/*
-		 *	Complete this DMA. Neccessary to find the length
+		 *	Complete this DMA. Necessary to find the length
 		 */		
 		 
 		flags=claim_dma_lock();
@@ -1645,10 +1622,10 @@ static void z8530_rx_done(struct z8530_channel *c)
 		else
 			/* Can't occur as we dont reenable the DMA irq until
 			   after the flip is done */
-			printk(KERN_WARNING "%s: DMA flip overrun!\n", c->netdevice->name);
-			
+			netdev_warn(c->netdevice, "DMA flip overrun!\n");
+
 		release_dma_lock(flags);
-		
+
 		/*
 		 *	Shove the old buffer into an sk_buff. We can't DMA
 		 *	directly into one on a PC - it might be above the 16Mb
@@ -1656,27 +1633,22 @@ static void z8530_rx_done(struct z8530_channel *c)
 		 *	can avoid the copy. Optimisation 2 - make the memcpy
 		 *	a copychecksum.
 		 */
-		 
-		skb=dev_alloc_skb(ct);
-		if(skb==NULL)
-		{
-			c->stats.rx_dropped++;
-			printk(KERN_WARNING "%s: Memory squeeze.\n", c->netdevice->name);
-		}
-		else
-		{
+
+		skb = dev_alloc_skb(ct);
+		if (skb == NULL) {
+			c->netdevice->stats.rx_dropped++;
+			netdev_warn(c->netdevice, "Memory squeeze\n");
+		} else {
 			skb_put(skb, ct);
-			memcpy(skb->data, rxb, ct);
-			c->stats.rx_packets++;
-			c->stats.rx_bytes+=ct;
+			skb_copy_to_linear_data(skb, rxb, ct);
+			c->netdevice->stats.rx_packets++;
+			c->netdevice->stats.rx_bytes += ct;
 		}
-		c->dma_ready=1;
-	}
-	else
-	{
-		RT_LOCK;	
-		skb=c->skb;
-		
+		c->dma_ready = 1;
+	} else {
+		RT_LOCK;
+		skb = c->skb;
+
 		/*
 		 *	The game we play for non DMA is similar. We want to
 		 *	get the controller set up for the next packet as fast
@@ -1684,52 +1656,42 @@ static void z8530_rx_done(struct z8530_channel *c)
 		 *	fifo length for this. Thus we want to flip to the new
 		 *	buffer and then mess around copying and allocating
 		 *	things. For the current case it doesn't matter but
-		 *	if you build a system where the sync irq isnt blocked
+		 *	if you build a system where the sync irq isn't blocked
 		 *	by the kernel IRQ disable then you need only block the
 		 *	sync IRQ for the RT_LOCK area.
-		 *	
+		 *
 		 */
 		ct=c->count;
-		
+
 		c->skb = c->skb2;
 		c->count = 0;
 		c->max = c->mtu;
-		if(c->skb)
-		{
+		if (c->skb) {
 			c->dptr = c->skb->data;
 			c->max = c->mtu;
-		}
-		else
-		{
-			c->count= 0;
+		} else {
+			c->count = 0;
 			c->max = 0;
 		}
 		RT_UNLOCK;
 
 		c->skb2 = dev_alloc_skb(c->mtu);
-		if(c->skb2==NULL)
-			printk(KERN_WARNING "%s: memory squeeze.\n",
-				c->netdevice->name);
+		if (c->skb2 == NULL)
+			netdev_warn(c->netdevice, "memory squeeze\n");
 		else
-		{
-			skb_put(c->skb2,c->mtu);
-		}
-		c->stats.rx_packets++;
-		c->stats.rx_bytes+=ct;
-		
+			skb_put(c->skb2, c->mtu);
+		c->netdevice->stats.rx_packets++;
+		c->netdevice->stats.rx_bytes += ct;
 	}
 	/*
 	 *	If we received a frame we must now process it.
 	 */
-	if(skb)
-	{
+	if (skb) {
 		skb_trim(skb, ct);
-		c->rx_function(c,skb);
-	}
-	else
-	{
-		c->stats.rx_dropped++;
-		printk(KERN_ERR "%s: Lost a frame\n", c->netdevice->name);
+		c->rx_function(c, skb);
+	} else {
+		c->netdevice->stats.rx_dropped++;
+		netdev_err(c->netdevice, "Lost a frame\n");
 	}
 }
 
@@ -1740,7 +1702,7 @@ static void z8530_rx_done(struct z8530_channel *c)
  *	Returns true if the buffer cross a DMA boundary on a PC. The poor
  *	thing can only DMA within a 64K block not across the edges of it.
  */
- 
+
 static inline int spans_boundary(struct sk_buff *skb)
 {
 	unsigned long a=(unsigned long)skb->data;
@@ -1764,15 +1726,14 @@ static inline int spans_boundary(struct sk_buff *skb)
  *	point.
  */
 
-int z8530_queue_xmit(struct z8530_channel *c, struct sk_buff *skb)
+netdev_tx_t z8530_queue_xmit(struct z8530_channel *c, struct sk_buff *skb)
 {
 	unsigned long flags;
 	
 	netif_stop_queue(c->netdevice);
 	if(c->tx_next_skb)
-	{
-		return 1;
-	}
+		return NETDEV_TX_BUSY;
+
 	
 	/* PC SPECIFIC - DMA limits */
 	
@@ -1792,7 +1753,7 @@ int z8530_queue_xmit(struct z8530_channel *c, struct sk_buff *skb)
 		 */
 		c->tx_next_ptr=c->tx_dma_buf[c->tx_dma_used];
 		c->tx_dma_used^=1;	/* Flip temp buffer */
-		memcpy(c->tx_next_ptr, skb->data, skb->len);
+		skb_copy_from_linear_data(skb, c->tx_next_ptr, skb->len);
 	}
 	else
 		c->tx_next_ptr=skb->data;	
@@ -1804,33 +1765,16 @@ int z8530_queue_xmit(struct z8530_channel *c, struct sk_buff *skb)
 	z8530_tx_begin(c);
 	spin_unlock_irqrestore(c->lock, flags);
 	
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 EXPORT_SYMBOL(z8530_queue_xmit);
 
-/**
- *	z8530_get_stats - Get network statistics
- *	@c: The channel to use
- *
- *	Get the statistics block. We keep the statistics in software as
- *	the chip doesn't do it for us.
- *
- *	Locking is ignored here - we could lock for a copy but its
- *	not likely to be that big an issue
- */
- 
-struct net_device_stats *z8530_get_stats(struct z8530_channel *c)
-{
-	return &c->stats;
-}
-
-EXPORT_SYMBOL(z8530_get_stats);
-
 /*
  *	Module support
  */
-static char banner[] __initdata = KERN_INFO "Generic Z85C30/Z85230 interface driver v0.02\n";
+static const char banner[] __initconst =
+	KERN_INFO "Generic Z85C30/Z85230 interface driver v0.02\n";
 
 static int __init z85230_init_driver(void)
 {

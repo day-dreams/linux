@@ -1,141 +1,116 @@
 /*
  * xfrm4_output.c - Common IPsec encapsulation code for IPv4.
  * Copyright (c) 2004 Herbert Xu <herbert@gondor.apana.org.au>
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version
  * 2 of the License, or (at your option) any later version.
  */
 
+#include <linux/if_ether.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/skbuff.h>
-#include <linux/spinlock.h>
-#include <net/inet_ecn.h>
+#include <linux/netfilter_ipv4.h>
+#include <net/dst.h>
 #include <net/ip.h>
 #include <net/xfrm.h>
 #include <net/icmp.h>
 
-/* Add encapsulation header.
- *
- * In transport mode, the IP header will be moved forward to make space
- * for the encapsulation header.
- *
- * In tunnel mode, the top IP header will be constructed per RFC 2401.
- * The following fields in it shall be filled in by x->type->output:
- *	tot_len
- *	check
- *
- * On exit, skb->h will be set to the start of the payload to be processed
- * by x->type->output and skb->nh will be set to the top IP header.
- */
-static void xfrm4_encap(struct sk_buff *skb)
-{
-	struct dst_entry *dst = skb->dst;
-	struct xfrm_state *x = dst->xfrm;
-	struct iphdr *iph, *top_iph;
-
-	iph = skb->nh.iph;
-	skb->h.ipiph = iph;
-
-	skb->nh.raw = skb_push(skb, x->props.header_len);
-	top_iph = skb->nh.iph;
-
-	if (!x->props.mode) {
-		skb->h.raw += iph->ihl*4;
-		memmove(top_iph, iph, iph->ihl*4);
-		return;
-	}
-
-	top_iph->ihl = 5;
-	top_iph->version = 4;
-
-	/* DS disclosed */
-	top_iph->tos = INET_ECN_encapsulate(iph->tos, iph->tos);
-	if (x->props.flags & XFRM_STATE_NOECN)
-		IP_ECN_clear(top_iph);
-
-	top_iph->frag_off = iph->frag_off & htons(IP_DF);
-	if (!top_iph->frag_off)
-		__ip_select_ident(top_iph, dst, 0);
-
-	top_iph->ttl = dst_path_metric(dst, RTAX_HOPLIMIT);
-
-	top_iph->saddr = x->props.saddr.a4;
-	top_iph->daddr = x->id.daddr.a4;
-	top_iph->protocol = IPPROTO_IPIP;
-
-	memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
-}
-
 static int xfrm4_tunnel_check_size(struct sk_buff *skb)
 {
 	int mtu, ret = 0;
-	struct dst_entry *dst;
-	struct iphdr *iph = skb->nh.iph;
 
 	if (IPCB(skb)->flags & IPSKB_XFRM_TUNNEL_SIZE)
 		goto out;
 
-	IPCB(skb)->flags |= IPSKB_XFRM_TUNNEL_SIZE;
-	
-	if (!(iph->frag_off & htons(IP_DF)))
+	if (!(ip_hdr(skb)->frag_off & htons(IP_DF)) || skb->ignore_df)
 		goto out;
 
-	dst = skb->dst;
-	mtu = dst_pmtu(dst) - dst->header_len - dst->trailer_len;
-	if (skb->len > mtu) {
-		icmp_send(skb, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED, htonl(mtu));
+	mtu = dst_mtu(skb_dst(skb));
+	if ((!skb_is_gso(skb) && skb->len > mtu) ||
+	    (skb_is_gso(skb) &&
+	     !skb_gso_validate_network_len(skb, ip_skb_dst_mtu(skb->sk, skb)))) {
+		skb->protocol = htons(ETH_P_IP);
+
+		if (skb->sk)
+			xfrm_local_error(skb, mtu);
+		else
+			icmp_send(skb, ICMP_DEST_UNREACH,
+				  ICMP_FRAG_NEEDED, htonl(mtu));
 		ret = -EMSGSIZE;
 	}
 out:
 	return ret;
 }
 
-int xfrm4_output(struct sk_buff *skb)
+int xfrm4_extract_output(struct xfrm_state *x, struct sk_buff *skb)
 {
-	struct dst_entry *dst = skb->dst;
-	struct xfrm_state *x = dst->xfrm;
 	int err;
-	
-	if (skb->ip_summed == CHECKSUM_HW) {
-		err = skb_checksum_help(skb, 0);
-		if (err)
-			goto error_nolock;
-	}
 
-	spin_lock_bh(&x->lock);
-	err = xfrm_state_check(x, skb);
+	err = xfrm4_tunnel_check_size(skb);
 	if (err)
-		goto error;
+		return err;
 
-	if (x->props.mode) {
-		err = xfrm4_tunnel_check_size(skb);
-		if (err)
-			goto error;
-	}
+	XFRM_MODE_SKB_CB(skb)->protocol = ip_hdr(skb)->protocol;
 
-	xfrm4_encap(skb);
+	return xfrm4_extract_header(skb);
+}
 
-	err = x->type->output(skb);
+int xfrm4_prepare_output(struct xfrm_state *x, struct sk_buff *skb)
+{
+	int err;
+
+	err = xfrm_inner_extract_output(x, skb);
 	if (err)
-		goto error;
+		return err;
 
-	x->curlft.bytes += skb->len;
-	x->curlft.packets++;
+	IPCB(skb)->flags |= IPSKB_XFRM_TUNNEL_SIZE;
+	skb->protocol = htons(ETH_P_IP);
 
-	spin_unlock_bh(&x->lock);
-	
-	if (!(skb->dst = dst_pop(dst))) {
-		err = -EHOSTUNREACH;
-		goto error_nolock;
+	return x->outer_mode->output2(x, skb);
+}
+EXPORT_SYMBOL(xfrm4_prepare_output);
+
+int xfrm4_output_finish(struct sock *sk, struct sk_buff *skb)
+{
+	memset(IPCB(skb), 0, sizeof(*IPCB(skb)));
+
+#ifdef CONFIG_NETFILTER
+	IPCB(skb)->flags |= IPSKB_XFRM_TRANSFORMED;
+#endif
+
+	return xfrm_output(sk, skb);
+}
+
+static int __xfrm4_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+{
+	struct xfrm_state *x = skb_dst(skb)->xfrm;
+
+#ifdef CONFIG_NETFILTER
+	if (!x) {
+		IPCB(skb)->flags |= IPSKB_REROUTED;
+		return dst_output(net, sk, skb);
 	}
-	err = NET_XMIT_BYPASS;
+#endif
 
-out_exit:
-	return err;
-error:
-	spin_unlock_bh(&x->lock);
-error_nolock:
-	kfree_skb(skb);
-	goto out_exit;
+	return x->outer_mode->afinfo->output_finish(sk, skb);
+}
+
+int xfrm4_output(struct net *net, struct sock *sk, struct sk_buff *skb)
+{
+	return NF_HOOK_COND(NFPROTO_IPV4, NF_INET_POST_ROUTING,
+			    net, sk, skb, NULL, skb_dst(skb)->dev,
+			    __xfrm4_output,
+			    !(IPCB(skb)->flags & IPSKB_REROUTED));
+}
+
+void xfrm4_local_error(struct sk_buff *skb, u32 mtu)
+{
+	struct iphdr *hdr;
+
+	hdr = skb->encapsulation ? inner_ip_hdr(skb) : ip_hdr(skb);
+	ip_local_error(skb->sk, EMSGSIZE, hdr->daddr,
+		       inet_sk(skb->sk)->inet_dport, mtu);
 }

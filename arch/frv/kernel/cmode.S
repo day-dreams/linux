@@ -1,7 +1,7 @@
 /* cmode.S: clock mode management
  *
  * Copyright (C) 2004 Red Hat, Inc. All Rights Reserved.
- * Written by David Woodhouse (dwmw2@redhat.com)
+ * Written by David Woodhouse (dwmw2@infradead.org)
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -11,7 +11,6 @@
  */
 
 #include <linux/sys.h>
-#include <linux/config.h>
 #include <linux/linkage.h>
 #include <asm/setup.h>
 #include <asm/segment.h>

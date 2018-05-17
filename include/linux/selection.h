@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * selection.h
  *
@@ -10,7 +11,10 @@
 #include <linux/tiocl.h>
 #include <linux/vt_buffer.h>
 
+struct tty_struct;
+
 extern struct vc_data *sel_cons;
+struct tty_struct;
 
 extern void clear_selection(void);
 extern int set_selection(const struct tiocl_selection __user *sel, struct tty_struct *tty);
@@ -21,10 +25,10 @@ extern void mouse_report(struct tty_struct * tty, int butt, int mrx, int mry);
 
 extern int console_blanked;
 
-extern unsigned char color_table[];
-extern int default_red[];
-extern int default_grn[];
-extern int default_blu[];
+extern const unsigned char color_table[];
+extern unsigned char default_red[];
+extern unsigned char default_grn[];
+extern unsigned char default_blu[];
 
 extern unsigned short *screen_pos(struct vc_data *vc, int w_offset, int viewed);
 extern u16 screen_glyph(struct vc_data *vc, int offset);
@@ -36,5 +40,6 @@ extern void putconsxy(struct vc_data *vc, unsigned char *p);
 
 extern u16 vcs_scr_readw(struct vc_data *vc, const u16 *org);
 extern void vcs_scr_writew(struct vc_data *vc, u16 val, u16 *org);
+extern void vcs_scr_updated(struct vc_data *vc);
 
 #endif

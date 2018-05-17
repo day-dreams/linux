@@ -1,8 +1,4 @@
 /*
- * $Id: twidjoy.c,v 1.5 2002/01/22 20:31:53 vojtech Exp $
- *
- *  derived from CVS-ID "stinger.c,v 1.5 2001/05/29 12:57:18 vojtech Exp"
- *
  *  Copyright (c) 2001 Arndt Schoenewald
  *  Copyright (c) 2000-2001 Vojtech Pavlik
  *  Copyright (c) 2000 Mark Fletcher
@@ -56,9 +52,10 @@
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/serio.h>
-#include <linux/init.h>
 
-MODULE_DESCRIPTION("Handykey Twiddler keyboard as a joystick driver");
+#define DRIVER_DESC	"Handykey Twiddler keyboard as a joystick driver"
+
+MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
 /*
@@ -66,8 +63,6 @@ MODULE_LICENSE("GPL");
  */
 
 #define TWIDJOY_MAX_LENGTH 5
-
-static char *twidjoy_name = "Handykey Twiddler";
 
 static struct twidjoy_button_spec {
 	int bitshift;
@@ -93,7 +88,7 @@ twidjoy_buttons[] = {
  */
 
 struct twidjoy {
-	struct input_dev dev;
+	struct input_dev *dev;
 	int idx;
 	unsigned char data[TWIDJOY_MAX_LENGTH];
 	char phys[32];
@@ -104,39 +99,33 @@ struct twidjoy {
  * Twiddler. It updates the data accordingly.
  */
 
-static void twidjoy_process_packet(struct twidjoy *twidjoy, struct pt_regs *regs)
+static void twidjoy_process_packet(struct twidjoy *twidjoy)
 {
-	if (twidjoy->idx == TWIDJOY_MAX_LENGTH) {
-		struct input_dev *dev = &twidjoy->dev;
-		unsigned char *data = twidjoy->data;
-		struct twidjoy_button_spec *bp;
-		int button_bits, abs_x, abs_y;
+	struct input_dev *dev = twidjoy->dev;
+	unsigned char *data = twidjoy->data;
+	struct twidjoy_button_spec *bp;
+	int button_bits, abs_x, abs_y;
 
-		button_bits = ((data[1] & 0x7f) << 7) | (data[0] & 0x7f);
+	button_bits = ((data[1] & 0x7f) << 7) | (data[0] & 0x7f);
 
-		input_regs(dev, regs);
+	for (bp = twidjoy_buttons; bp->bitmask; bp++) {
+		int value = (button_bits & (bp->bitmask << bp->bitshift)) >> bp->bitshift;
+		int i;
 
-		for (bp = twidjoy_buttons; bp->bitmask; bp++) {
-			int value = (button_bits & (bp->bitmask << bp->bitshift)) >> bp->bitshift;
-			int i;
-
-			for (i = 0; i < bp->bitmask; i++)
-				input_report_key(dev, bp->buttons[i], i+1 == value);
-		}
-
-		abs_x = ((data[4] & 0x07) << 5) | ((data[3] & 0x7C) >> 2);
-		if (data[4] & 0x08) abs_x -= 256;
-
-		abs_y = ((data[3] & 0x01) << 7) | ((data[2] & 0x7F) >> 0);
-		if (data[3] & 0x02) abs_y -= 256;
-
-		input_report_abs(dev, ABS_X, -abs_x);
-		input_report_abs(dev, ABS_Y, +abs_y);
-
-		input_sync(dev);
+		for (i = 0; i < bp->bitmask; i++)
+			input_report_key(dev, bp->buttons[i], i+1 == value);
 	}
 
-	return;
+	abs_x = ((data[4] & 0x07) << 5) | ((data[3] & 0x7C) >> 2);
+	if (data[4] & 0x08) abs_x -= 256;
+
+	abs_y = ((data[3] & 0x01) << 7) | ((data[2] & 0x7F) >> 0);
+	if (data[3] & 0x02) abs_y -= 256;
+
+	input_report_abs(dev, ABS_X, -abs_x);
+	input_report_abs(dev, ABS_Y, +abs_y);
+
+	input_sync(dev);
 }
 
 /*
@@ -145,9 +134,9 @@ static void twidjoy_process_packet(struct twidjoy *twidjoy, struct pt_regs *regs
  * packet processing routine.
  */
 
-static irqreturn_t twidjoy_interrupt(struct serio *serio, unsigned char data, unsigned int flags, struct pt_regs *regs)
+static irqreturn_t twidjoy_interrupt(struct serio *serio, unsigned char data, unsigned int flags)
 {
-	struct twidjoy *twidjoy = serio->private;
+	struct twidjoy *twidjoy = serio_get_drvdata(serio);
 
 	/* All Twiddler packets are 5 bytes. The fact that the first byte
 	 * has a MSB of 0 and all other bytes have a MSB of 1 can be used
@@ -162,7 +151,7 @@ static irqreturn_t twidjoy_interrupt(struct serio *serio, unsigned char data, un
 		twidjoy->data[twidjoy->idx++] = data;
 
 	if (twidjoy->idx == TWIDJOY_MAX_LENGTH) {
-		twidjoy_process_packet(twidjoy, regs);
+		twidjoy_process_packet(twidjoy);
 		twidjoy->idx = 0;
 	}
 
@@ -175,9 +164,11 @@ static irqreturn_t twidjoy_interrupt(struct serio *serio, unsigned char data, un
 
 static void twidjoy_disconnect(struct serio *serio)
 {
-	struct twidjoy *twidjoy = serio->private;
-	input_unregister_device(&twidjoy->dev);
+	struct twidjoy *twidjoy = serio_get_drvdata(serio);
+
 	serio_close(serio);
+	serio_set_drvdata(serio, NULL);
+	input_unregister_device(twidjoy->dev);
 	kfree(twidjoy);
 }
 
@@ -187,90 +178,82 @@ static void twidjoy_disconnect(struct serio *serio)
  * it as an input device.
  */
 
-static void twidjoy_connect(struct serio *serio, struct serio_driver *drv)
+static int twidjoy_connect(struct serio *serio, struct serio_driver *drv)
 {
 	struct twidjoy_button_spec *bp;
 	struct twidjoy *twidjoy;
+	struct input_dev *input_dev;
+	int err = -ENOMEM;
 	int i;
 
-	if (serio->type != (SERIO_RS232 | SERIO_TWIDJOY))
-		return;
+	twidjoy = kzalloc(sizeof(struct twidjoy), GFP_KERNEL);
+	input_dev = input_allocate_device();
+	if (!twidjoy || !input_dev)
+		goto fail1;
 
-	if (!(twidjoy = kmalloc(sizeof(struct twidjoy), GFP_KERNEL)))
-		return;
+	twidjoy->dev = input_dev;
+	snprintf(twidjoy->phys, sizeof(twidjoy->phys), "%s/input0", serio->phys);
 
-	memset(twidjoy, 0, sizeof(struct twidjoy));
+	input_dev->name = "Handykey Twiddler";
+	input_dev->phys = twidjoy->phys;
+	input_dev->id.bustype = BUS_RS232;
+	input_dev->id.vendor = SERIO_TWIDJOY;
+	input_dev->id.product = 0x0001;
+	input_dev->id.version = 0x0100;
+	input_dev->dev.parent = &serio->dev;
 
-	sprintf(twidjoy->phys, "%s/input0", serio->phys);
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
+	input_set_abs_params(input_dev, ABS_X, -50, 50, 4, 4);
+	input_set_abs_params(input_dev, ABS_Y, -50, 50, 4, 4);
 
-	init_input_dev(&twidjoy->dev);
-	twidjoy->dev.name = twidjoy_name;
-	twidjoy->dev.phys = twidjoy->phys;
-	twidjoy->dev.id.bustype = BUS_RS232;
-	twidjoy->dev.id.vendor = SERIO_TWIDJOY;
-	twidjoy->dev.id.product = 0x0001;
-	twidjoy->dev.id.version = 0x0100;
-	twidjoy->dev.dev = &serio->dev;
-
-	twidjoy->dev.evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);
-
-	for (bp = twidjoy_buttons; bp->bitmask; bp++) {
+	for (bp = twidjoy_buttons; bp->bitmask; bp++)
 		for (i = 0; i < bp->bitmask; i++)
-			set_bit(bp->buttons[i], twidjoy->dev.keybit);
-	}
+			set_bit(bp->buttons[i], input_dev->keybit);
 
-	twidjoy->dev.absbit[0] = BIT(ABS_X) | BIT(ABS_Y);
+	serio_set_drvdata(serio, twidjoy);
 
-	for (i = 0; i < 2; i++) {
-		twidjoy->dev.absmax[ABS_X+i] =  50;
-		twidjoy->dev.absmin[ABS_X+i] = -50;
+	err = serio_open(serio, drv);
+	if (err)
+		goto fail2;
 
-		/* TODO: arndt 20010708: Are these values appropriate? */
-		twidjoy->dev.absfuzz[ABS_X+i] = 4;
-		twidjoy->dev.absflat[ABS_X+i] = 4;
-	}
+	err = input_register_device(twidjoy->dev);
+	if (err)
+		goto fail3;
 
-	twidjoy->dev.private = twidjoy;
-	serio->private = twidjoy;
+	return 0;
 
-	if (serio_open(serio, drv)) {
-		kfree(twidjoy);
-		return;
-	}
-
-	input_register_device(&twidjoy->dev);
-
-	printk(KERN_INFO "input: %s on %s\n", twidjoy_name, serio->phys);
+ fail3:	serio_close(serio);
+ fail2:	serio_set_drvdata(serio, NULL);
+ fail1:	input_free_device(input_dev);
+	kfree(twidjoy);
+	return err;
 }
 
 /*
- * The serio device structure.
+ * The serio driver structure.
  */
+
+static const struct serio_device_id twidjoy_serio_ids[] = {
+	{
+		.type	= SERIO_RS232,
+		.proto	= SERIO_TWIDJOY,
+		.id	= SERIO_ANY,
+		.extra	= SERIO_ANY,
+	},
+	{ 0 }
+};
+
+MODULE_DEVICE_TABLE(serio, twidjoy_serio_ids);
 
 static struct serio_driver twidjoy_drv = {
 	.driver		= {
 		.name	= "twidjoy",
 	},
 	.description	= DRIVER_DESC,
+	.id_table	= twidjoy_serio_ids,
 	.interrupt	= twidjoy_interrupt,
 	.connect	= twidjoy_connect,
 	.disconnect	= twidjoy_disconnect,
 };
 
-/*
- * The functions for inserting/removing us as a module.
- */
-
-int __init twidjoy_init(void)
-{
-	serio_register_driver(&twidjoy_drv);
-	return 0;
-}
-
-void __exit twidjoy_exit(void)
-{
-	serio_unregister_driver(&twidjoy_drv);
-}
-
-module_init(twidjoy_init);
-module_exit(twidjoy_exit);
+module_serio_driver(twidjoy_drv);

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
 -------------------------------------------------------------------------------
 The macro `BITS64' can be defined to indicate that 64-bit integer types are
@@ -68,7 +69,7 @@ a compiler does not support explicit inlining, this macro should be defined
 to be `static'.
 -------------------------------------------------------------------------------
 */
-#define INLINE extern __inline__
+#define INLINE static inline
 
 
 /* For use as a GCC soft-float library we need some special function names. */

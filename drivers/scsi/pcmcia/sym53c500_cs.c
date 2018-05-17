@@ -54,7 +54,6 @@
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
@@ -72,23 +71,10 @@
 #include <scsi/scsi.h>
 #include <scsi/scsi_host.h>
 
-#include <pcmcia/cs_types.h>
-#include <pcmcia/cs.h>
 #include <pcmcia/cistpl.h>
 #include <pcmcia/ds.h>
 #include <pcmcia/ciscode.h>
 
-/* ================================================================== */
-
-#ifdef PCMCIA_DEBUG
-static int pc_debug = PCMCIA_DEBUG;
-module_param(pc_debug, int, 0);
-#define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
-static char *version =
-"sym53c500_cs.c 0.9c 2004/10/27 (Bob Tracy)";
-#else
-#define DEBUG(n, args...)
-#endif
 
 /* ================================================================== */
 
@@ -202,8 +188,7 @@ static char *version =
 /* ================================================================== */
 
 struct scsi_info_t {
-	dev_link_t link;
-	dev_node_t node;
+	struct pcmcia_device	*p_dev;
 	struct Scsi_Host *host;
 	unsigned short manf_id;
 };
@@ -225,15 +210,6 @@ enum Phase {
     message_out,
     message_in
 };
-
-/* ================================================================== */
-
-/*
-*  Global (within this module) variables other than
-*  sym53c500_driver_template (the scsi_host_template).
-*/
-static dev_link_t *dev_list;
-static dev_info_t dev_info = "sym53c500_cs";
 
 /* ================================================================== */
 
@@ -372,7 +348,7 @@ SYM53C500_pio_write(int fast_pio, int base, unsigned char *request, unsigned int
 }
 
 static irqreturn_t
-SYM53C500_intr(int irq, void *dev_id, struct pt_regs *regs)
+SYM53C500_intr(int irq, void *dev_id)
 {
 	unsigned long flags;
 	struct Scsi_Host *dev = dev_id;
@@ -380,8 +356,6 @@ SYM53C500_intr(int irq, void *dev_id, struct pt_regs *regs)
 	DEB(unsigned char seq_reg;)
 	unsigned char status, int_reg;
 	unsigned char pio_status;
-	struct scatterlist *sglist;
-	unsigned int sgcount;
 	int port_base = dev->io_port;
 	struct sym53c500_data *data =
 	    (struct sym53c500_data *)dev->hostdata;
@@ -444,20 +418,18 @@ SYM53C500_intr(int irq, void *dev_id, struct pt_regs *regs)
 	switch (status & 0x07) {	/* scsi phase */
 	case 0x00:			/* DATA-OUT */
 		if (int_reg & 0x10) {	/* Target requesting info transfer */
+			struct scatterlist *sg;
+			int i;
+
 			curSC->SCp.phase = data_out;
 			VDEB(printk("SYM53C500: Data-Out phase\n"));
 			outb(FLUSH_FIFO, port_base + CMD_REG);
-			LOAD_DMA_COUNT(port_base, curSC->request_bufflen);	/* Max transfer size */
+			LOAD_DMA_COUNT(port_base, scsi_bufflen(curSC));	/* Max transfer size */
 			outb(TRANSFER_INFO | DMA_OP, port_base + CMD_REG);
-			if (!curSC->use_sg)	/* Don't use scatter-gather */
-				SYM53C500_pio_write(fast_pio, port_base, curSC->request_buffer, curSC->request_bufflen);
-			else {	/* use scatter-gather */
-				sgcount = curSC->use_sg;
-				sglist = curSC->request_buffer;
-				while (sgcount--) {
-					SYM53C500_pio_write(fast_pio, port_base, page_address(sglist->page) + sglist->offset, sglist->length);
-					sglist++;
-				}
+
+			scsi_for_each_sg(curSC, sg, scsi_sg_count(curSC), i) {
+				SYM53C500_pio_write(fast_pio, port_base,
+				    sg_virt(sg), sg->length);
 			}
 			REG0(port_base);
 		}
@@ -465,20 +437,18 @@ SYM53C500_intr(int irq, void *dev_id, struct pt_regs *regs)
 
 	case 0x01:		/* DATA-IN */
 		if (int_reg & 0x10) {	/* Target requesting info transfer */
+			struct scatterlist *sg;
+			int i;
+
 			curSC->SCp.phase = data_in;
 			VDEB(printk("SYM53C500: Data-In phase\n"));
 			outb(FLUSH_FIFO, port_base + CMD_REG);
-			LOAD_DMA_COUNT(port_base, curSC->request_bufflen);	/* Max transfer size */
+			LOAD_DMA_COUNT(port_base, scsi_bufflen(curSC));	/* Max transfer size */
 			outb(TRANSFER_INFO | DMA_OP, port_base + CMD_REG);
-			if (!curSC->use_sg)	/* Don't use scatter-gather */
-				SYM53C500_pio_read(fast_pio, port_base, curSC->request_buffer, curSC->request_bufflen);
-			else {	/* Use scatter-gather */
-				sgcount = curSC->use_sg;
-				sglist = curSC->request_buffer;
-				while (sgcount--) {
-					SYM53C500_pio_read(fast_pio, port_base, page_address(sglist->page) + sglist->offset, sglist->length);
-					sglist++;
-				}
+
+			scsi_for_each_sg(curSC, sg, scsi_sg_count(curSC), i) {
+				SYM53C500_pio_read(fast_pio, port_base,
+					sg_virt(sg), sg->length);
 			}
 			REG0(port_base);
 		}
@@ -536,12 +506,12 @@ idle_out:
 }
 
 static void
-SYM53C500_release(dev_link_t *link)
+SYM53C500_release(struct pcmcia_device *link)
 {
 	struct scsi_info_t *info = link->priv;
 	struct Scsi_Host *shost = info->host;
 
-	DEBUG(0, "SYM53C500_release(0x%p)\n", link);
+	dev_dbg(&link->dev, "SYM53C500_release\n");
 
 	/*
 	*  Do this before releasing/freeing resources.
@@ -554,18 +524,10 @@ SYM53C500_release(dev_link_t *link)
 	*/
 	if (shost->irq)
 		free_irq(shost->irq, shost);
-	if (shost->dma_channel != 0xff)
-		free_dma(shost->dma_channel);
 	if (shost->io_port && shost->n_io_port)
 		release_region(shost->io_port, shost->n_io_port);
 
-	link->dev = NULL;
-
-	pcmcia_release_configuration(link->handle);
-	pcmcia_release_io(link->handle, &link->io);
-	pcmcia_release_irq(link->handle, &link->irq);
-
-	link->state &= ~DEV_CONFIG;
+	pcmcia_disable_device(link);
 
 	scsi_host_put(shost);
 } /* SYM53C500_release */
@@ -585,7 +547,7 @@ SYM53C500_info(struct Scsi_Host *SChost)
 }
 
 static int 
-SYM53C500_queue(struct scsi_cmnd *SCpnt, void (*done)(struct scsi_cmnd *))
+SYM53C500_queue_lck(struct scsi_cmnd *SCpnt, void (*done)(struct scsi_cmnd *))
 {
 	int i;
 	int port_base = SCpnt->device->host->io_port;
@@ -596,7 +558,7 @@ SYM53C500_queue(struct scsi_cmnd *SCpnt, void (*done)(struct scsi_cmnd *))
 
 	DEB(printk("cmd=%02x, cmd_len=%02x, target=%02x, lun=%02x, bufflen=%d\n", 
 	    SCpnt->cmnd[0], SCpnt->cmd_len, SCpnt->device->id, 
-	    SCpnt->device->lun,  SCpnt->request_bufflen));
+		   (u8)SCpnt->device->lun,  scsi_bufflen(SCpnt)));
 
 	VDEB(for (i = 0; i < SCpnt->cmd_len; i++)
 	    printk("cmd[%d]=%02x  ", i, SCpnt->cmnd[i]));
@@ -610,7 +572,7 @@ SYM53C500_queue(struct scsi_cmnd *SCpnt, void (*done)(struct scsi_cmnd *))
 
 	/* We are locked here already by the mid layer */
 	REG0(port_base);
-	outb(SCpnt->device->id, port_base + DEST_ID);	/* set destination */
+	outb(scmd_id(SCpnt), port_base + DEST_ID);	/* set destination */
 	outb(FLUSH_FIFO, port_base + CMD_REG);	/* reset the fifos */
 
 	for (i = 0; i < SCpnt->cmd_len; i++) {
@@ -621,13 +583,17 @@ SYM53C500_queue(struct scsi_cmnd *SCpnt, void (*done)(struct scsi_cmnd *))
 	return 0;
 }
 
+static DEF_SCSI_QCMD(SYM53C500_queue)
+
 static int 
 SYM53C500_host_reset(struct scsi_cmnd *SCpnt)
 {
 	int port_base = SCpnt->device->host->io_port;
 
 	DEB(printk("SYM53C500_host_reset called\n"));
+	spin_lock_irq(SCpnt->device->host->host_lock);
 	SYM53C500_int_host_reset(port_base);
+	spin_unlock_irq(SCpnt->device->host->host_lock);
 
 	return SUCCESS;
 }
@@ -654,9 +620,10 @@ SYM53C500_biosparm(struct scsi_device *disk,
 }
 
 static ssize_t
-SYM53C500_show_pio(struct class_device *cdev, char *buf)
+SYM53C500_show_pio(struct device *dev, struct device_attribute *attr,
+		   char *buf)
 {
-	struct Scsi_Host *SHp = class_to_shost(cdev);
+	struct Scsi_Host *SHp = class_to_shost(dev);
 	struct sym53c500_data *data =
 	    (struct sym53c500_data *)SHp->hostdata;
 
@@ -664,10 +631,11 @@ SYM53C500_show_pio(struct class_device *cdev, char *buf)
 }
 
 static ssize_t
-SYM53C500_store_pio(struct class_device *cdev, const char *buf, size_t count)
+SYM53C500_store_pio(struct device *dev, struct device_attribute *attr,
+		    const char *buf, size_t count)
 {
 	int pio;
-	struct Scsi_Host *SHp = class_to_shost(cdev);
+	struct Scsi_Host *SHp = class_to_shost(dev);
 	struct sym53c500_data *data =
 	    (struct sym53c500_data *)SHp->hostdata;
 
@@ -684,7 +652,7 @@ SYM53C500_store_pio(struct class_device *cdev, const char *buf, size_t count)
 *  SCSI HBA device attributes we want to
 *  make available via sysfs.
 */
-static struct class_device_attribute SYM53C500_pio_attr = {
+static struct device_attribute SYM53C500_pio_attr = {
 	.attr = {
 		.name = "fast_pio",
 		.mode = (S_IRUGO | S_IWUSR),
@@ -693,7 +661,7 @@ static struct class_device_attribute SYM53C500_pio_attr = {
 	.store = SYM53C500_store_pio,
 };
 
-static struct class_device_attribute *SYM53C500_shost_attrs[] = {
+static struct device_attribute *SYM53C500_shost_attrs[] = {
 	&SYM53C500_pio_attr,
 	NULL,
 };
@@ -712,68 +680,46 @@ static struct scsi_host_template sym53c500_driver_template = {
      .can_queue			= 1,
      .this_id			= 7,
      .sg_tablesize		= 32,
-     .cmd_per_lun		= 1,
      .use_clustering		= ENABLE_CLUSTERING,
      .shost_attrs		= SYM53C500_shost_attrs
 };
 
-#define CS_CHECK(fn, ret) \
-do { last_fn = (fn); if ((last_ret = (ret)) != 0) goto cs_failed; } while (0)
-
-static void
-SYM53C500_config(dev_link_t *link)
+static int SYM53C500_config_check(struct pcmcia_device *p_dev, void *priv_data)
 {
-	client_handle_t handle = link->handle;
+	p_dev->io_lines = 10;
+	p_dev->resource[0]->flags &= ~IO_DATA_PATH_WIDTH;
+	p_dev->resource[0]->flags |= IO_DATA_PATH_WIDTH_AUTO;
+
+	if (p_dev->resource[0]->start == 0)
+		return -ENODEV;
+
+	return pcmcia_request_io(p_dev);
+}
+
+static int
+SYM53C500_config(struct pcmcia_device *link)
+{
 	struct scsi_info_t *info = link->priv;
-	tuple_t tuple;
-	cisparse_t parse;
-	int i, last_ret, last_fn;
+	int ret;
 	int irq_level, port_base;
-	unsigned short tuple_data[32];
 	struct Scsi_Host *host;
 	struct scsi_host_template *tpnt = &sym53c500_driver_template;
 	struct sym53c500_data *data;
 
-	DEBUG(0, "SYM53C500_config(0x%p)\n", link);
+	dev_dbg(&link->dev, "SYM53C500_config\n");
 
-	tuple.TupleData = (cisdata_t *)tuple_data;
-	tuple.TupleDataMax = 64;
-	tuple.TupleOffset = 0;
-	tuple.DesiredTuple = CISTPL_CONFIG;
-	CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
-	CS_CHECK(GetTupleData, pcmcia_get_tuple_data(handle, &tuple));
-	CS_CHECK(ParseTuple, pcmcia_parse_tuple(handle, &tuple, &parse));
-	link->conf.ConfigBase = parse.config.base;
+	info->manf_id = link->manf_id;
 
-	tuple.DesiredTuple = CISTPL_MANFID;
-	if ((pcmcia_get_first_tuple(handle, &tuple) == CS_SUCCESS) &&
-	    (pcmcia_get_tuple_data(handle, &tuple) == CS_SUCCESS))
-		info->manf_id = le16_to_cpu(tuple.TupleData[0]);
+	ret = pcmcia_loop_config(link, SYM53C500_config_check, NULL);
+	if (ret)
+		goto failed;
 
-	/* Configure card */
-	link->state |= DEV_CONFIG;
+	if (!link->irq)
+		goto failed;
 
-	tuple.DesiredTuple = CISTPL_CFTABLE_ENTRY;
-	CS_CHECK(GetFirstTuple, pcmcia_get_first_tuple(handle, &tuple));
-	while (1) {
-		if (pcmcia_get_tuple_data(handle, &tuple) != 0 ||
-		    pcmcia_parse_tuple(handle, &tuple, &parse) != 0)
-			goto next_entry;
-		link->conf.ConfigIndex = parse.cftable_entry.index;
-		link->io.BasePort1 = parse.cftable_entry.io.win[0].base;
-		link->io.NumPorts1 = parse.cftable_entry.io.win[0].len;
-
-		if (link->io.BasePort1 != 0) {
-			i = pcmcia_request_io(handle, &link->io);
-			if (i == CS_SUCCESS)
-				break;
-		}
-next_entry:
-		CS_CHECK(GetNextTuple, pcmcia_get_next_tuple(handle, &tuple));
-	}
-
-	CS_CHECK(RequestIRQ, pcmcia_request_irq(handle, &link->irq));
-	CS_CHECK(RequestConfiguration, pcmcia_request_configuration(handle, &link->conf));
+	ret = pcmcia_enable_device(link);
+	if (ret)
+		goto failed;
 
 	/*
 	*  That's the trouble with copying liberally from another driver.
@@ -784,9 +730,9 @@ next_entry:
 	    (info->manf_id == MANFID_PIONEER) ||
 	    (info->manf_id == 0x0098)) {
 		/* set ATAcmd */
-		outb(0xb4, link->io.BasePort1 + 0xd);
-		outb(0x24, link->io.BasePort1 + 0x9);
-		outb(0x04, link->io.BasePort1 + 0xd);
+		outb(0xb4, link->resource[0]->start + 0xd);
+		outb(0x24, link->resource[0]->start + 0x9);
+		outb(0x04, link->resource[0]->start + 0xd);
 	}
 
 	/*
@@ -799,8 +745,8 @@ next_entry:
 	*	0x130, 0x230, 0x280, 0x290,
 	*	0x320, 0x330, 0x340, 0x350
 	*/
-	port_base = link->io.BasePort1;
-	irq_level = link->irq.AssignedIRQ;
+	port_base = link->resource[0]->start;
+	irq_level = link->irq;
 
 	DEB(printk("SYM53C500: port_base=0x%x, irq=%d, fast_pio=%d\n",
 	    port_base, irq_level, USE_FAST_PIO);)
@@ -816,7 +762,7 @@ next_entry:
 	data = (struct sym53c500_data *)host->hostdata;
 
 	if (irq_level > 0) {
-		if (request_irq(irq_level, SYM53C500_intr, SA_SHIRQ, "SYM53C500", host)) {
+		if (request_irq(irq_level, SYM53C500_intr, IRQF_SHARED, "SYM53C500", host)) {
 			printk("SYM53C500: unable to allocate IRQ %d\n", irq_level);
 			goto err_free_scsi;
 		}
@@ -841,8 +787,6 @@ next_entry:
 	*/
 	data->fast_pio = USE_FAST_PIO;
 
-	sprintf(info->node.dev_name, "scsi%d", host->host_no);
-	link->dev = &info->node;
 	info->host = host;
 
 	if (scsi_add_host(host, NULL))
@@ -850,7 +794,7 @@ next_entry:
 
 	scsi_scan_host(host);
 
-	goto out;	/* SUCCESS */
+	return 0;
 
 err_free_irq:
 	free_irq(irq_level, host);
@@ -859,151 +803,82 @@ err_free_scsi:
 err_release:
 	release_region(port_base, 0x10);
 	printk(KERN_INFO "sym53c500_cs: no SCSI devices found\n");
+	return -ENODEV;
 
-out:
-	link->state &= ~DEV_CONFIG_PENDING;
-	return;
-
-cs_failed:
-	cs_error(link->handle, last_fn, last_ret);
+failed:
 	SYM53C500_release(link);
-	return;
+	return -ENODEV;
 } /* SYM53C500_config */
 
-static int
-SYM53C500_event(event_t event, int priority, event_callback_args_t *args)
+static int sym53c500_resume(struct pcmcia_device *link)
 {
-	dev_link_t *link = args->client_data;
 	struct scsi_info_t *info = link->priv;
 
-	DEBUG(1, "SYM53C500_event(0x%06x)\n", event);
-
-	switch (event) {
-	case CS_EVENT_CARD_REMOVAL:
-		link->state &= ~DEV_PRESENT;
-		if (link->state & DEV_CONFIG)
-			SYM53C500_release(link);
-		break;
-	case CS_EVENT_CARD_INSERTION:
-		link->state |= DEV_PRESENT | DEV_CONFIG_PENDING;
-		SYM53C500_config(link);
-		break;
-	case CS_EVENT_PM_SUSPEND:
-		link->state |= DEV_SUSPEND;
-		/* Fall through... */
-	case CS_EVENT_RESET_PHYSICAL:
-		if (link->state & DEV_CONFIG)
-			pcmcia_release_configuration(link->handle);
-		break;
-	case CS_EVENT_PM_RESUME:
-		link->state &= ~DEV_SUSPEND;
-		/* Fall through... */
-	case CS_EVENT_CARD_RESET:
-		if (link->state & DEV_CONFIG) {
-			pcmcia_request_configuration(link->handle, &link->conf);
-			/* See earlier comment about manufacturer IDs. */
-			if ((info->manf_id == MANFID_MACNICA) ||
-			    (info->manf_id == MANFID_PIONEER) ||
-			    (info->manf_id == 0x0098)) {
-				outb(0x80, link->io.BasePort1 + 0xd);
-				outb(0x24, link->io.BasePort1 + 0x9);
-				outb(0x04, link->io.BasePort1 + 0xd);
-			}
-			/*
-			*  If things don't work after a "resume",
-			*  this is a good place to start looking.
-			*/
-			SYM53C500_int_host_reset(link->io.BasePort1);
-		}
-		break;
+	/* See earlier comment about manufacturer IDs. */
+	if ((info->manf_id == MANFID_MACNICA) ||
+	    (info->manf_id == MANFID_PIONEER) ||
+	    (info->manf_id == 0x0098)) {
+		outb(0x80, link->resource[0]->start + 0xd);
+		outb(0x24, link->resource[0]->start + 0x9);
+		outb(0x04, link->resource[0]->start + 0xd);
 	}
+	/*
+	 *  If things don't work after a "resume",
+	 *  this is a good place to start looking.
+	 */
+	SYM53C500_int_host_reset(link->resource[0]->start);
+
 	return 0;
-} /* SYM53C500_event */
+}
 
 static void
-SYM53C500_detach(dev_link_t *link)
+SYM53C500_detach(struct pcmcia_device *link)
 {
-	dev_link_t **linkp;
+	dev_dbg(&link->dev, "SYM53C500_detach\n");
 
-	DEBUG(0, "SYM53C500_detach(0x%p)\n", link);
+	SYM53C500_release(link);
 
-	/* Locate device structure */
-	for (linkp = &dev_list; *linkp; linkp = &(*linkp)->next)
-		if (*linkp == link)
-			break;
-	if (*linkp == NULL)
-		return;
-
-	if (link->state & DEV_CONFIG)
-		SYM53C500_release(link);
-
-	if (link->handle)
-		pcmcia_deregister_client(link->handle);
-
-	/* Unlink device structure, free bits. */
-	*linkp = link->next;
 	kfree(link->priv);
 	link->priv = NULL;
 } /* SYM53C500_detach */
 
-static dev_link_t *
-SYM53C500_attach(void)
+static int
+SYM53C500_probe(struct pcmcia_device *link)
 {
 	struct scsi_info_t *info;
-	client_reg_t client_reg;
-	dev_link_t *link;
-	int ret;
 
-	DEBUG(0, "SYM53C500_attach()\n");
+	dev_dbg(&link->dev, "SYM53C500_attach()\n");
 
 	/* Create new SCSI device */
-	info = kmalloc(sizeof(*info), GFP_KERNEL);
+	info = kzalloc(sizeof(*info), GFP_KERNEL);
 	if (!info)
-		return NULL;
-	memset(info, 0, sizeof(*info));
-	link = &info->link;
+		return -ENOMEM;
+	info->p_dev = link;
 	link->priv = info;
-	link->io.NumPorts1 = 16;
-	link->io.Attributes1 = IO_DATA_PATH_WIDTH_AUTO;
-	link->io.IOAddrLines = 10;
-	link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
-	link->irq.IRQInfo1 = IRQ_LEVEL_ID;
-	link->conf.Attributes = CONF_ENABLE_IRQ;
-	link->conf.Vcc = 50;
-	link->conf.IntType = INT_MEMORY_AND_IO;
-	link->conf.Present = PRESENT_OPTION;
+	link->config_flags |= CONF_ENABLE_IRQ | CONF_AUTO_SET_IO;
 
-	/* Register with Card Services */
-	link->next = dev_list;
-	dev_list = link;
-	client_reg.dev_info = &dev_info;
-	client_reg.event_handler = &SYM53C500_event;
-	client_reg.EventMask = CS_EVENT_RESET_REQUEST | CS_EVENT_CARD_RESET |
-	    CS_EVENT_CARD_INSERTION | CS_EVENT_CARD_REMOVAL |
-	    CS_EVENT_PM_SUSPEND | CS_EVENT_PM_RESUME;
-	client_reg.Version = 0x0210;
-	client_reg.event_callback_args.client_data = link;
-	ret = pcmcia_register_client(&link->handle, &client_reg);
-	if (ret != 0) {
-		cs_error(link->handle, RegisterClient, ret);
-		SYM53C500_detach(link);
-		return NULL;
-	}
-
-	return link;
+	return SYM53C500_config(link);
 } /* SYM53C500_attach */
 
 MODULE_AUTHOR("Bob Tracy <rct@frus.com>");
 MODULE_DESCRIPTION("SYM53C500 PCMCIA SCSI driver");
 MODULE_LICENSE("GPL");
 
+static const struct pcmcia_device_id sym53c500_ids[] = {
+	PCMCIA_DEVICE_PROD_ID12("BASICS by New Media Corporation", "SCSI Sym53C500", 0x23c78a9d, 0x0099e7f7),
+	PCMCIA_DEVICE_PROD_ID12("New Media Corporation", "SCSI Bus Toaster Sym53C500", 0x085a850b, 0x45432eb8),
+	PCMCIA_DEVICE_PROD_ID2("SCSI9000", 0x21648f44),
+	PCMCIA_DEVICE_NULL,
+};
+MODULE_DEVICE_TABLE(pcmcia, sym53c500_ids);
+
 static struct pcmcia_driver sym53c500_cs_driver = {
 	.owner		= THIS_MODULE,
-	.drv		= {
-		.name	= "sym53c500_cs",
-	},
-	.attach		= SYM53C500_attach,
-	.detach		= SYM53C500_detach,
+	.name		= "sym53c500_cs",
+	.probe		= SYM53C500_probe,
+	.remove		= SYM53C500_detach,
+	.id_table       = sym53c500_ids,
+	.resume		= sym53c500_resume,
 };
 
 static int __init

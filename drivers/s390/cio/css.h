@@ -1,10 +1,18 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _CSS_H
 #define _CSS_H
 
+#include <linux/mutex.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
+#include <linux/device.h>
+#include <linux/types.h>
 
 #include <asm/cio.h>
+#include <asm/chpid.h>
+#include <asm/schid.h>
+
+#include "cio.h"
 
 /*
  * path grouping stuff
@@ -33,121 +41,116 @@ struct path_state {
 	__u8  resvd  : 3;	/* reserved */
 } __attribute__ ((packed));
 
+struct extended_cssid {
+	u8 version;
+	u8 cssid;
+} __attribute__ ((packed));
+
 struct pgid {
 	union {
 		__u8 fc;   	/* SPID function code */
 		struct path_state ps;	/* SNID path state */
-	} inf;
-	__u32 cpu_addr	: 16;	/* CPU address */
+	} __attribute__ ((packed)) inf;
+	union {
+		__u32 cpu_addr	: 16;	/* CPU address */
+		struct extended_cssid ext_cssid;
+	} __attribute__ ((packed)) pgid_high;
 	__u32 cpu_id	: 24;	/* CPU identification */
 	__u32 cpu_model : 16;	/* CPU model */
 	__u32 tod_high;		/* high word TOD clock */
 } __attribute__ ((packed));
 
-extern struct pgid global_pgid;
-
-#define MAX_CIWS 8
-
-/*
- * sense-id response buffer layout
- */
-struct senseid {
-	/* common part */
-	__u8  reserved;     	/* always 0x'FF' */
-	__u16 cu_type;	     	/* control unit type */
-	__u8  cu_model;     	/* control unit model */
-	__u16 dev_type;     	/* device type */
-	__u8  dev_model;    	/* device model */
-	__u8  unused;	     	/* padding byte */
-	/* extended part */
-	struct ciw ciw[MAX_CIWS];	/* variable # of CIWs */
-}  __attribute__ ((packed,aligned(4)));
-
-struct ccw_device_private {
-	int state;		/* device state */
-	atomic_t onoff;
-	unsigned long registered;
-	__u16 devno;		/* device number */
-	__u16 irq;		/* subchannel number */
-	__u8 imask;		/* lpm mask for SNID/SID/SPGID */
-	int iretry;		/* retry counter SNID/SID/SPGID */
-	struct {
-		unsigned int fast:1;	/* post with "channel end" */
-		unsigned int repall:1;	/* report every interrupt status */
-		unsigned int pgroup:1;  /* do path grouping */
-		unsigned int force:1;   /* allow forced online */
-	} __attribute__ ((packed)) options;
-	struct {
-		unsigned int pgid_single:1; /* use single path for Set PGID */
-		unsigned int esid:1;        /* Ext. SenseID supported by HW */
-		unsigned int dosense:1;	    /* delayed SENSE required */
-		unsigned int doverify:1;    /* delayed path verification */
-		unsigned int donotify:1;    /* call notify function */
-		unsigned int recog_done:1;  /* dev. recog. complete */
-	} __attribute__((packed)) flags;
-	unsigned long intparm;	/* user interruption parameter */
-	struct qdio_irq *qdio_data;
-	struct irb irb;		/* device status */
-	struct senseid senseid;	/* SenseID info */
-	struct pgid pgid;	/* path group ID */
-	struct ccw1 iccws[2];	/* ccws for SNID/SID/SPGID commands */
-	struct work_struct kick_work;
-	wait_queue_head_t wait_q;
-	struct timer_list timer;
-	void *cmb;			/* measurement information */
-	struct list_head cmb_list;	/* list of measured devices */
-	u64 cmb_start_time;		/* clock value of cmb reset */
-	void *cmb_wait;			/* deferred cmb enable/disable */
-};
-
-/*
- * A css driver handles all subchannels of one type.
- * Currently, we only care about I/O subchannels (type 0), these
- * have a ccw_device connected to them.
+struct subchannel;
+struct chp_link;
+/**
+ * struct css_driver - device driver for subchannels
+ * @subchannel_type: subchannel type supported by this driver
+ * @drv: embedded device driver structure
+ * @irq: called on interrupts
+ * @chp_event: called for events affecting a channel path
+ * @sch_event: called for events affecting the subchannel
+ * @probe: function called on probe
+ * @remove: function called on remove
+ * @shutdown: called at device shutdown
+ * @prepare: prepare for pm state transition
+ * @complete: undo work done in @prepare
+ * @freeze: callback for freezing during hibernation snapshotting
+ * @thaw: undo work done in @freeze
+ * @restore: callback for restoring after hibernation
+ * @settle: wait for asynchronous work to finish
  */
 struct css_driver {
-	unsigned int subchannel_type;
+	struct css_device_id *subchannel_type;
 	struct device_driver drv;
-	void (*irq)(struct device *);
-	int (*notify)(struct device *, int);
-	void (*verify)(struct device *);
-	void (*termination)(struct device *);
+	void (*irq)(struct subchannel *);
+	int (*chp_event)(struct subchannel *, struct chp_link *, int);
+	int (*sch_event)(struct subchannel *, int);
+	int (*probe)(struct subchannel *);
+	int (*remove)(struct subchannel *);
+	void (*shutdown)(struct subchannel *);
+	int (*prepare) (struct subchannel *);
+	void (*complete) (struct subchannel *);
+	int (*freeze)(struct subchannel *);
+	int (*thaw) (struct subchannel *);
+	int (*restore)(struct subchannel *);
+	int (*settle)(void);
 };
 
-/*
- * all css_drivers have the css_bus_type
- */
-extern struct bus_type css_bus_type;
-extern struct css_driver io_subchannel_driver;
+#define to_cssdriver(n) container_of(n, struct css_driver, drv)
 
-int css_probe_device(int irq);
-extern struct subchannel * get_subchannel_by_schid(int irq);
-extern unsigned int highest_subchannel;
+extern int css_driver_register(struct css_driver *);
+extern void css_driver_unregister(struct css_driver *);
+
+extern void css_sch_device_unregister(struct subchannel *);
+extern int css_register_subchannel(struct subchannel *);
+extern struct subchannel *css_alloc_subchannel(struct subchannel_id);
+extern struct subchannel *get_subchannel_by_schid(struct subchannel_id);
 extern int css_init_done;
+extern int max_ssid;
+int for_each_subchannel_staged(int (*fn_known)(struct subchannel *, void *),
+			       int (*fn_unknown)(struct subchannel_id,
+			       void *), void *data);
+extern int for_each_subchannel(int(*fn)(struct subchannel_id, void *), void *);
+void css_update_ssd_info(struct subchannel *sch);
 
-#define __MAX_SUBCHANNELS 65536
+struct channel_subsystem {
+	int cssid;
+	struct channel_path *chps[__MAX_CHPID + 1];
+	struct device device;
+	struct pgid global_pgid;
+	struct mutex mutex;
+	/* channel measurement related */
+	int cm_enabled;
+	void *cub_addr1;
+	void *cub_addr2;
+	/* for orphaned ccw devices */
+	struct subchannel *pseudo_subchannel;
+};
+#define to_css(dev) container_of(dev, struct channel_subsystem, device)
 
-extern struct bus_type css_bus_type;
-extern struct device css_bus_device;
+extern struct channel_subsystem *channel_subsystems[];
 
-/* Some helper functions for disconnected state. */
-int device_is_disconnected(struct subchannel *);
-void device_set_disconnected(struct subchannel *);
-void device_trigger_reprobe(struct subchannel *);
+/* Dummy helper which needs to change once we support more than one css. */
+static inline struct channel_subsystem *css_by_id(u8 cssid)
+{
+	return channel_subsystems[0];
+}
 
-/* Helper functions for vary on/off. */
-void device_set_waiting(struct subchannel *);
-
-/* Machine check helper function. */
-void device_kill_pending_timer(struct subchannel *);
+/* Dummy iterator which needs to change once we support more than one css. */
+#define for_each_css(css)						\
+	for ((css) = channel_subsystems[0]; (css); (css) = NULL)
 
 /* Helper functions to build lists for the slow path. */
-int css_enqueue_subchannel_slow(unsigned long schid);
-void css_walk_subchannel_slow_list(void (*fn)(unsigned long));
-void css_clear_subchannel_slow_list(void);
-int css_slow_subchannels_exist(void);
-extern int need_rescan;
+void css_schedule_eval(struct subchannel_id schid);
+void css_schedule_eval_all(void);
+void css_schedule_eval_all_unreg(unsigned long delay);
+int css_complete_work(void);
 
-extern struct workqueue_struct *slow_path_wq;
-extern struct work_struct slow_path_work;
+int sch_is_pseudo_sch(struct subchannel *);
+struct schib;
+int css_sch_is_valid(struct schib *);
+
+extern struct workqueue_struct *cio_work_q;
+void css_wait_for_slow_path(void);
+void css_sched_sch_todo(struct subchannel *sch, enum sch_todo todo);
 #endif

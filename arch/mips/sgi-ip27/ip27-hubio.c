@@ -17,11 +17,11 @@
 static int force_fire_and_forget = 1;
 
 /**
- * hub_pio_map  -  establish a HUB PIO mapping
+ * hub_pio_map	-  establish a HUB PIO mapping
  *
  * @hub:	hub to perform PIO mapping on
  * @widget:	widget ID to perform PIO mapping for
- * @xtalk_addr:	xtalk_address that needs to be mapped
+ * @xtalk_addr: xtalk_address that needs to be mapped
  * @size:	size of the PIO mapping
  *
  **/
@@ -29,7 +29,6 @@ unsigned long hub_pio_map(cnodeid_t cnode, xwidgetnum_t widget,
 			  unsigned long xtalk_addr, size_t size)
 {
 	nasid_t nasid = COMPACT_TO_NASID_NODEID(cnode);
-	volatile hubreg_t junk;
 	unsigned i;
 
 	/* use small-window mapping if possible */
@@ -64,7 +63,7 @@ unsigned long hub_pio_map(cnodeid_t cnode, xwidgetnum_t widget,
 		 * after we write it.
 		 */
 		IIO_ITTE_PUT(nasid, i, HUB_PIO_MAP_TO_MEM, widget, xtalk_addr);
-		junk = HUB_L(IIO_ITTE_GET(nasid, i));
+		(void) HUB_L(IIO_ITTE_GET(nasid, i));
 
 		return NODE_BWIN_BASE(nasid, widget) + (xtalk_addr % BWIN_SIZE);
 	}
@@ -79,8 +78,8 @@ unsigned long hub_pio_map(cnodeid_t cnode, xwidgetnum_t widget,
 /*
  * hub_setup_prb(nasid, prbnum, credits, conveyor)
  *
- * 	Put a PRB into fire-and-forget mode if conveyor isn't set.  Otherwise,
- * 	put it into conveyor belt mode with the specified number of credits.
+ *	Put a PRB into fire-and-forget mode if conveyor isn't set.  Otherwise,
+ *	put it into conveyor belt mode with the specified number of credits.
  */
 static void hub_setup_prb(nasid_t nasid, int prbnum, int credits)
 {
@@ -106,7 +105,7 @@ static void hub_setup_prb(nasid_t nasid, int prbnum, int credits)
 	prb.iprb_ff = force_fire_and_forget ? 1 : 0;
 
 	/*
-	 * Set the appropriate number of PIO cresits for the widget.
+	 * Set the appropriate number of PIO credits for the widget.
 	 */
 	prb.iprb_xtalkctr = credits;
 
@@ -126,12 +125,12 @@ static void hub_setup_prb(nasid_t nasid, int prbnum, int credits)
  * so we turn off access to all widgets for the duration of the function.
  *
  * XXX - This code should really check what kind of widget we're talking
- * to.  Bridges can only handle three requests, but XG will do more.
+ * to.	Bridges can only handle three requests, but XG will do more.
  * How many can crossbow handle to widget 0?  We're assuming 1.
  *
  * XXX - There is a bug in the crossbow that link reset PIOs do not
  * return write responses.  The easiest solution to this problem is to
- * leave widget 0 (xbow) in fire-and-forget mode at all times.  This
+ * leave widget 0 (xbow) in fire-and-forget mode at all times.	This
  * only affects pio's to xbow registers, which should be rare.
  **/
 static void hub_set_piomode(nasid_t nasid)
@@ -168,7 +167,7 @@ static void hub_set_piomode(nasid_t nasid)
 }
 
 /*
- * hub_pio_init  -  PIO-related hub initalization
+ * hub_pio_init	 -  PIO-related hub initialization
  *
  * @hub:	hubinfo structure for our hub
  */

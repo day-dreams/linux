@@ -6,12 +6,12 @@
  * Copyright (C) 2000 - 2001 by Kanoj Sarcar (kanoj@sgi.com)
  * Copyright (C) 2000 - 2001 by Silicon Graphics, Inc.
  */
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/sched.h>
+#include <linux/smp.h>
 #include <linux/mm.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/cpumask.h>
 #include <asm/cpu.h>
 #include <asm/io.h>
@@ -28,7 +28,6 @@
 #include <asm/sn/hub.h>
 #include <asm/sn/intr.h>
 #include <asm/current.h>
-#include <asm/smp.h>
 #include <asm/processor.h>
 #include <asm/mmu_context.h>
 #include <asm/thread_info.h>
@@ -48,20 +47,23 @@ cnodeid_t	cpuid_to_compact_node[MAXCPUS];
 
 EXPORT_SYMBOL(nasid_to_compact_node);
 
+struct cpuinfo_ip27 sn_cpu_info[NR_CPUS];
+EXPORT_SYMBOL_GPL(sn_cpu_info);
+
 extern void pcibr_setup(cnodeid_t);
 
 extern void xtalk_probe_node(cnodeid_t nid);
 
-static void __init per_hub_init(cnodeid_t cnode)
+static void per_hub_init(cnodeid_t cnode)
 {
 	struct hub_data *hub = hub_data(cnode);
 	nasid_t nasid = COMPACT_TO_NASID_NODEID(cnode);
+	int i;
 
-	cpu_set(smp_processor_id(), hub->h_cpus);
+	cpumask_set_cpu(smp_processor_id(), &hub->h_cpus);
 
 	if (test_and_set_bit(cnode, hub_init_mask))
 		return;
-
 	/*
 	 * Set CRB timeout at 5ms, (< PI timeout of 10ms)
 	 */
@@ -88,9 +90,27 @@ static void __init per_hub_init(cnodeid_t cnode)
 		__flush_cache_all();
 	}
 #endif
+
+	/*
+	 * Some interrupts are reserved by hardware or by software convention.
+	 * Mark these as reserved right away so they won't be used accidentally
+	 * later.
+	 */
+	for (i = 0; i <= BASE_PCI_IRQ; i++) {
+		__set_bit(i, hub->irq_alloc_mask);
+		LOCAL_HUB_CLR_INTR(INT_PEND0_BASELVL + i);
+	}
+
+	__set_bit(IP_PEND0_6_63, hub->irq_alloc_mask);
+	LOCAL_HUB_S(PI_INT_PEND_MOD, IP_PEND0_6_63);
+
+	for (i = NI_BRDCAST_ERR_A; i <= MSC_PANIC_INTR; i++) {
+		__set_bit(i, hub->irq_alloc_mask);
+		LOCAL_HUB_CLR_INTR(INT_PEND1_BASELVL + i);
+	}
 }
 
-void __init per_cpu_init(void)
+void per_cpu_init(void)
 {
 	int cpu = smp_processor_id();
 	int slice = LOCAL_HUB_L(PI_CPU_NUM);
@@ -104,28 +124,10 @@ void __init per_cpu_init(void)
 
 	clear_c0_status(ST0_IM);
 
+	per_hub_init(cnode);
+
 	for (i = 0; i < LEVELS_PER_SLICE; i++)
 		si->level_to_irq[i] = -1;
-
-	/*
-	 * Some interrupts are reserved by hardware or by software convention.
-	 * Mark these as reserved right away so they won't be used accidently
-	 * later.
-	 */
-	for (i = 0; i <= BASE_PCI_IRQ; i++) {
-		__set_bit(i, si->irq_alloc_mask);
-		LOCAL_HUB_S(PI_INT_PEND_MOD, i);
-	}
-
-	__set_bit(IP_PEND0_6_63, si->irq_alloc_mask);
-	LOCAL_HUB_S(PI_INT_PEND_MOD, IP_PEND0_6_63);
-
-	for (i = NI_BRDCAST_ERR_A; i <= MSC_PANIC_INTR; i++) {
-		__set_bit(i, si->irq_alloc_mask + 1);
-		LOCAL_HUB_S(PI_INT_PEND_MOD, i);
-	}
-
-	LOCAL_HUB_L(PI_INT_PEND0);
 
 	/*
 	 * We use this so we can find the local hub's data as fast as only
@@ -140,8 +142,6 @@ void __init per_cpu_init(void)
 	install_cpu_nmi_handler(cputoslice(cpu));
 
 	set_c0_status(SRB_DEV0 | SRB_DEV1);
-
-	per_hub_init(cnode);
 }
 
 /*
@@ -151,7 +151,7 @@ nasid_t
 get_nasid(void)
 {
 	return (nasid_t)((LOCAL_HUB_L(NI_STATUS_REV_ID) & NSRI_NODEID_MASK)
-	                 >> NSRI_NODEID_SHFT);
+			 >> NSRI_NODEID_SHFT);
 }
 
 /*
@@ -160,27 +160,6 @@ get_nasid(void)
 cnodeid_t get_compact_nodeid(void)
 {
 	return NASID_TO_COMPACT_NODEID(get_nasid());
-}
-
-/* Extracted from the IOC3 meta driver.  FIXME.  */
-static inline void ioc3_sio_init(void)
-{
-	struct ioc3 *ioc3;
-	nasid_t nid;
-	long loops;
-
-	nid = get_nasid();
-	ioc3 = (struct ioc3 *) KL_CONFIG_CH_CONS_INFO(nid)->memory_base;
-
-	ioc3->sscr_a = 0;			/* PIO mode for uarta.  */
-	ioc3->sscr_b = 0;			/* PIO mode for uartb.  */
-	ioc3->sio_iec = ~0;
-	ioc3->sio_ies = (SIO_IR_SA_INT | SIO_IR_SB_INT);
-
-	loops=1000000; while(loops--);
-	ioc3->sregs.uarta.iu_fcr = 0;
-	ioc3->sregs.uartb.iu_fcr = 0;
-	loops=1000000; while(loops--);
 }
 
 static inline void ioc3_eth_init(void)
@@ -194,16 +173,13 @@ static inline void ioc3_eth_init(void)
 	ioc3->eier = 0;
 }
 
-extern void ip27_setup_console(void);
-extern void ip27_time_init(void);
 extern void ip27_reboot_setup(void);
 
-static int __init ip27_setup(void)
+void __init plat_mem_setup(void)
 {
 	hubreg_t p, e, n_mode;
 	nasid_t nid;
 
-	ip27_setup_console();
 	ip27_reboot_setup();
 
 	/*
@@ -230,7 +206,7 @@ static int __init ip27_setup(void)
 	 */
 	n_mode = LOCAL_HUB_L(NI_STATUS_REV_ID) & NSRI_MORENODES_MASK;
 	printk("Machine is in %c mode.\n", n_mode ? 'N' : 'M');
-#ifdef CONFIG_SGI_SN0_N_MODE
+#ifdef CONFIG_SGI_SN_N_MODE
 	if (!n_mode)
 		panic("Kernel compiled for M mode.");
 #else
@@ -238,15 +214,8 @@ static int __init ip27_setup(void)
 		panic("Kernel compiled for N mode.");
 #endif
 
-	ioc3_sio_init();
 	ioc3_eth_init();
 	per_cpu_init();
 
 	set_io_port_base(IO_BASE);
-
-	board_time_init = ip27_time_init;
-
-	return 0;
 }
-
-early_initcall(ip27_setup);

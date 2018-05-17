@@ -9,16 +9,6 @@
  *
  *  Common directory handling for ADFS
  */
-#include <linux/config.h>
-#include <linux/errno.h>
-#include <linux/fs.h>
-#include <linux/adfs_fs.h>
-#include <linux/time.h>
-#include <linux/stat.h>
-#include <linux/spinlock.h>
-#include <linux/smp_lock.h>
-#include <linux/buffer_head.h>		/* for file_fsync() */
-
 #include "adfs.h"
 
 /*
@@ -27,49 +17,43 @@
 static DEFINE_RWLOCK(adfs_dir_lock);
 
 static int
-adfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
+adfs_readdir(struct file *file, struct dir_context *ctx)
 {
-	struct inode *inode = filp->f_dentry->d_inode;
+	struct inode *inode = file_inode(file);
 	struct super_block *sb = inode->i_sb;
-	struct adfs_dir_ops *ops = ADFS_SB(sb)->s_dir;
+	const struct adfs_dir_ops *ops = ADFS_SB(sb)->s_dir;
 	struct object_info obj;
 	struct adfs_dir dir;
 	int ret = 0;
 
-	lock_kernel();	
-
-	if (filp->f_pos >> 32)
-		goto out;
+	if (ctx->pos >> 32)
+		return 0;
 
 	ret = ops->read(sb, inode->i_ino, inode->i_size, &dir);
 	if (ret)
-		goto out;
+		return ret;
 
-	switch ((unsigned long)filp->f_pos) {
-	case 0:
-		if (filldir(dirent, ".", 1, 0, inode->i_ino, DT_DIR) < 0)
+	if (ctx->pos == 0) {
+		if (!dir_emit_dot(file, ctx))
 			goto free_out;
-		filp->f_pos += 1;
-
-	case 1:
-		if (filldir(dirent, "..", 2, 1, dir.parent_id, DT_DIR) < 0)
+		ctx->pos = 1;
+	}
+	if (ctx->pos == 1) {
+		if (!dir_emit(ctx, "..", 2, dir.parent_id, DT_DIR))
 			goto free_out;
-		filp->f_pos += 1;
-
-	default:
-		break;
+		ctx->pos = 2;
 	}
 
 	read_lock(&adfs_dir_lock);
 
-	ret = ops->setpos(&dir, filp->f_pos - 2);
+	ret = ops->setpos(&dir, ctx->pos - 2);
 	if (ret)
 		goto unlock_out;
 	while (ops->getnext(&dir, &obj) == 0) {
-		if (filldir(dirent, obj.name, obj.name_len,
-			    filp->f_pos, obj.file_id, DT_UNKNOWN) < 0)
-			goto unlock_out;
-		filp->f_pos += 1;
+		if (!dir_emit(ctx, obj.name, obj.name_len,
+			    obj.file_id, DT_UNKNOWN))
+			break;
+		ctx->pos++;
 	}
 
 unlock_out:
@@ -77,18 +61,15 @@ unlock_out:
 
 free_out:
 	ops->free(&dir);
-
-out:
-	unlock_kernel();
 	return ret;
 }
 
 int
-adfs_dir_update(struct super_block *sb, struct object_info *obj)
+adfs_dir_update(struct super_block *sb, struct object_info *obj, int wait)
 {
 	int ret = -EINVAL;
 #ifdef CONFIG_ADFS_FS_RW
-	struct adfs_dir_ops *ops = ADFS_SB(sb)->s_dir;
+	const struct adfs_dir_ops *ops = ADFS_SB(sb)->s_dir;
 	struct adfs_dir dir;
 
 	printk(KERN_INFO "adfs_dir_update: object %06X in dir %06X\n",
@@ -107,6 +88,12 @@ adfs_dir_update(struct super_block *sb, struct object_info *obj)
 	ret = ops->update(&dir, obj);
 	write_unlock(&adfs_dir_lock);
 
+	if (wait) {
+		int err = ops->sync(&dir);
+		if (!ret)
+			ret = err;
+	}
+
 	ops->free(&dir);
 out:
 #endif
@@ -114,7 +101,7 @@ out:
 }
 
 static int
-adfs_match(struct qstr *name, struct object_info *obj)
+adfs_match(const struct qstr *name, struct object_info *obj)
 {
 	int i;
 
@@ -139,10 +126,10 @@ adfs_match(struct qstr *name, struct object_info *obj)
 }
 
 static int
-adfs_dir_lookup_byname(struct inode *inode, struct qstr *name, struct object_info *obj)
+adfs_dir_lookup_byname(struct inode *inode, const struct qstr *name, struct object_info *obj)
 {
 	struct super_block *sb = inode->i_sb;
-	struct adfs_dir_ops *ops = ADFS_SB(sb)->s_dir;
+	const struct adfs_dir_ops *ops = ADFS_SB(sb)->s_dir;
 	struct adfs_dir dir;
 	int ret;
 
@@ -151,7 +138,7 @@ adfs_dir_lookup_byname(struct inode *inode, struct qstr *name, struct object_inf
 		goto out;
 
 	if (ADFS_I(inode)->parent_id != dir.parent_id) {
-		adfs_error(sb, "parent directory changed under me! (%lx but got %lx)\n",
+		adfs_error(sb, "parent directory changed under me! (%lx but got %x)\n",
 			   ADFS_I(inode)->parent_id, dir.parent_id);
 		ret = -EIO;
 		goto free_out;
@@ -196,14 +183,15 @@ out:
 	return ret;
 }
 
-struct file_operations adfs_dir_operations = {
+const struct file_operations adfs_dir_operations = {
 	.read		= generic_read_dir,
-	.readdir	= adfs_readdir,
-	.fsync		= file_fsync,
+	.llseek		= generic_file_llseek,
+	.iterate	= adfs_readdir,
+	.fsync		= generic_file_fsync,
 };
 
 static int
-adfs_hash(struct dentry *parent, struct qstr *qstr)
+adfs_hash(const struct dentry *parent, struct qstr *qstr)
 {
 	const unsigned int name_len = ADFS_SB(parent->d_sb)->s_namelen;
 	const unsigned char *name;
@@ -219,7 +207,7 @@ adfs_hash(struct dentry *parent, struct qstr *qstr)
 	 */
 	qstr->len = i = name_len;
 	name = qstr->name;
-	hash = init_name_hash();
+	hash = init_name_hash(parent);
 	while (i--) {
 		char c;
 
@@ -239,17 +227,18 @@ adfs_hash(struct dentry *parent, struct qstr *qstr)
  * requirements of the underlying filesystem.
  */
 static int
-adfs_compare(struct dentry *parent, struct qstr *entry, struct qstr *name)
+adfs_compare(const struct dentry *dentry,
+		unsigned int len, const char *str, const struct qstr *name)
 {
 	int i;
 
-	if (entry->len != name->len)
+	if (len != name->len)
 		return 1;
 
 	for (i = 0; i < name->len; i++) {
 		char a, b;
 
-		a = entry->name[i];
+		a = str[i];
 		b = name->name[i];
 
 		if (a >= 'A' && a <= 'Z')
@@ -263,20 +252,18 @@ adfs_compare(struct dentry *parent, struct qstr *entry, struct qstr *name)
 	return 0;
 }
 
-struct dentry_operations adfs_dentry_operations = {
+const struct dentry_operations adfs_dentry_operations = {
 	.d_hash		= adfs_hash,
 	.d_compare	= adfs_compare,
 };
 
 static struct dentry *
-adfs_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
+adfs_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 {
 	struct inode *inode = NULL;
 	struct object_info obj;
 	int error;
 
-	dentry->d_op = &adfs_dentry_operations;	
-	lock_kernel();
 	error = adfs_dir_lookup_byname(dir, &dentry->d_name, &obj);
 	if (error == 0) {
 		error = -EACCES;
@@ -288,7 +275,6 @@ adfs_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
 		if (inode)
 			error = 0;
 	}
-	unlock_kernel();
 	d_add(dentry, inode);
 	return ERR_PTR(error);
 }
@@ -296,7 +282,7 @@ adfs_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
 /*
  * directories can handle most operations...
  */
-struct inode_operations adfs_dir_inode_operations = {
+const struct inode_operations adfs_dir_inode_operations = {
 	.lookup		= adfs_lookup,
 	.setattr	= adfs_notify_change,
 };

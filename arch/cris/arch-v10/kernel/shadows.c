@@ -1,11 +1,12 @@
-/* $Id: shadows.c,v 1.1 2001/12/17 13:59:27 bjornw Exp $
- * 
+// SPDX-License-Identifier: GPL-2.0
+/*
  * Various shadow registers. Defines for these are in include/asm-etrax100/io.h
  */
 
 /* Shadows for internal Etrax-registers */
 
 unsigned long genconfig_shadow;
+unsigned long gen_config_ii_shadow;
 unsigned long port_g_data_shadow;
 unsigned char port_pa_dir_shadow;
 unsigned char port_pa_data_shadow;
@@ -19,7 +20,7 @@ unsigned long r_timer_ctrl_shadow;
  * These are only usable if there actually IS a latch connected
  * to the corresponding external chip-select pin.
  *
- * A common usage is that CSP0 controls LED's and CSP4 video chips.
+ * A common usage is that CSP0 controls LEDs and CSP4 video chips.
  */
 
 unsigned long port_cse1_shadow;

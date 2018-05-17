@@ -29,25 +29,11 @@
 #define DEBUGP(fmt...)
 #endif
 
-void *
-module_alloc(unsigned long size)
-{
-	if (size == 0)
-		return NULL;
-	return vmalloc(size);
-}
-
-void
-module_free(struct module *mod, void *module_region)
-{
-	vfree(module_region);
-}
-
 /* Allocate the GOT at the end of the core sections.  */
 
 struct got_entry {
 	struct got_entry *next;
-	Elf64_Addr r_offset;
+	Elf64_Sxword r_addend;
 	int got_offset;
 };
 
@@ -57,14 +43,14 @@ process_reloc_for_got(Elf64_Rela *rela,
 {
 	unsigned long r_sym = ELF64_R_SYM (rela->r_info);
 	unsigned long r_type = ELF64_R_TYPE (rela->r_info);
-	Elf64_Addr r_offset = rela->r_offset;
+	Elf64_Sxword r_addend = rela->r_addend;
 	struct got_entry *g;
 
 	if (r_type != R_ALPHA_LITERAL)
 		return;
 
 	for (g = chains + r_sym; g ; g = g->next)
-		if (g->r_offset == r_offset) {
+		if (g->r_addend == r_addend) {
 			if (g->got_offset == 0) {
 				g->got_offset = *poffset;
 				*poffset += 8;
@@ -74,7 +60,7 @@ process_reloc_for_got(Elf64_Rela *rela,
 
 	g = kmalloc (sizeof (*g), GFP_KERNEL);
 	g->next = chains[r_sym].next;
-	g->r_offset = r_offset;
+	g->r_addend = r_addend;
 	g->got_offset = *poffset;
 	*poffset += 8;
 	chains[r_sym].next = g;
@@ -119,8 +105,13 @@ module_frob_arch_sections(Elf64_Ehdr *hdr, Elf64_Shdr *sechdrs,
 	}
 
 	nsyms = symtab->sh_size / sizeof(Elf64_Sym);
-	chains = kmalloc(nsyms * sizeof(struct got_entry), GFP_KERNEL);
-	memset(chains, 0, nsyms * sizeof(struct got_entry));
+	chains = kcalloc(nsyms, sizeof(struct got_entry), GFP_KERNEL);
+	if (!chains) {
+		printk(KERN_ERR
+		       "module %s: no memory for symbol chain buffer\n",
+		       me->name);
+		return -ENOMEM;
+	}
 
 	got->sh_size = 0;
 	got->sh_addralign = 8;
@@ -151,14 +142,6 @@ module_frob_arch_sections(Elf64_Ehdr *hdr, Elf64_Shdr *sechdrs,
 }
 
 int
-apply_relocate(Elf64_Shdr *sechdrs, const char *strtab, unsigned int symindex,
-	       unsigned int relsec, struct module *me)
-{
-	printk(KERN_ERR "module %s: REL relocation unsupported\n", me->name);
-	return -ENOEXEC;
-}
-
-int
 apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab,
 		   unsigned int symindex, unsigned int relsec,
 		   struct module *me)
@@ -177,7 +160,7 @@ apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab,
 
 	/* The small sections were sorted to the end of the segment.
 	   The following should definitely cover them.  */
-	gp = (u64)me->module_core + me->core_size - 0x8000;
+	gp = (u64)me->core_layout.base + me->core_layout.size - 0x8000;
 	got = sechdrs[me->arch.gotsecindex].sh_addr;
 
 	for (i = 0; i < n; i++) {
@@ -197,6 +180,9 @@ apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab,
 
 		switch (r_type) {
 		case R_ALPHA_NONE:
+			break;
+		case R_ALPHA_REFLONG:
+			*(u32 *)location = value;
 			break;
 		case R_ALPHA_REFQUAD:
 			/* BUG() can produce misaligned relocations. */
@@ -285,27 +271,15 @@ apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab,
 		reloc_overflow:
 			if (ELF64_ST_TYPE (sym->st_info) == STT_SECTION)
 			  printk(KERN_ERR
-			         "module %s: Relocation overflow vs section %d\n",
-			         me->name, sym->st_shndx);
+			         "module %s: Relocation (type %lu) overflow vs section %d\n",
+			         me->name, r_type, sym->st_shndx);
 			else
 			  printk(KERN_ERR
-			         "module %s: Relocation overflow vs %s\n",
-			         me->name, strtab + sym->st_name);
+			         "module %s: Relocation (type %lu) overflow vs %s\n",
+			         me->name, r_type, strtab + sym->st_name);
 			return -ENOEXEC;
 		}
 	}
 
 	return 0;
-}
-
-int
-module_finalize(const Elf_Ehdr *hdr, const Elf_Shdr *sechdrs,
-		struct module *me)
-{
-	return 0;
-}
-
-void
-module_arch_cleanup(struct module *mod)
-{
 }

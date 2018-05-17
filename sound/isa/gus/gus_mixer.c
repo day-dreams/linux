@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *  Routines for control of ICS 2101 chip and "mixer" in GF1 chip
  *
  *
@@ -19,7 +19,6 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/time.h>
 #include <linux/wait.h>
 #include <sound/core.h>
@@ -36,18 +35,11 @@
   .get = snd_gf1_get_single, .put = snd_gf1_put_single, \
   .private_value = shift | (invert << 8) }
 
-static int snd_gf1_info_single(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t * uinfo)
-{
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_BOOLEAN;
-	uinfo->count = 1;
-	uinfo->value.integer.min = 0;
-	uinfo->value.integer.max = 1;
-	return 0;
-}
+#define snd_gf1_info_single	snd_ctl_boolean_mono_info
 
-static int snd_gf1_get_single(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
+static int snd_gf1_get_single(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	snd_gus_card_t *gus = snd_kcontrol_chip(kcontrol);
+	struct snd_gus_card *gus = snd_kcontrol_chip(kcontrol);
 	int shift = kcontrol->private_value & 0xff;
 	int invert = (kcontrol->private_value >> 8) & 1;
 	
@@ -57,9 +49,9 @@ static int snd_gf1_get_single(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * 
 	return 0;
 }
 
-static int snd_gf1_put_single(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
+static int snd_gf1_put_single(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	snd_gus_card_t *gus = snd_kcontrol_chip(kcontrol);
+	struct snd_gus_card *gus = snd_kcontrol_chip(kcontrol);
 	unsigned long flags;
 	int shift = kcontrol->private_value & 0xff;
 	int invert = (kcontrol->private_value >> 8) & 1;
@@ -86,7 +78,7 @@ static int snd_gf1_put_single(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * 
   .get = snd_ics_get_double, .put = snd_ics_put_double, \
   .private_value = addr }
 
-static int snd_ics_info_double(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t * uinfo)
+static int snd_ics_info_double(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo)
 {
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
 	uinfo->count = 2;
@@ -95,9 +87,9 @@ static int snd_ics_info_double(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t * u
 	return 0;
 }
 
-static int snd_ics_get_double(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
+static int snd_ics_get_double(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	snd_gus_card_t *gus = snd_kcontrol_chip(kcontrol);
+	struct snd_gus_card *gus = snd_kcontrol_chip(kcontrol);
 	unsigned long flags;
 	int addr = kcontrol->private_value & 0xff;
 	unsigned char left, right;
@@ -111,13 +103,13 @@ static int snd_ics_get_double(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * 
 	return 0;
 }
 
-static int snd_ics_put_double(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
+static int snd_ics_put_double(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	snd_gus_card_t *gus = snd_kcontrol_chip(kcontrol);
+	struct snd_gus_card *gus = snd_kcontrol_chip(kcontrol);
 	unsigned long flags;
 	int addr = kcontrol->private_value & 0xff;
 	int change;
-	unsigned char val1, val2, oval1, oval2, tmp;
+	unsigned char val1, val2, oval1, oval2;
 	
 	val1 = ucontrol->value.integer.value[0] & 127;
 	val2 = ucontrol->value.integer.value[1] & 127;
@@ -128,11 +120,8 @@ static int snd_ics_put_double(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * 
 	gus->gf1.ics_regs[addr][0] = val1;
 	gus->gf1.ics_regs[addr][1] = val2;
 	if (gus->ics_flag && gus->ics_flipped &&
-	    (addr == SNDRV_ICS_GF1_DEV || addr == SNDRV_ICS_MASTER_DEV)) {
-		tmp = val1;
-		val1 = val2;
-		val2 = tmp;
-	}
+	    (addr == SNDRV_ICS_GF1_DEV || addr == SNDRV_ICS_MASTER_DEV))
+		swap(val1, val2);
 	addr <<= 3;
 	outb(addr | 0, GUSP(gus, MIXCNTRLPORT));
 	outb(1, GUSP(gus, MIXDATAPORT));
@@ -146,13 +135,13 @@ static int snd_ics_put_double(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * 
 	return change;
 }
 
-static snd_kcontrol_new_t snd_gf1_controls[] = {
+static struct snd_kcontrol_new snd_gf1_controls[] = {
 GF1_SINGLE("Master Playback Switch", 0, 1, 1),
 GF1_SINGLE("Line Switch", 0, 0, 1),
 GF1_SINGLE("Mic Switch", 0, 2, 0)
 };
 
-static snd_kcontrol_new_t snd_ics_controls[] = {
+static struct snd_kcontrol_new snd_ics_controls[] = {
 GF1_SINGLE("Master Playback Switch", 0, 1, 1),
 ICS_DOUBLE("Master Playback Volume", 0, SNDRV_ICS_MASTER_DEV),
 ICS_DOUBLE("Synth Playback Volume", 0, SNDRV_ICS_GF1_DEV),
@@ -163,15 +152,17 @@ ICS_DOUBLE("Mic Playback Volume", 0, SNDRV_ICS_MIC_DEV),
 ICS_DOUBLE("CD Playback Volume", 0, SNDRV_ICS_CD_DEV)
 };
 
-int snd_gf1_new_mixer(snd_gus_card_t * gus)
+int snd_gf1_new_mixer(struct snd_gus_card * gus)
 {
-	snd_card_t *card;
+	struct snd_card *card;
 	unsigned int idx, max;
 	int err;
 
-	snd_assert(gus != NULL, return -EINVAL);
+	if (snd_BUG_ON(!gus))
+		return -EINVAL;
 	card = gus->card;
-	snd_assert(card != NULL, return -EINVAL);
+	if (snd_BUG_ON(!card))
+		return -EINVAL;
 
 	if (gus->ics_flag)
 		snd_component_add(card, "ICS2101");

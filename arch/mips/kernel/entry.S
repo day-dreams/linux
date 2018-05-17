@@ -7,10 +7,11 @@
  * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
  * Copyright (C) 2001 MIPS Technologies, Inc.
  */
-#include <linux/config.h>
 
 #include <asm/asm.h>
 #include <asm/asmmacro.h>
+#include <asm/compiler.h>
+#include <asm/irqflags.h>
 #include <asm/regdef.h>
 #include <asm/mipsregs.h>
 #include <asm/stackframe.h>
@@ -18,36 +19,43 @@
 #include <asm/thread_info.h>
 #include <asm/war.h>
 
-#ifdef CONFIG_PREEMPT
-	.macro	preempt_stop reg=t0
-	.endm
-#else
-	.macro	preempt_stop reg=t0
-	local_irq_disable \reg
-	.endm
+#ifndef CONFIG_PREEMPT
 #define resume_kernel	restore_all
+#else
+#define __ret_from_irq	ret_from_exception
 #endif
 
 	.text
 	.align	5
+#ifndef CONFIG_PREEMPT
 FEXPORT(ret_from_exception)
-	preempt_stop
+	local_irq_disable			# preempt stop
+	b	__ret_from_irq
+#endif
 FEXPORT(ret_from_irq)
+	LONG_S	s0, TI_REGS($28)
+FEXPORT(__ret_from_irq)
+/*
+ * We can be coming here from a syscall done in the kernel space,
+ * e.g. a failed kernel_execve().
+ */
+resume_userspace_check:
 	LONG_L	t0, PT_STATUS(sp)		# returning to kernel mode?
 	andi	t0, t0, KU_USER
 	beqz	t0, resume_kernel
 
-FEXPORT(resume_userspace)
-	local_irq_disable	t0	# make sure we dont miss an
+resume_userspace:
+	local_irq_disable		# make sure we dont miss an
 					# interrupt setting need_resched
 					# between sampling and return
 	LONG_L	a2, TI_FLAGS($28)	# current->work
-	andi	a2, _TIF_WORK_MASK	# (ignoring syscall_trace)
-	bnez	a2, work_pending
+	andi	t0, a2, _TIF_WORK_MASK	# (ignoring syscall_trace)
+	bnez	t0, work_pending
 	j	restore_all
 
 #ifdef CONFIG_PREEMPT
-ENTRY(resume_kernel)
+resume_kernel:
+	local_irq_disable
 	lw	t0, TI_PRE_COUNT($28)
 	bnez	t0, restore_all
 need_resched:
@@ -57,17 +65,18 @@ need_resched:
 	LONG_L	t0, PT_STATUS(sp)		# Interrupts off?
 	andi	t0, 1
 	beqz	t0, restore_all
-	li	t0, PREEMPT_ACTIVE
-	sw	t0, TI_PRE_COUNT($28)
-	local_irq_enable t0
-	jal	schedule
-	sw	zero, TI_PRE_COUNT($28)
-	local_irq_disable t0
+	jal	preempt_schedule_irq
 	b	need_resched
 #endif
 
+FEXPORT(ret_from_kernel_thread)
+	jal	schedule_tail		# a0 = struct task_struct *prev
+	move	a0, s1
+	jal	s0
+	j	syscall_exit
+
 FEXPORT(ret_from_fork)
-	jal	schedule_tail		# a0 = task_t *prev
+	jal	schedule_tail		# a0 = struct task_struct *prev
 
 FEXPORT(syscall_exit)
 	local_irq_disable		# make sure need_resched and
@@ -78,23 +87,43 @@ FEXPORT(syscall_exit)
 	and	t0, a2, t0
 	bnez	t0, syscall_exit_work
 
-FEXPORT(restore_all)			# restore full frame
+restore_all:				# restore full frame
 	.set	noat
 	RESTORE_TEMP
 	RESTORE_AT
 	RESTORE_STATIC
-FEXPORT(restore_partial)		# restore partial frame
+restore_partial:		# restore partial frame
+#ifdef CONFIG_TRACE_IRQFLAGS
+	SAVE_STATIC
+	SAVE_AT
+	SAVE_TEMP
+	LONG_L	v0, PT_STATUS(sp)
+#if defined(CONFIG_CPU_R3000) || defined(CONFIG_CPU_TX39XX)
+	and	v0, ST0_IEP
+#else
+	and	v0, ST0_IE
+#endif
+	beqz	v0, 1f
+	jal	trace_hardirqs_on
+	b	2f
+1:	jal	trace_hardirqs_off
+2:
+	RESTORE_TEMP
+	RESTORE_AT
+	RESTORE_STATIC
+#endif
 	RESTORE_SOME
 	RESTORE_SP_AND_RET
 	.set	at
 
-FEXPORT(work_pending)
-	andi	t0, a2, _TIF_NEED_RESCHED
+work_pending:
+	andi	t0, a2, _TIF_NEED_RESCHED # a2 is preloaded with TI_FLAGS
 	beqz	t0, work_notifysig
 work_resched:
+	TRACE_IRQS_OFF
 	jal	schedule
 
-	local_irq_disable t0		# make sure need_resched and
+	local_irq_disable		# make sure need_resched and
 					# signals dont change between
 					# sampling and return
 	LONG_L	a2, TI_FLAGS($28)
@@ -109,47 +138,42 @@ work_notifysig:				# deal with pending signals and
 	move	a0, sp
 	li	a1, 0
 	jal	do_notify_resume	# a2 already loaded
-	j	restore_all
+	j	resume_userspace_check
 
-FEXPORT(syscall_exit_work_partial)
+FEXPORT(syscall_exit_partial)
+	local_irq_disable		# make sure need_resched doesn't
+					# change between and return
+	LONG_L	a2, TI_FLAGS($28)	# current->work
+	li	t0, _TIF_ALLWORK_MASK
+	and	t0, a2
+	beqz	t0, restore_partial
 	SAVE_STATIC
-FEXPORT(syscall_exit_work)
-	LONG_L	t0, TI_FLAGS($28)
-	li	t1, _TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT
-	and	t0, t1
-	beqz	t0, work_pending	# trace bit is set
-	local_irq_enable		# could let do_syscall_trace()
+syscall_exit_work:
+	LONG_L	t0, PT_STATUS(sp)		# returning to kernel mode?
+	andi	t0, t0, KU_USER
+	beqz	t0, resume_kernel
+	li	t0, _TIF_WORK_SYSCALL_EXIT
+	and	t0, a2			# a2 is preloaded with TI_FLAGS
+	beqz	t0, work_pending	# trace bit set?
+	local_irq_enable		# could let syscall_trace_leave()
 					# call schedule() instead
+	TRACE_IRQS_ON
 	move	a0, sp
-	li	a1, 1
-	jal	do_syscall_trace
+	jal	syscall_trace_leave
 	b	resume_userspace
 
+#if defined(CONFIG_CPU_MIPSR2) || defined(CONFIG_CPU_MIPSR6) || \
+    defined(CONFIG_MIPS_MT)
+
 /*
- * Common spurious interrupt handler.
+ * MIPS32R2 Instruction Hazard Barrier - must be called
+ *
+ * For C code use the inline version named instruction_hazard().
  */
-	.text
-	.align  5
-LEAF(spurious_interrupt)
-	/*
-	 * Someone tried to fool us by sending an interrupt but we
-	 * couldn't find a cause for it.
-	 */
-#ifdef CONFIG_SMP
-	lui     t1, %hi(irq_err_count)
-1:	ll      t0, %lo(irq_err_count)(t1)
-	addiu   t0, 1
-	sc      t0, %lo(irq_err_count)(t1)
-#if R10000_LLSC_WAR
-	beqzl	t0, 1b
-#else
-	beqz	t0, 1b
-#endif
-#else
-	lui     t1, %hi(irq_err_count)
-	lw      t0, %lo(irq_err_count)(t1)
-	addiu   t0, 1
-	sw      t0, %lo(irq_err_count)(t1)
-#endif
-	j	ret_from_irq
-	END(spurious_interrupt)
+LEAF(mips_ihb)
+	.set	MIPS_ISA_LEVEL_RAW
+	jr.hb	ra
+	nop
+	END(mips_ihb)
+
+#endif /* CONFIG_CPU_MIPSR2 or CONFIG_CPU_MIPSR6 or CONFIG_MIPS_MT */

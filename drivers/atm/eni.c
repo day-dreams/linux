@@ -4,7 +4,6 @@
  
 
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/pci.h>
@@ -19,10 +18,10 @@
 #include <linux/init.h>
 #include <linux/atm_eni.h>
 #include <linux/bitops.h>
-#include <asm/system.h>
+#include <linux/slab.h>
 #include <asm/io.h>
-#include <asm/atomic.h>
-#include <asm/uaccess.h>
+#include <linux/atomic.h>
+#include <linux/uaccess.h>
 #include <asm/string.h>
 #include <asm/byteorder.h>
 
@@ -59,7 +58,6 @@
  * - doesn't support OAM cells
  * - eni_put_free may hang if not putting memory fragments that _complete_
  *   2^n block (never happens in real life, though)
- * - keeps IRQ even if initialization fails
  */
 
 
@@ -156,9 +154,6 @@ static int tx_complete = 0,dma_complete = 0,queued = 0,requeued = 0,
   putting = 0;
 
 static struct atm_dev *eni_boards = NULL;
-
-static u32 *cpu_zeroes = NULL; /* aligned "magic" zeroes */
-static dma_addr_t zeroes;
 
 /* Read/write registers on card */
 #define eni_in(r)	readl(eni_dev->reg+(r)*4)
@@ -359,8 +354,10 @@ static int do_rx_dma(struct atm_vcc *vcc,struct sk_buff *skb,
 	eni_vcc = ENI_VCC(vcc);
 	paddr = 0; /* GCC, shut up */
 	if (skb) {
-		paddr = pci_map_single(eni_dev->pci_dev,skb->data,skb->len,
-		    PCI_DMA_FROMDEVICE);
+		paddr = dma_map_single(&eni_dev->pci_dev->dev,skb->data,skb->len,
+				       DMA_FROM_DEVICE);
+		if (dma_mapping_error(&eni_dev->pci_dev->dev, paddr))
+			goto dma_map_error;
 		ENI_PRV_PADDR(skb) = paddr;
 		if (paddr & 3)
 			printk(KERN_CRIT DEV_LABEL "(itf %d): VCI %d has "
@@ -476,7 +473,7 @@ static int do_rx_dma(struct atm_vcc *vcc,struct sk_buff *skb,
 		ENI_PRV_POS(skb) = eni_vcc->descr+size+1;
 		skb_queue_tail(&eni_dev->rx_queue,skb);
 		eni_vcc->last = skb;
-rx_enqueued++;
+		rx_enqueued++;
 	}
 	eni_vcc->descr = here;
 	eni_out(dma_wr,MID_DMA_WR_RX);
@@ -484,8 +481,9 @@ rx_enqueued++;
 
 trouble:
 	if (paddr)
-		pci_unmap_single(eni_dev->pci_dev,paddr,skb->len,
-		    PCI_DMA_FROMDEVICE);
+		dma_unmap_single(&eni_dev->pci_dev->dev,paddr,skb->len,
+				 DMA_FROM_DEVICE);
+dma_map_error:
 	if (skb) dev_kfree_skb_irq(skb);
 	return -1;
 }
@@ -538,7 +536,7 @@ static int rx_aal0(struct atm_vcc *vcc)
 		return 0;
 	}
 	skb_put(skb,length);
-	skb->stamp = eni_vcc->timestamp;
+	skb->tstamp = eni_vcc->timestamp;
 	DPRINTK("got len %ld\n",length);
 	if (do_rx_dma(vcc,skb,1,length >> 2,length >> 2)) return 1;
 	eni_vcc->rxing++;
@@ -703,7 +701,7 @@ static void get_service(struct atm_dev *dev)
 			DPRINTK("Grr, servicing VCC %ld twice\n",vci);
 			continue;
 		}
-		do_gettimeofday(&ENI_VCC(vcc)->timestamp);
+		ENI_VCC(vcc)->timestamp = ktime_get_real();
 		ENI_VCC(vcc)->next = NULL;
 		if (vcc->qos.rxtp.traffic_class == ATM_CBR) {
 			if (eni_dev->fast)
@@ -717,7 +715,7 @@ static void get_service(struct atm_dev *dev)
 			else eni_dev->slow = vcc;
 			eni_dev->last_slow = vcc;
 		}
-putting++;
+		putting++;
 		ENI_VCC(vcc)->servicing++;
 	}
 }
@@ -746,7 +744,7 @@ static void dequeue_rx(struct atm_dev *dev)
 		}
 		EVENT("dequeued (size=%ld,pos=0x%lx)\n",ENI_PRV_SIZE(skb),
 		    ENI_PRV_POS(skb));
-rx_dequeued++;
+		rx_dequeued++;
 		vcc = ATM_SKB(skb)->vcc;
 		eni_vcc = ENI_VCC(vcc);
 		first = 0;
@@ -760,8 +758,8 @@ rx_dequeued++;
 		}
 		eni_vcc->rxing--;
 		eni_vcc->rx_pos = ENI_PRV_POS(skb) & (eni_vcc->words-1);
-		pci_unmap_single(eni_dev->pci_dev,ENI_PRV_PADDR(skb),skb->len,
-		    PCI_DMA_TODEVICE);
+		dma_unmap_single(&eni_dev->pci_dev->dev,ENI_PRV_PADDR(skb),skb->len,
+			         DMA_TO_DEVICE);
 		if (!skb->len) dev_kfree_skb_irq(skb);
 		else {
 			EVENT("pushing (len=%ld)\n",skb->len,0);
@@ -914,7 +912,6 @@ static int start_rx(struct atm_dev *dev)
 		free_page((unsigned long) eni_dev->free_list);
 		return -ENOMEM;
 	}
-	memset(eni_dev->rx_map,0,PAGE_SIZE);
 	eni_dev->rx_mult = DEFAULT_RX_MULT;
 	eni_dev->fast = eni_dev->last_fast = NULL;
 	eni_dev->slow = eni_dev->last_slow = NULL;
@@ -1115,8 +1112,8 @@ DPRINTK("iovcnt = %d\n",skb_shinfo(skb)->nr_frags);
 		    vcc->dev->number);
 		return enq_jam;
 	}
-	paddr = pci_map_single(eni_dev->pci_dev,skb->data,skb->len,
-	    PCI_DMA_TODEVICE);
+	paddr = dma_map_single(&eni_dev->pci_dev->dev,skb->data,skb->len,
+			       DMA_TO_DEVICE);
 	ENI_PRV_PADDR(skb) = paddr;
 	/* prepare DMA queue entries */
 	j = 0;
@@ -1133,14 +1130,17 @@ DPRINTK("doing direct send\n"); /* @@@ well, this doesn't work anyway */
 			if (i == -1)
 				put_dma(tx->index,eni_dev->dma,&j,(unsigned long)
 				    skb->data,
-				    skb->len - skb->data_len);
+				    skb_headlen(skb));
 			else
 				put_dma(tx->index,eni_dev->dma,&j,(unsigned long)
-				    skb_shinfo(skb)->frags[i].page + skb_shinfo(skb)->frags[i].page_offset,
-				    skb_shinfo(skb)->frags[i].size);
+				    skb_frag_page(&skb_shinfo(skb)->frags[i]) +
+					skb_shinfo(skb)->frags[i].page_offset,
+				    skb_frag_size(&skb_shinfo(skb)->frags[i]));
 	}
-	if (skb->len & 3)
-		put_dma(tx->index,eni_dev->dma,&j,zeroes,4-(skb->len & 3));
+	if (skb->len & 3) {
+		put_dma(tx->index, eni_dev->dma, &j, eni_dev->zero.dma,
+			4 - (skb->len & 3));
+	}
 	/* JK for AAL5 trailer - AAL0 doesn't need it, but who cares ... */
 	eni_dev->dma[j++] = (((tx->tx_pos+size) & (tx->words-1)) <<
 	     MID_DMA_COUNT_SHIFT) | (tx->index << MID_DMA_CHAN_SHIFT) |
@@ -1174,7 +1174,7 @@ DPRINTK("doing direct send\n"); /* @@@ well, this doesn't work anyway */
 	DPRINTK("dma_wr set to %d, tx_pos is now %ld\n",dma_wr,tx->tx_pos);
 	eni_out(dma_wr,MID_DMA_WR_TX);
 	skb_queue_tail(&eni_dev->tx_queue,skb);
-queued++;
+	queued++;
 	return enq_ok;
 }
 
@@ -1195,7 +1195,7 @@ static void poll_tx(struct atm_dev *dev)
 				if (res == enq_ok) continue;
 				DPRINTK("re-queuing TX PDU\n");
 				skb_queue_head(&tx->backlog,skb);
-requeued++;
+				requeued++;
 				if (res == enq_jam) return;
 				break;
 			}
@@ -1226,13 +1226,13 @@ static void dequeue_tx(struct atm_dev *dev)
 			break;
 		}
 		ENI_VCC(vcc)->txing -= ENI_PRV_SIZE(skb);
-		pci_unmap_single(eni_dev->pci_dev,ENI_PRV_PADDR(skb),skb->len,
-		    PCI_DMA_TODEVICE);
+		dma_unmap_single(&eni_dev->pci_dev->dev,ENI_PRV_PADDR(skb),skb->len,
+				 DMA_TO_DEVICE);
 		if (vcc->pop) vcc->pop(vcc,skb);
 		else dev_kfree_skb_irq(skb);
 		atomic_inc(&vcc->stats->tx);
 		wake_up(&eni_dev->tx_wait);
-dma_complete++;
+		dma_complete++;
 	}
 }
 
@@ -1273,7 +1273,7 @@ static int comp_tx(struct eni_dev *eni_dev,int *pcr,int reserved,int *pre,
 			if (*pre < 3) (*pre)++; /* else fail later */
 			div = pre_div[*pre]*-*pcr;
 			DPRINTK("max div %d\n",div);
-			*res = (TS_CLOCK+div-1)/div-1;
+			*res = DIV_ROUND_UP(TS_CLOCK, div)-1;
 		}
 		if (*res < 0) *res = 0;
 		if (*res > MID_SEG_MAX_RATE) *res = MID_SEG_MAX_RATE;
@@ -1471,10 +1471,7 @@ if (eni_boards) printk(KERN_INFO "loss: %ld\n",ENI_DEV(eni_boards)->lost);
 
 static void bug_int(struct atm_dev *dev,unsigned long reason)
 {
-	struct eni_dev *eni_dev;
-
 	DPRINTK(">bug_int\n");
-	eni_dev = ENI_DEV(dev);
 	if (reason & MID_DMA_ERR_ACK)
 		printk(KERN_CRIT DEV_LABEL "(itf %d): driver error - DMA "
 		    "error\n",dev->number);
@@ -1490,7 +1487,7 @@ static void bug_int(struct atm_dev *dev,unsigned long reason)
 }
 
 
-static irqreturn_t eni_int(int irq,void *dev_id,struct pt_regs *regs)
+static irqreturn_t eni_int(int irq,void *dev_id)
 {
 	struct atm_dev *dev;
 	struct eni_dev *eni_dev;
@@ -1558,7 +1555,7 @@ static void eni_tasklet(unsigned long data)
 	}
 	if (events & MID_TX_COMPLETE) {
 		EVENT("INT: TX COMPLETE\n",0,0);
-tx_complete++;
+		tx_complete++;
 		wake_up(&eni_dev->tx_wait);
 		/* poll_rx ? */
 	}
@@ -1573,7 +1570,7 @@ tx_complete++;
 /*--------------------------------- entries ---------------------------------*/
 
 
-static const char *media_name[] __devinitdata = {
+static char * const media_name[] = {
     "MMF", "SMF", "MMF", "03?", /*  0- 3 */
     "UTP", "05?", "06?", "07?", /*  4- 7 */
     "TAXI","09?", "10?", "11?", /*  8-11 */
@@ -1597,7 +1594,7 @@ static const char *media_name[] __devinitdata = {
   } })
 
 
-static int __devinit get_esi_asic(struct atm_dev *dev)
+static int get_esi_asic(struct atm_dev *dev)
 {
 	struct eni_dev *eni_dev;
 	unsigned char tonga;
@@ -1689,7 +1686,7 @@ static int __devinit get_esi_asic(struct atm_dev *dev)
 #undef GET_SEPROM
 
 
-static int __devinit get_esi_fpga(struct atm_dev *dev, void __iomem *base)
+static int get_esi_fpga(struct atm_dev *dev, void __iomem *base)
 {
 	void __iomem *mac_base;
 	int i;
@@ -1700,14 +1697,13 @@ static int __devinit get_esi_fpga(struct atm_dev *dev, void __iomem *base)
 }
 
 
-static int __devinit eni_do_init(struct atm_dev *dev)
+static int eni_do_init(struct atm_dev *dev)
 {
 	struct midway_eprom __iomem *eprom;
 	struct eni_dev *eni_dev;
 	struct pci_dev *pci_dev;
 	unsigned long real_base;
 	void __iomem *base;
-	unsigned char revision;
 	int error,i,last;
 
 	DPRINTK(">eni_init\n");
@@ -1718,12 +1714,6 @@ static int __devinit eni_do_init(struct atm_dev *dev)
 	pci_dev = eni_dev->pci_dev;
 	real_base = pci_resource_start(pci_dev, 0);
 	eni_dev->irq = pci_dev->irq;
-	error = pci_read_config_byte(pci_dev,PCI_REVISION_ID,&revision);
-	if (error) {
-		printk(KERN_ERR DEV_LABEL "(itf %d): init error 0x%02x\n",
-		    dev->number,error);
-		return -EINVAL;
-	}
 	if ((error = pci_write_config_word(pci_dev,PCI_COMMAND,
 	    PCI_COMMAND_MEMORY |
 	    (eni_dev->asic ? PCI_COMMAND_PARITY | PCI_COMMAND_SERR : 0)))) {
@@ -1732,23 +1722,26 @@ static int __devinit eni_do_init(struct atm_dev *dev)
 		return -EIO;
 	}
 	printk(KERN_NOTICE DEV_LABEL "(itf %d): rev.%d,base=0x%lx,irq=%d,",
-	    dev->number,revision,real_base,eni_dev->irq);
+	    dev->number,pci_dev->revision,real_base,eni_dev->irq);
 	if (!(base = ioremap_nocache(real_base,MAP_MAX_SIZE))) {
 		printk("\n");
 		printk(KERN_ERR DEV_LABEL "(itf %d): can't set up page "
 		    "mapping\n",dev->number);
-		return error;
+		return -ENOMEM;
 	}
+	eni_dev->ioaddr = base;
 	eni_dev->base_diff = real_base - (unsigned long) base;
 	/* id may not be present in ASIC Tonga boards - check this @@@ */
 	if (!eni_dev->asic) {
 		eprom = (base+EPROM_SIZE-sizeof(struct midway_eprom));
 		if (readl(&eprom->magic) != ENI155_MAGIC) {
 			printk("\n");
-			printk(KERN_ERR KERN_ERR DEV_LABEL "(itf %d): bad "
-			    "magic - expected 0x%x, got 0x%x\n",dev->number,
-			    ENI155_MAGIC,(unsigned) readl(&eprom->magic));
-			return -EINVAL;
+			printk(KERN_ERR DEV_LABEL
+			       "(itf %d): bad magic - expected 0x%x, got 0x%x\n",
+			       dev->number, ENI155_MAGIC,
+			       (unsigned)readl(&eprom->magic));
+			error = -EINVAL;
+			goto unmap;
 		}
 	}
 	eni_dev->phy = base+PHY_BASE;
@@ -1775,21 +1768,39 @@ static int __devinit eni_do_init(struct atm_dev *dev)
 		printk(")\n");
 		printk(KERN_ERR DEV_LABEL "(itf %d): ERROR - wrong id 0x%x\n",
 		    dev->number,(unsigned) eni_in(MID_RES_ID_MCON));
-		return -EINVAL;
+		error = -EINVAL;
+		goto unmap;
 	}
 	error = eni_dev->asic ? get_esi_asic(dev) : get_esi_fpga(dev,base);
-	if (error) return error;
+	if (error)
+		goto unmap;
 	for (i = 0; i < ESI_LEN; i++)
 		printk("%s%02X",i ? "-" : "",dev->esi[i]);
 	printk(")\n");
 	printk(KERN_NOTICE DEV_LABEL "(itf %d): %s,%s\n",dev->number,
 	    eni_in(MID_RES_ID_MCON) & 0x200 ? "ASIC" : "FPGA",
-	    media_name[eni_in(MID_RES_ID_MCON) & DAUGTHER_ID]);
-	return suni_init(dev);
+	    media_name[eni_in(MID_RES_ID_MCON) & DAUGHTER_ID]);
+
+	error = suni_init(dev);
+	if (error)
+		goto unmap;
+out:
+	return error;
+unmap:
+	iounmap(base);
+	goto out;
 }
 
+static void eni_do_release(struct atm_dev *dev)
+{
+	struct eni_dev *ed = ENI_DEV(dev);
 
-static int __devinit eni_start(struct atm_dev *dev)
+	dev->phy->stop(dev);
+	dev->phy = NULL;
+	iounmap(ed->ioaddr);
+}
+
+static int eni_start(struct atm_dev *dev)
 {
 	struct eni_dev *eni_dev;
 	
@@ -1799,25 +1810,25 @@ static int __devinit eni_start(struct atm_dev *dev)
 
 	DPRINTK(">eni_start\n");
 	eni_dev = ENI_DEV(dev);
-	if (request_irq(eni_dev->irq,&eni_int,SA_SHIRQ,DEV_LABEL,dev)) {
+	if (request_irq(eni_dev->irq,&eni_int,IRQF_SHARED,DEV_LABEL,dev)) {
 		printk(KERN_ERR DEV_LABEL "(itf %d): IRQ%d is already in use\n",
 		    dev->number,eni_dev->irq);
-		return -EAGAIN;
+		error = -EAGAIN;
+		goto out;
 	}
-	/* @@@ should release IRQ on error */
 	pci_set_master(eni_dev->pci_dev);
 	if ((error = pci_write_config_word(eni_dev->pci_dev,PCI_COMMAND,
 	    PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER |
 	    (eni_dev->asic ? PCI_COMMAND_PARITY | PCI_COMMAND_SERR : 0)))) {
 		printk(KERN_ERR DEV_LABEL "(itf %d): can't enable memory+"
 		    "master (0x%02x)\n",dev->number,error);
-		return error;
+		goto free_irq;
 	}
 	if ((error = pci_write_config_byte(eni_dev->pci_dev,PCI_TONGA_CTRL,
 	    END_SWAP_DMA))) {
 		printk(KERN_ERR DEV_LABEL "(itf %d): can't set endian swap "
 		    "(0x%02x)\n",dev->number,error);
-		return error;
+		goto free_irq;
 	}
 	/* determine addresses of internal tables */
 	eni_dev->vci = eni_dev->ram;
@@ -1834,12 +1845,14 @@ static int __devinit eni_start(struct atm_dev *dev)
 	/* initialize memory management */
 	buffer_mem = eni_dev->mem - (buf - eni_dev->ram);
 	eni_dev->free_list_size = buffer_mem/MID_MIN_BUF_SIZE/2;
-	eni_dev->free_list = (struct eni_free *) kmalloc(
-	    sizeof(struct eni_free)*(eni_dev->free_list_size+1),GFP_KERNEL);
+	eni_dev->free_list = kmalloc_array(eni_dev->free_list_size + 1,
+					   sizeof(*eni_dev->free_list),
+					   GFP_KERNEL);
 	if (!eni_dev->free_list) {
 		printk(KERN_ERR DEV_LABEL "(itf %d): couldn't get free page\n",
 		    dev->number);
-		return -ENOMEM;
+		error = -ENOMEM;
+		goto free_irq;
 	}
 	eni_dev->free_len = 0;
 	eni_put_free(eni_dev,buf,buffer_mem);
@@ -1855,17 +1868,26 @@ static int __devinit eni_start(struct atm_dev *dev)
 	 */
 	eni_out(0xffffffff,MID_IE);
 	error = start_tx(dev);
-	if (error) return error;
+	if (error) goto free_list;
 	error = start_rx(dev);
-	if (error) return error;
+	if (error) goto free_list;
 	error = dev->phy->start(dev);
-	if (error) return error;
+	if (error) goto free_list;
 	eni_out(eni_in(MID_MC_S) | (1 << MID_INT_SEL_SHIFT) |
 	    MID_TX_LOCK_MODE | MID_DMA_ENABLE | MID_TX_ENABLE | MID_RX_ENABLE,
 	    MID_MC_S);
 	    /* Tonga uses SBus INTReq1 */
 	(void) eni_in(MID_ISA); /* clear Midway interrupts */
 	return 0;
+
+free_list:
+	kfree(eni_dev->free_list);
+
+free_irq:
+	free_irq(eni_dev->irq, dev);
+
+out:
+	return error;
 }
 
 
@@ -1887,7 +1909,6 @@ static void eni_close(struct atm_vcc *vcc)
 
 static int eni_open(struct atm_vcc *vcc)
 {
-	struct eni_dev *eni_dev;
 	struct eni_vcc *eni_vcc;
 	int error;
 	short vpi = vcc->vpi;
@@ -1897,7 +1918,6 @@ static int eni_open(struct atm_vcc *vcc)
 	EVENT("eni_open\n",0,0);
 	if (!test_bit(ATM_VF_PARTIAL,&vcc->flags))
 		vcc->dev_data = NULL;
-	eni_dev = ENI_DEV(vcc->dev);
 	if (vci != ATM_VPI_UNSPEC && vpi != ATM_VCI_UNSPEC)
 		set_bit(ATM_VF_ADDR,&vcc->flags);
 	if (vcc->qos.aal != ATM_AAL0 && vcc->qos.aal != ATM_AAL5)
@@ -2020,7 +2040,7 @@ static int eni_getsockopt(struct atm_vcc *vcc,int level,int optname,
 
 
 static int eni_setsockopt(struct atm_vcc *vcc,int level,int optname,
-    void __user *optval,int optlen)
+    void __user *optval,unsigned int optlen)
 {
 	return -EINVAL;
 }
@@ -2049,14 +2069,14 @@ static int eni_send(struct atm_vcc *vcc,struct sk_buff *skb)
 		}
 		*(u32 *) skb->data = htonl(*(u32 *) skb->data);
 	}
-submitted++;
+	submitted++;
 	ATM_SKB(skb)->vcc = vcc;
 	tasklet_disable(&ENI_DEV(vcc->dev)->task);
 	res = do_tx(skb);
 	tasklet_enable(&ENI_DEV(vcc->dev)->task);
 	if (res == enq_ok) return 0;
 	skb_queue_tail(&ENI_VCC(vcc)->tx->backlog,skb);
-backlogged++;
+	backlogged++;
 	tasklet_schedule(&ENI_DEV(vcc->dev)->task);
 	return 0;
 }
@@ -2077,7 +2097,6 @@ static unsigned char eni_phy_get(struct atm_dev *dev,unsigned long addr)
 
 static int eni_proc_read(struct atm_dev *dev,loff_t *pos,char *page)
 {
-	struct hlist_node *node;
 	struct sock *s;
 	static const char *signal[] = { "LOST","unknown","okay" };
 	struct eni_dev *eni_dev = ENI_DEV(dev);
@@ -2140,7 +2159,7 @@ static int eni_proc_read(struct atm_dev *dev,loff_t *pos,char *page)
 
 		if (!tx->send) continue;
 		if (!--left) {
-			return sprintf(page,"tx[%d]:    0x%ld-0x%ld "
+			return sprintf(page, "tx[%d]:    0x%lx-0x%lx "
 			    "(%6ld bytes), rsv %d cps, shp %d cps%s\n",i,
 			    (unsigned long) (tx->send - eni_dev->ram),
 			    tx->send-eni_dev->ram+tx->words*4-1,tx->words*4,
@@ -2155,7 +2174,7 @@ static int eni_proc_read(struct atm_dev *dev,loff_t *pos,char *page)
 	for(i = 0; i < VCC_HTABLE_SIZE; ++i) {
 		struct hlist_head *head = &vcc_hash[i];
 
-		sk_for_each(s, node, head) {
+		sk_for_each(s, head) {
 			struct eni_vcc *eni_vcc;
 			int length;
 
@@ -2166,7 +2185,7 @@ static int eni_proc_read(struct atm_dev *dev,loff_t *pos,char *page)
 			if (--left) continue;
 			length = sprintf(page,"vcc %4d: ",vcc->vci);
 			if (eni_vcc->rx) {
-				length += sprintf(page+length,"0x%ld-0x%ld "
+				length += sprintf(page+length, "0x%lx-0x%lx "
 				    "(%6ld bytes)",
 				    (unsigned long) (eni_vcc->recv - eni_dev->ram),
 				    eni_vcc->recv-eni_dev->ram+eni_vcc->words*4-1,
@@ -2210,65 +2229,88 @@ static const struct atmdev_ops ops = {
 };
 
 
-static int __devinit eni_init_one(struct pci_dev *pci_dev,
-    const struct pci_device_id *ent)
+static int eni_init_one(struct pci_dev *pci_dev,
+			const struct pci_device_id *ent)
 {
 	struct atm_dev *dev;
 	struct eni_dev *eni_dev;
-	int error = -ENOMEM;
+	struct eni_zero *zero;
+	int rc;
 
-	DPRINTK("eni_init_one\n");
+	rc = pci_enable_device(pci_dev);
+	if (rc < 0)
+		goto out;
 
-	if (pci_enable_device(pci_dev)) {
-		error = -EIO;
-		goto out0;
-	}
+	rc = dma_set_mask_and_coherent(&pci_dev->dev, DMA_BIT_MASK(32));
+	if (rc < 0)
+		goto out;
 
-	eni_dev = (struct eni_dev *) kmalloc(sizeof(struct eni_dev),GFP_KERNEL);
-	if (!eni_dev) goto out0;
-	if (!cpu_zeroes) {
-		cpu_zeroes = pci_alloc_consistent(pci_dev,ENI_ZEROES_SIZE,
-		    &zeroes);
-		if (!cpu_zeroes) goto out1;
-	}
-	dev = atm_dev_register(DEV_LABEL,&ops,-1,NULL);
-	if (!dev) goto out2;
+	rc = -ENOMEM;
+	eni_dev = kmalloc(sizeof(struct eni_dev), GFP_KERNEL);
+	if (!eni_dev)
+		goto err_disable;
+
+	zero = &eni_dev->zero;
+	zero->addr = dma_alloc_coherent(&pci_dev->dev,
+					ENI_ZEROES_SIZE, &zero->dma, GFP_KERNEL);
+	if (!zero->addr)
+		goto err_kfree;
+
+	dev = atm_dev_register(DEV_LABEL, &pci_dev->dev, &ops, -1, NULL);
+	if (!dev)
+		goto err_free_consistent;
+
+	dev->dev_data = eni_dev;
 	pci_set_drvdata(pci_dev, dev);
 	eni_dev->pci_dev = pci_dev;
-	dev->dev_data = eni_dev;
 	eni_dev->asic = ent->driver_data;
-	error = eni_do_init(dev);
-	if (error) goto out3;
-	error = eni_start(dev);
-	if (error) goto out3;
+
+	rc = eni_do_init(dev);
+	if (rc < 0)
+		goto err_unregister;
+
+	rc = eni_start(dev);
+	if (rc < 0)
+		goto err_eni_release;
+
 	eni_dev->more = eni_boards;
 	eni_boards = dev;
-	return 0;
-out3:
+out:
+	return rc;
+
+err_eni_release:
+	eni_do_release(dev);
+err_unregister:
 	atm_dev_deregister(dev);
-out2:
-	pci_free_consistent(eni_dev->pci_dev,ENI_ZEROES_SIZE,cpu_zeroes,zeroes);
-	cpu_zeroes = NULL;
-out1:
+err_free_consistent:
+	dma_free_coherent(&pci_dev->dev, ENI_ZEROES_SIZE, zero->addr, zero->dma);
+err_kfree:
 	kfree(eni_dev);
-out0:
-	return error;
+err_disable:
+	pci_disable_device(pci_dev);
+	goto out;
 }
 
 
-static struct pci_device_id eni_pci_tbl[] = {
-	{ PCI_VENDOR_ID_EF, PCI_DEVICE_ID_EF_ATM_FPGA, PCI_ANY_ID, PCI_ANY_ID,
-	  0, 0, 0 /* FPGA */ },
-	{ PCI_VENDOR_ID_EF, PCI_DEVICE_ID_EF_ATM_ASIC, PCI_ANY_ID, PCI_ANY_ID,
-	  0, 0, 1 /* ASIC */ },
+static const struct pci_device_id eni_pci_tbl[] = {
+	{ PCI_VDEVICE(EF, PCI_DEVICE_ID_EF_ATM_FPGA), 0 /* FPGA */ },
+	{ PCI_VDEVICE(EF, PCI_DEVICE_ID_EF_ATM_ASIC), 1 /* ASIC */ },
 	{ 0, }
 };
 MODULE_DEVICE_TABLE(pci,eni_pci_tbl);
 
 
-static void __devexit eni_remove_one(struct pci_dev *pci_dev)
+static void eni_remove_one(struct pci_dev *pdev)
 {
-	/* grrr */
+	struct atm_dev *dev = pci_get_drvdata(pdev);
+	struct eni_dev *ed = ENI_DEV(dev);
+	struct eni_zero *zero = &ed->zero;
+
+	eni_do_release(dev);
+	atm_dev_deregister(dev);
+	dma_free_coherent(&pdev->dev, ENI_ZEROES_SIZE, zero->addr, zero->dma);
+	kfree(ed);
+	pci_disable_device(pdev);
 }
 
 
@@ -2276,7 +2318,7 @@ static struct pci_driver eni_driver = {
 	.name		= DEV_LABEL,
 	.id_table	= eni_pci_tbl,
 	.probe		= eni_init_one,
-	.remove		= __devexit_p(eni_remove_one),
+	.remove		= eni_remove_one,
 };
 
 
@@ -2284,11 +2326,7 @@ static int __init eni_init(void)
 {
 	struct sk_buff *skb; /* dummy for sizeof */
 
-	if (sizeof(skb->cb) < sizeof(struct eni_skb_prv)) {
-		printk(KERN_ERR "eni_detect: skb->cb is too small (%Zd < %Zd)\n",
-		    sizeof(skb->cb),sizeof(struct eni_skb_prv));
-		return -EIO;
-	}
+	BUILD_BUG_ON(sizeof(skb->cb) < sizeof(struct eni_skb_prv));
 	return pci_register_driver(&eni_driver);
 }
 

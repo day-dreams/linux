@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __irq_cpustat_h
 #define __irq_cpustat_h
 
@@ -9,7 +10,6 @@
  * Keith Owens <kaos@ocs.com.au> July 2000.
  */
 
-#include <linux/config.h>
 
 /*
  * Simple wrappers reducing source bloat.  Define all irq_stat fields

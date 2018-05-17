@@ -1,6 +1,6 @@
 /*
  *  The driver for the Cirrus Logic's Sound Fusion CS46XX based soundcards
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -43,7 +43,7 @@
 /* this instruction types
    needs to be reallocated when load
    code into DSP */
-typedef enum  {
+enum wide_opcode {
 	WIDE_FOR_BEGIN_LOOP = 0x20,
 	WIDE_FOR_BEGIN_LOOP2,
 
@@ -58,7 +58,7 @@ typedef enum  {
 	WIDE_TBEQ_COND_CALL1_ADDR,
 	WIDE_TBEQ_NCOND_GOTOI_ADDR,
 	WIDE_TBEQ_NCOND_CALL1_ADDR,
-} wide_opcode_t;
+};
 
 /* SAMPLE segment */
 #define VARI_DECIMATE_BUF1       0x0000
@@ -186,7 +186,8 @@ typedef enum  {
 #define SP_SPDOUT_CONTROL 0x804D
 #define SP_SPDOUT_CSUV    0x808E
 
-static inline u8 _wrap_all_bits (u8 val) {
+static inline u8 _wrap_all_bits (u8 val)
+{
 	u8 wrapped;
 	
 	/* wrap all 8 bits */
@@ -201,25 +202,30 @@ static inline u8 _wrap_all_bits (u8 val) {
 		((val & 0x80) >> 7);
 
 	return wrapped;
-
 }
 
-
-static inline void cs46xx_dsp_spos_update_scb (cs46xx_t * chip,dsp_scb_descriptor_t * scb) 
+static inline void cs46xx_dsp_spos_update_scb (struct snd_cs46xx * chip,
+					       struct dsp_scb_descriptor * scb) 
 {
 	/* update nextSCB and subListPtr in SCB */
 	snd_cs46xx_poke(chip,
 			(scb->address + SCBsubListPtr) << 2,
 			(scb->sub_list_ptr->address << 0x10) |
 			(scb->next_scb_ptr->address));	
+	scb->updated = 1;
 }
 
-static inline void cs46xx_dsp_scb_set_volume (cs46xx_t * chip,dsp_scb_descriptor_t * scb,
-					      u16 left,u16 right) {
+static inline void cs46xx_dsp_scb_set_volume (struct snd_cs46xx * chip,
+					      struct dsp_scb_descriptor * scb,
+					      u16 left, u16 right)
+{
 	unsigned int val = ((0xffff - left) << 16 | (0xffff - right));
 
 	snd_cs46xx_poke(chip, (scb->address + SCBVolumeCtrl) << 2, val);
 	snd_cs46xx_poke(chip, (scb->address + SCBVolumeCtrl + 1) << 2, val);
+	scb->volume_set = 1;
+	scb->volume[0] = left;
+	scb->volume[1] = right;
 }
 #endif /* __DSP_SPOS_H__ */
 #endif /* CONFIG_SND_CS46XX_NEW_DSP  */

@@ -1,13 +1,11 @@
 config SECURITY_SELINUX
 	bool "NSA SELinux Support"
-	depends on SECURITY && NET
+	depends on SECURITY_NETWORK && AUDIT && NET && INET
+	select NETWORK_SECMARK
 	default n
 	help
 	  This selects NSA Security-Enhanced Linux (SELinux).
 	  You will also need a policy configuration and a labeled filesystem.
-	  You can obtain the policy compiler (checkpolicy), the utility for
-	  labeling filesystems (setfiles), and an example policy configuration
-	  from <http://www.nsa.gov/selinux/>.
 	  If you are unsure how to answer this question, answer N.
 
 config SECURITY_SELINUX_BOOTPARAM
@@ -42,6 +40,7 @@ config SECURITY_SELINUX_BOOTPARAM_VALUE
 config SECURITY_SELINUX_DISABLE
 	bool "NSA SELinux runtime disable"
 	depends on SECURITY_SELINUX
+	select SECURITY_WRITABLE_HOOKS
 	default n
 	help
 	  This option enables writing to a selinuxfs node 'disable', which
@@ -51,6 +50,11 @@ config SECURITY_SELINUX_DISABLE
 	  support runtime disabling of SELinux, e.g. from /sbin/init, for
 	  portability across platforms where boot parameters are difficult
 	  to employ.
+
+	  NOTE: selecting this option will disable the '__ro_after_init'
+	  kernel hardening feature for security hooks.   Please consider
+	  using the selinux=0 boot parameter instead of enabling this
+	  option.
 
 	  If you are unsure how to answer this question, answer N.
 
@@ -76,12 +80,22 @@ config SECURITY_SELINUX_AVC_STATS
 	  /selinux/avc/cache_stats, which may be monitored via
 	  tools such as avcstat.
 
-config SECURITY_SELINUX_MLS
-	bool "NSA SELinux MLS policy (EXPERIMENTAL)"
-	depends on SECURITY_SELINUX && EXPERIMENTAL
-	default n
+config SECURITY_SELINUX_CHECKREQPROT_VALUE
+	int "NSA SELinux checkreqprot default value"
+	depends on SECURITY_SELINUX
+	range 0 1
+	default 0
 	help
-	  This enables the NSA SELinux Multi-Level Security (MLS) policy in
-	  addition to the default RBAC/TE policy.  This policy is
-	  experimental and has not been configured for use.  Unless you
-	  specifically want to experiment with MLS, say N.
+	  This option sets the default value for the 'checkreqprot' flag
+	  that determines whether SELinux checks the protection requested
+	  by the application or the protection that will be applied by the
+	  kernel (including any implied execute for read-implies-exec) for
+	  mmap and mprotect calls.  If this option is set to 0 (zero),
+	  SELinux will default to checking the protection that will be applied
+	  by the kernel.  If this option is set to 1 (one), SELinux will
+	  default to checking the protection requested by the application.
+	  The checkreqprot flag may be changed from the default via the
+	  'checkreqprot=' boot parameter.  It may also be changed at runtime
+	  via /selinux/checkreqprot if authorized by policy.
+
+	  If you are unsure how to answer this question, answer 0.

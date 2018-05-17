@@ -7,6 +7,7 @@
  * Copyright Tomi Manninen OH2BNS (oh2bns@sral.fi)
  */
 #include <linux/types.h>
+#include <linux/slab.h>
 #include <linux/socket.h>
 #include <linux/timer.h>
 #include <net/ax25.h>
@@ -14,10 +15,10 @@
 #include <net/netrom.h>
 #include <linux/init.h>
 
-static void nr_loopback_timer(unsigned long);
+static void nr_loopback_timer(struct timer_list *);
 
 static struct sk_buff_head loopback_queue;
-static struct timer_list loopback_timer = TIMER_INITIALIZER(nr_loopback_timer, 0, 0);
+static DEFINE_TIMER(loopback_timer, nr_loopback_timer);
 
 void __init nr_loopback_init(void)
 {
@@ -34,8 +35,8 @@ int nr_loopback_queue(struct sk_buff *skb)
 	struct sk_buff *skbn;
 
 	if ((skbn = alloc_skb(skb->len, GFP_ATOMIC)) != NULL) {
-		memcpy(skb_put(skbn, skb->len), skb->data, skb->len);
-		skbn->h.raw = skbn->data;
+		skb_copy_from_linear_data(skb, skb_put(skbn, skb->len), skb->len);
+		skb_reset_transport_header(skbn);
 
 		skb_queue_tail(&loopback_queue, skbn);
 
@@ -47,7 +48,7 @@ int nr_loopback_queue(struct sk_buff *skb)
 	return 1;
 }
 
-static void nr_loopback_timer(unsigned long param)
+static void nr_loopback_timer(struct timer_list *unused)
 {
 	struct sk_buff *skb;
 	ax25_address *nr_dest;

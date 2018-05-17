@@ -271,14 +271,14 @@ CDROMCLOSETRAY			pendant of CDROMEJECT
 
 	usage:
 
-	  ioctl(fd, CDROMEJECT, 0);
+	  ioctl(fd, CDROMCLOSETRAY, 0);
 
 	inputs:		none
 
 	outputs:	none
 
 	error returns:
-	  ENOSYS	cd drive not capable of ejecting
+	  ENOSYS	cd drive not capable of closing the tray
 	  EBUSY		other processes are accessing drive, or door is locked
 
 	notes:
@@ -340,7 +340,8 @@ CDROMSUBCHNL			Read subchannel data (struct cdrom_subchnl)
 	  EINVAL	format not CDROM_MSF or CDROM_LBA
 
 	notes:
-	  Format is converted to CDROM_MSF on return
+	  Format is converted to CDROM_MSF or CDROM_LBA
+	  as per user request on return
 
 
 
@@ -735,7 +736,7 @@ CDROM_DISC_STATUS		Get disc type, etc.
 	    Ok, this is where problems start.  The current interface for
 	    the CDROM_DISC_STATUS ioctl is flawed.  It makes the false
 	    assumption that CDs are all CDS_DATA_1 or all CDS_AUDIO, etc.
-	    Unfortunatly, while this is often the case, it is also
+	    Unfortunately, while this is often the case, it is also
 	    very common for CDs to have some tracks with data, and some
 	    tracks with audio.	Just because I feel like it, I declare
 	    the following to be the best way to cope.  If the CD has
@@ -878,7 +879,7 @@ DVD_READ_STRUCT			Read structure
 
 	error returns:
 	  EINVAL	physical.layer_num exceeds number of layers
-	  EIO		Recieved invalid response from drive
+	  EIO		Received invalid response from drive
 
 
 

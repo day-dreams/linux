@@ -1,20 +1,16 @@
-/* 
- * Copyright (C) 2001, 2002 Jeff Dike (jdike@karaya.com)
+/*
+ * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
  * Licensed under the GPL
  */
 
-#include "linux/module.h"
+#include <linux/module.h>
 
-extern void __bb_init_func(void *);
+extern void __bb_init_func(void *)  __attribute__((weak));
 EXPORT_SYMBOL(__bb_init_func);
 
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-file-style: "linux"
- * End:
- */
+extern void __gcov_init(void *)  __attribute__((weak));
+EXPORT_SYMBOL(__gcov_init);
+extern void __gcov_merge_add(void *, unsigned int)  __attribute__((weak));
+EXPORT_SYMBOL(__gcov_merge_add);
+extern void __gcov_exit(void)  __attribute__((weak));
+EXPORT_SYMBOL(__gcov_exit);

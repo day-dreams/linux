@@ -20,6 +20,7 @@
 
 #include "emu10k1_synth_local.h"
 #include <linux/init.h>
+#include <linux/module.h>
 
 MODULE_AUTHOR("Takashi Iwai");
 MODULE_DESCRIPTION("Routines for control of EMU10K1 WaveTable synth");
@@ -28,11 +29,12 @@ MODULE_LICENSE("GPL");
 /*
  * create a new hardware dependent device for Emu10k1
  */
-static int snd_emu10k1_synth_new_device(snd_seq_device_t *dev)
+static int snd_emu10k1_synth_probe(struct device *_dev)
 {
-	snd_emux_t *emu;
-	emu10k1_t *hw;
-	snd_emu10k1_synth_arg_t *arg;
+	struct snd_seq_device *dev = to_seq_dev(_dev);
+	struct snd_emux *emux;
+	struct snd_emu10k1 *hw;
+	struct snd_emu10k1_synth_arg *arg;
 	unsigned long flags;
 
 	arg = SNDRV_SEQ_DEVICE_ARGPTR(dev);
@@ -46,54 +48,57 @@ static int snd_emu10k1_synth_new_device(snd_seq_device_t *dev)
 	else if (arg->max_voices > 64)
 		arg->max_voices = 64;
 
-	if (snd_emux_new(&emu) < 0)
+	if (snd_emux_new(&emux) < 0)
 		return -ENOMEM;
 
-	snd_emu10k1_ops_setup(emu);
-	emu->hw = hw = arg->hwptr;
-	emu->max_voices = arg->max_voices;
-	emu->num_ports = arg->seq_ports;
-	emu->pitch_shift = -501;
-	emu->memhdr = hw->memhdr;
-	emu->midi_ports = arg->seq_ports < 2 ? arg->seq_ports : 2; /* maximum two ports */
-	emu->midi_devidx = hw->audigy ? 2 : 1; /* audigy has two external midis */
-	emu->linear_panning = 0;
-	emu->hwdep_idx = 2; /* FIXED */
+	snd_emu10k1_ops_setup(emux);
+	hw = arg->hwptr;
+	emux->hw = hw;
+	emux->max_voices = arg->max_voices;
+	emux->num_ports = arg->seq_ports;
+	emux->pitch_shift = -501;
+	emux->memhdr = hw->memhdr;
+	/* maximum two ports */
+	emux->midi_ports = arg->seq_ports < 2 ? arg->seq_ports : 2;
+	/* audigy has two external midis */
+	emux->midi_devidx = hw->audigy ? 2 : 1;
+	emux->linear_panning = 0;
+	emux->hwdep_idx = 2; /* FIXED */
 
-	if (snd_emux_register(emu, dev->card, arg->index, "Emu10k1") < 0) {
-		snd_emux_free(emu);
-		emu->hw = NULL;
+	if (snd_emux_register(emux, dev->card, arg->index, "Emu10k1") < 0) {
+		snd_emux_free(emux);
 		return -ENOMEM;
 	}
 
 	spin_lock_irqsave(&hw->voice_lock, flags);
-	hw->synth = emu;
+	hw->synth = emux;
 	hw->get_synth_voice = snd_emu10k1_synth_get_voice;
 	spin_unlock_irqrestore(&hw->voice_lock, flags);
 
-	dev->driver_data = emu;
+	dev->driver_data = emux;
 
 	return 0;
 }
 
-static int snd_emu10k1_synth_delete_device(snd_seq_device_t *dev)
+static int snd_emu10k1_synth_remove(struct device *_dev)
 {
-	snd_emux_t *emu;
-	emu10k1_t *hw;
+	struct snd_seq_device *dev = to_seq_dev(_dev);
+	struct snd_emux *emux;
+	struct snd_emu10k1 *hw;
 	unsigned long flags;
 
 	if (dev->driver_data == NULL)
 		return 0; /* not registered actually */
 
-	emu = dev->driver_data;
+	emux = dev->driver_data;
 
-	hw = emu->hw;
+	hw = emux->hw;
 	spin_lock_irqsave(&hw->voice_lock, flags);
 	hw->synth = NULL;
 	hw->get_synth_voice = NULL;
 	spin_unlock_irqrestore(&hw->voice_lock, flags);
 
-	snd_emux_free(emu);
+	snd_emux_free(emux);
 	return 0;
 }
 
@@ -101,20 +106,14 @@ static int snd_emu10k1_synth_delete_device(snd_seq_device_t *dev)
  *  INIT part
  */
 
-static int __init alsa_emu10k1_synth_init(void)
-{
-	
-	static snd_seq_dev_ops_t ops = {
-		snd_emu10k1_synth_new_device,
-		snd_emu10k1_synth_delete_device,
-	};
-	return snd_seq_device_register_driver(SNDRV_SEQ_DEV_ID_EMU10K1_SYNTH, &ops, sizeof(snd_emu10k1_synth_arg_t));
-}
+static struct snd_seq_driver emu10k1_synth_driver = {
+	.driver = {
+		.name = KBUILD_MODNAME,
+		.probe = snd_emu10k1_synth_probe,
+		.remove = snd_emu10k1_synth_remove,
+	},
+	.id = SNDRV_SEQ_DEV_ID_EMU10K1_SYNTH,
+	.argsize = sizeof(struct snd_emu10k1_synth_arg),
+};
 
-static void __exit alsa_emu10k1_synth_exit(void)
-{
-	snd_seq_device_unregister_driver(SNDRV_SEQ_DEV_ID_EMU10K1_SYNTH);
-}
-
-module_init(alsa_emu10k1_synth_init)
-module_exit(alsa_emu10k1_synth_exit)
+module_snd_seq_driver(emu10k1_synth_driver);

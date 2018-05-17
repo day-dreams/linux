@@ -38,7 +38,12 @@
 */
 #undef DEBUG_PAT
 
-int pdc_type = PDC_TYPE_ILLEGAL;
+int pdc_type __read_mostly = PDC_TYPE_ILLEGAL;
+
+/* cell number and location (PAT firmware only) */
+unsigned long parisc_cell_num __read_mostly;
+unsigned long parisc_cell_loc __read_mostly;
+
 
 void __init setup_pdc(void)
 {
@@ -47,7 +52,7 @@ void __init setup_pdc(void)
 	struct pdc_system_map_mod_info module_result;
 	struct pdc_module_path module_path;
 	struct pdc_model model;
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	struct pdc_pat_cell_num cell_info;
 #endif
 
@@ -58,7 +63,7 @@ void __init setup_pdc(void)
 	status = pdc_system_map_find_mods(&module_result, &module_path, 0);
 	if (status == PDC_OK) {
 		pdc_type = PDC_TYPE_SYSTEM_MAP;
-		printk("System Map.\n");
+		pr_cont("System Map.\n");
 		return;
 	}
 
@@ -73,11 +78,15 @@ void __init setup_pdc(void)
 	 * clearer message.
 	 */
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 	status = pdc_pat_cell_get_number(&cell_info);
 	if (status == PDC_OK) {
 		pdc_type = PDC_TYPE_PAT;
-		printk("64 bit PAT.\n");
+		pr_cont("64 bit PAT.\n");
+		parisc_cell_num = cell_info.cell_num;
+		parisc_cell_loc = cell_info.cell_loc;
+		pr_info("PAT: Running on cell %lu and location %lu.\n",
+			parisc_cell_num, parisc_cell_loc);
 		return;
 	}
 #endif
@@ -93,16 +102,16 @@ void __init setup_pdc(void)
 	case 0x6:		/* 705, 710 */
 	case 0x7:		/* 715, 725 */
 	case 0x8:		/* 745, 747, 742 */
-	case 0xA:		/* 712 and similiar */
+	case 0xA:		/* 712 and similar */
 	case 0xC:		/* 715/64, at least */
 
 		pdc_type = PDC_TYPE_SNAKE;
-		printk("Snake.\n");
+		pr_cont("Snake.\n");
 		return;
 
 	default:		/* Everything else */
 
-		printk("Unsupported.\n");
+		pr_cont("Unsupported.\n");
 		panic("If this is a 64-bit machine, please try a 64-bit kernel.\n");
 	}
 }
@@ -120,8 +129,8 @@ set_pmem_entry(physmem_range_t *pmem_ptr, unsigned long start,
 	 * pdc info is bad in this case).
 	 */
 
-	if (   ((start & (PAGE_SIZE - 1)) != 0)
-	    || ((pages4k & ((1UL << PDC_PAGE_ADJ_SHIFT) - 1)) != 0) ) {
+	if (unlikely( ((start & (PAGE_SIZE - 1)) != 0)
+	    || ((pages4k & ((1UL << PDC_PAGE_ADJ_SHIFT) - 1)) != 0) )) {
 
 		panic("Memory range doesn't align with page size!\n");
 	}
@@ -152,7 +161,7 @@ static void __init pagezero_memconfig(void)
 	npmem_ranges = 1;
 }
 
-#ifdef __LP64__
+#ifdef CONFIG_64BIT
 
 /* All of the PDC PAT specific code is 64-bit only */
 
@@ -170,25 +179,31 @@ static void __init pagezero_memconfig(void)
 static int __init 
 pat_query_module(ulong pcell_loc, ulong mod_index)
 {
-	pdc_pat_cell_mod_maddr_block_t pa_pdc_cell;
+	pdc_pat_cell_mod_maddr_block_t *pa_pdc_cell;
 	unsigned long bytecnt;
 	unsigned long temp;	/* 64-bit scratch value */
 	long status;		/* PDC return value status */
 	struct parisc_device *dev;
 
+	pa_pdc_cell = kmalloc(sizeof (*pa_pdc_cell), GFP_KERNEL);
+	if (!pa_pdc_cell)
+		panic("couldn't allocate memory for PDC_PAT_CELL!");
+
 	/* return cell module (PA or Processor view) */
 	status = pdc_pat_cell_module(&bytecnt, pcell_loc, mod_index,
-				     PA_VIEW, &pa_pdc_cell);
+				     PA_VIEW, pa_pdc_cell);
 
 	if (status != PDC_OK) {
 		/* no more cell modules or error */
+		kfree(pa_pdc_cell);
 		return status;
 	}
 
-	temp = pa_pdc_cell.cba;
-	dev = alloc_pa_dev(PAT_GET_CBA(temp), &pa_pdc_cell.mod_path);
+	temp = pa_pdc_cell->cba;
+	dev = alloc_pa_dev(PAT_GET_CBA(temp), &(pa_pdc_cell->mod_path));
 	if (!dev) {
-		return PDC_NE_MOD;
+		kfree(pa_pdc_cell);
+		return PDC_OK;
 	}
 
 	/* alloc_pa_dev sets dev->hpa */
@@ -203,27 +218,28 @@ pat_query_module(ulong pcell_loc, ulong mod_index)
 
 	/* save generic info returned from the call */
 	/* REVISIT: who is the consumer of this? not sure yet... */
-	dev->mod_info = pa_pdc_cell.mod_info;	/* pass to PAT_GET_ENTITY() */
-	dev->pmod_loc = pa_pdc_cell.mod_location;
+	dev->mod_info = pa_pdc_cell->mod_info;	/* pass to PAT_GET_ENTITY() */
+	dev->pmod_loc = pa_pdc_cell->mod_location;
+	dev->mod0 = pa_pdc_cell->mod[0];
 
 	register_parisc_device(dev);	/* advertise device */
 
 #ifdef DEBUG_PAT
-	pdc_pat_cell_mod_maddr_block_t io_pdc_cell;
 	/* dump what we see so far... */
 	switch (PAT_GET_ENTITY(dev->mod_info)) {
+		pdc_pat_cell_mod_maddr_block_t io_pdc_cell;
 		unsigned long i;
 
 	case PAT_ENTITY_PROC:
 		printk(KERN_DEBUG "PAT_ENTITY_PROC: id_eid 0x%lx\n",
-			pa_pdc_cell.mod[0]);
+			pa_pdc_cell->mod[0]);
 		break;
 
 	case PAT_ENTITY_MEM:
 		printk(KERN_DEBUG 
 			"PAT_ENTITY_MEM: amount 0x%lx min_gni_base 0x%lx min_gni_len 0x%lx\n",
-			pa_pdc_cell.mod[0], pa_pdc_cell.mod[1], 
-			pa_pdc_cell.mod[2]);
+			pa_pdc_cell->mod[0], pa_pdc_cell->mod[1],
+			pa_pdc_cell->mod[2]);
 		break;
 	case PAT_ENTITY_CA:
 		printk(KERN_DEBUG "PAT_ENTITY_CA: %ld\n", pcell_loc);
@@ -243,13 +259,13 @@ pat_query_module(ulong pcell_loc, ulong mod_index)
  print_ranges:
 		pdc_pat_cell_module(&bytecnt, pcell_loc, mod_index,
 				    IO_VIEW, &io_pdc_cell);
-		printk(KERN_DEBUG "ranges %ld\n", pa_pdc_cell.mod[1]);
-		for (i = 0; i < pa_pdc_cell.mod[1]; i++) {
+		printk(KERN_DEBUG "ranges %ld\n", pa_pdc_cell->mod[1]);
+		for (i = 0; i < pa_pdc_cell->mod[1]; i++) {
 			printk(KERN_DEBUG 
 				"  PA_VIEW %ld: 0x%016lx 0x%016lx 0x%016lx\n", 
-				i, pa_pdc_cell.mod[2 + i * 3],	/* type */
-				pa_pdc_cell.mod[3 + i * 3],	/* start */
-				pa_pdc_cell.mod[4 + i * 3]);	/* finish (ie end) */
+				i, pa_pdc_cell->mod[2 + i * 3],	/* type */
+				pa_pdc_cell->mod[3 + i * 3],	/* start */
+				pa_pdc_cell->mod[4 + i * 3]);	/* finish (ie end) */
 			printk(KERN_DEBUG 
 				"  IO_VIEW %ld: 0x%016lx 0x%016lx 0x%016lx\n", 
 				i, io_pdc_cell.mod[2 + i * 3],	/* type */
@@ -260,6 +276,9 @@ pat_query_module(ulong pcell_loc, ulong mod_index)
 		break;
 	}
 #endif /* DEBUG_PAT */
+
+	kfree(pa_pdc_cell);
+
 	return PDC_OK;
 }
 
@@ -408,13 +427,13 @@ static void __init sprockets_memconfig(void)
 	}
 }
 
-#else   /* !__LP64__ */
+#else   /* !CONFIG_64BIT */
 
 #define pat_inventory() do { } while (0)
 #define pat_memconfig() do { } while (0)
 #define sprockets_memconfig() pagezero_memconfig()
 
-#endif	/* !__LP64__ */
+#endif	/* !CONFIG_64BIT */
 
 
 #ifndef CONFIG_PA20
@@ -496,10 +515,10 @@ add_system_map_addresses(struct parisc_device *dev, int num_addrs,
 	long status;
 	struct pdc_system_map_addr_info addr_result;
 
-	dev->addr = kmalloc(num_addrs * sizeof(unsigned long), GFP_KERNEL);
+	dev->addr = kmalloc_array(num_addrs, sizeof(*dev->addr), GFP_KERNEL);
 	if(!dev->addr) {
 		printk(KERN_ERR "%s %s(): memory allocation failure\n",
-		       __FILE__, __FUNCTION__);
+		       __FILE__, __func__);
 		return;
 	}
 

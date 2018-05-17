@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
  /*
  * Driver for Microtek Scanmaker X6 USB scanner and possibly others.
  * 
@@ -8,21 +9,21 @@
  *
  */
 
-typedef void (*mts_scsi_cmnd_callback)(Scsi_Cmnd *);
+typedef void (*mts_scsi_cmnd_callback)(struct scsi_cmnd *);
 
 
 struct mts_transfer_context
 {
-	struct mts_desc* instance;
+	struct mts_desc *instance;
 	mts_scsi_cmnd_callback final_callback;
-	Scsi_Cmnd *srb;
+	struct scsi_cmnd *srb;
 	
-	void* data;
+	void *data;
 	unsigned data_length;
 	int data_pipe;
 	int fragment;
 
-	u8 status; /* status returned from ep_response after command completion */
+	u8 *scsi_status; /* status returned from ep_response after command completion */
 };
 
 
@@ -38,8 +39,7 @@ struct mts_desc {
 	u8 ep_response;
 	u8 ep_image;
 
-	struct Scsi_Host * host;
-	struct semaphore lock;
+	struct Scsi_Host *host;
 
 	struct urb *urb;
 	struct mts_transfer_context context;

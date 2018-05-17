@@ -1,9 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for the linux/parisc floating point code
 #
 
 # See arch/parisc/math-emu/README
-CFLAGS += -Wno-parentheses -Wno-implicit-function-declaration \
+ccflags-y := -Wno-parentheses -Wno-implicit-function-declaration \
 	-Wno-uninitialized -Wno-strict-prototypes -Wno-return-type \
 	-Wno-implicit-int
 

@@ -9,14 +9,16 @@
  * a description of how these routines should be used.
  */
 
+#include <linux/gfp.h>
 #include <linux/module.h>
+#include <linux/dma-mapping.h>
 #include <asm/dma.h>
+#include <asm/sn/intr.h>
+#include <asm/sn/pcibus_provider_defs.h>
+#include <asm/sn/pcidev.h>
 #include <asm/sn/sn_sal.h>
-#include "pci/pcibus_provider_defs.h"
-#include "pci/pcidev.h"
-#include "pci/pcibr_provider.h"
 
-#define SG_ENT_VIRT_ADDRESS(sg)	(page_address((sg)->page) + (sg)->offset)
+#define SG_ENT_VIRT_ADDRESS(sg)	(sg_virt((sg)))
 #define SG_ENT_PHYS_ADDRESS(SG)	virt_to_phys(SG_ENT_VIRT_ADDRESS(SG))
 
 /**
@@ -30,15 +32,14 @@
  * this function.  Of course, SN only supports devices that have 32 or more
  * address bits when using the PMU.
  */
-int sn_dma_supported(struct device *dev, u64 mask)
+static int sn_dma_supported(struct device *dev, u64 mask)
 {
-	BUG_ON(dev->bus != &pci_bus_type);
+	BUG_ON(!dev_is_pci(dev));
 
 	if (mask < 0x7fffffff)
 		return 0;
 	return 1;
 }
-EXPORT_SYMBOL(sn_dma_supported);
 
 /**
  * sn_dma_set_mask - set the DMA mask
@@ -49,7 +50,7 @@ EXPORT_SYMBOL(sn_dma_supported);
  */
 int sn_dma_set_mask(struct device *dev, u64 dma_mask)
 {
-	BUG_ON(dev->bus != &pci_bus_type);
+	BUG_ON(!dev_is_pci(dev));
 
 	if (!sn_dma_supported(dev, dma_mask))
 		return 0;
@@ -74,21 +75,34 @@ EXPORT_SYMBOL(sn_dma_set_mask);
  * queue for a SCSI controller).  See Documentation/DMA-API.txt for
  * more information.
  */
-void *sn_dma_alloc_coherent(struct device *dev, size_t size,
-			    dma_addr_t * dma_handle, int flags)
+static void *sn_dma_alloc_coherent(struct device *dev, size_t size,
+				   dma_addr_t * dma_handle, gfp_t flags,
+				   unsigned long attrs)
 {
 	void *cpuaddr;
 	unsigned long phys_addr;
-	struct pcidev_info *pcidev_info = SN_PCIDEV_INFO(to_pci_dev(dev));
+	int node;
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct sn_pcibus_provider *provider = SN_PCIDEV_BUSPROVIDER(pdev);
 
-	BUG_ON(dev->bus != &pci_bus_type);
+	BUG_ON(!dev_is_pci(dev));
 
 	/*
 	 * Allocate the memory.
-	 * FIXME: We should be doing alloc_pages_node for the node closest
-	 *        to the PCI device.
 	 */
-	if (!(cpuaddr = (void *)__get_free_pages(GFP_ATOMIC, get_order(size))))
+	node = pcibus_to_node(pdev->bus);
+	if (likely(node >=0)) {
+		struct page *p = __alloc_pages_node(node,
+						flags, get_order(size));
+
+		if (likely(p))
+			cpuaddr = page_address(p);
+		else
+			return NULL;
+	} else
+		cpuaddr = (void *)__get_free_pages(flags, get_order(size));
+
+	if (unlikely(!cpuaddr))
 		return NULL;
 
 	memset(cpuaddr, 0x0, size);
@@ -102,17 +116,16 @@ void *sn_dma_alloc_coherent(struct device *dev, size_t size,
 	 * resources.
 	 */
 
-	*dma_handle = pcibr_dma_map(pcidev_info, phys_addr, size,
-				    SN_PCIDMA_CONSISTENT);
+	*dma_handle = provider->dma_map_consistent(pdev, phys_addr, size,
+						   SN_DMA_ADDR_PHYS);
 	if (!*dma_handle) {
-		printk(KERN_ERR "%s: out of ATEs\n", __FUNCTION__);
+		printk(KERN_ERR "%s: out of ATEs\n", __func__);
 		free_pages((unsigned long)cpuaddr, get_order(size));
 		return NULL;
 	}
 
 	return cpuaddr;
 }
-EXPORT_SYMBOL(sn_dma_alloc_coherent);
 
 /**
  * sn_pci_free_coherent - free memory associated with coherent DMAable region
@@ -124,24 +137,25 @@ EXPORT_SYMBOL(sn_dma_alloc_coherent);
  * Frees the memory allocated by dma_alloc_coherent(), potentially unmapping
  * any associated IOMMU mappings.
  */
-void sn_dma_free_coherent(struct device *dev, size_t size, void *cpu_addr,
-			  dma_addr_t dma_handle)
+static void sn_dma_free_coherent(struct device *dev, size_t size, void *cpu_addr,
+				 dma_addr_t dma_handle, unsigned long attrs)
 {
-	struct pcidev_info *pcidev_info = SN_PCIDEV_INFO(to_pci_dev(dev));
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct sn_pcibus_provider *provider = SN_PCIDEV_BUSPROVIDER(pdev);
 
-	BUG_ON(dev->bus != &pci_bus_type);
+	BUG_ON(!dev_is_pci(dev));
 
-	pcibr_dma_unmap(pcidev_info, dma_handle, 0);
+	provider->dma_unmap(pdev, dma_handle, 0);
 	free_pages((unsigned long)cpu_addr, get_order(size));
 }
-EXPORT_SYMBOL(sn_dma_free_coherent);
 
 /**
- * sn_dma_map_single - map a single page for DMA
+ * sn_dma_map_single_attrs - map a single page for DMA
  * @dev: device to map for
  * @cpu_addr: kernel virtual address of the region to map
  * @size: size of the region
  * @direction: DMA direction
+ * @attrs: optional dma attributes
  *
  * Map the region pointed to by @cpu_addr for DMA and return the
  * DMA address.
@@ -151,48 +165,65 @@ EXPORT_SYMBOL(sn_dma_free_coherent);
  * no way of saving the dmamap handle from the alloc to later free
  * (which is pretty much unacceptable).
  *
+ * mappings with the DMA_ATTR_WRITE_BARRIER get mapped with
+ * dma_map_consistent() so that writes force a flush of pending DMA.
+ * (See "SGI Altix Architecture Considerations for Linux Device Drivers",
+ * Document Number: 007-4763-001)
+ *
  * TODO: simplify our interface;
  *       figure out how to save dmamap handle so can use two step.
  */
-dma_addr_t sn_dma_map_single(struct device *dev, void *cpu_addr, size_t size,
-			     int direction)
+static dma_addr_t sn_dma_map_page(struct device *dev, struct page *page,
+				  unsigned long offset, size_t size,
+				  enum dma_data_direction dir,
+				  unsigned long attrs)
 {
+	void *cpu_addr = page_address(page) + offset;
 	dma_addr_t dma_addr;
 	unsigned long phys_addr;
-	struct pcidev_info *pcidev_info = SN_PCIDEV_INFO(to_pci_dev(dev));
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct sn_pcibus_provider *provider = SN_PCIDEV_BUSPROVIDER(pdev);
 
-	BUG_ON(dev->bus != &pci_bus_type);
+	BUG_ON(!dev_is_pci(dev));
 
 	phys_addr = __pa(cpu_addr);
-	dma_addr = pcibr_dma_map(pcidev_info, phys_addr, size, 0);
+	if (attrs & DMA_ATTR_WRITE_BARRIER)
+		dma_addr = provider->dma_map_consistent(pdev, phys_addr,
+							size, SN_DMA_ADDR_PHYS);
+	else
+		dma_addr = provider->dma_map(pdev, phys_addr, size,
+					     SN_DMA_ADDR_PHYS);
+
 	if (!dma_addr) {
-		printk(KERN_ERR "%s: out of ATEs\n", __FUNCTION__);
+		printk(KERN_ERR "%s: out of ATEs\n", __func__);
 		return 0;
 	}
 	return dma_addr;
 }
-EXPORT_SYMBOL(sn_dma_map_single);
 
 /**
- * sn_dma_unmap_single - unamp a DMA mapped page
+ * sn_dma_unmap_single_attrs - unamp a DMA mapped page
  * @dev: device to sync
  * @dma_addr: DMA address to sync
  * @size: size of region
  * @direction: DMA direction
+ * @attrs: optional dma attributes
  *
  * This routine is supposed to sync the DMA region specified
  * by @dma_handle into the coherence domain.  On SN, we're always cache
  * coherent, so we just need to free any ATEs associated with this mapping.
  */
-void sn_dma_unmap_single(struct device *dev, dma_addr_t dma_addr, size_t size,
-			 int direction)
+static void sn_dma_unmap_page(struct device *dev, dma_addr_t dma_addr,
+			      size_t size, enum dma_data_direction dir,
+			      unsigned long attrs)
 {
-	struct pcidev_info *pcidev_info = SN_PCIDEV_INFO(to_pci_dev(dev));
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct sn_pcibus_provider *provider = SN_PCIDEV_BUSPROVIDER(pdev);
 
-	BUG_ON(dev->bus != &pci_bus_type);
-	pcibr_dma_unmap(pcidev_info, dma_addr, direction);
+	BUG_ON(!dev_is_pci(dev));
+
+	provider->dma_unmap(pdev, dma_addr, dir);
 }
-EXPORT_SYMBOL(sn_dma_unmap_single);
 
 /**
  * sn_dma_unmap_sg - unmap a DMA scatterlist
@@ -200,24 +231,27 @@ EXPORT_SYMBOL(sn_dma_unmap_single);
  * @sg: scatterlist to unmap
  * @nhwentries: number of scatterlist entries
  * @direction: DMA direction
+ * @attrs: optional dma attributes
  *
  * Unmap a set of streaming mode DMA translations.
  */
-void sn_dma_unmap_sg(struct device *dev, struct scatterlist *sg,
-		     int nhwentries, int direction)
+static void sn_dma_unmap_sg(struct device *dev, struct scatterlist *sgl,
+			    int nhwentries, enum dma_data_direction dir,
+			    unsigned long attrs)
 {
 	int i;
-	struct pcidev_info *pcidev_info = SN_PCIDEV_INFO(to_pci_dev(dev));
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct sn_pcibus_provider *provider = SN_PCIDEV_BUSPROVIDER(pdev);
+	struct scatterlist *sg;
 
-	BUG_ON(dev->bus != &pci_bus_type);
+	BUG_ON(!dev_is_pci(dev));
 
-	for (i = 0; i < nhwentries; i++, sg++) {
-		pcibr_dma_unmap(pcidev_info, sg->dma_address, direction);
+	for_each_sg(sgl, sg, nhwentries, i) {
+		provider->dma_unmap(pdev, sg->dma_address, dir);
 		sg->dma_address = (dma_addr_t) NULL;
 		sg->dma_length = 0;
 	}
 }
-EXPORT_SYMBOL(sn_dma_unmap_sg);
 
 /**
  * sn_dma_map_sg - map a scatterlist for DMA
@@ -225,35 +259,52 @@ EXPORT_SYMBOL(sn_dma_unmap_sg);
  * @sg: scatterlist to map
  * @nhwentries: number of entries
  * @direction: direction of the DMA transaction
+ * @attrs: optional dma attributes
+ *
+ * mappings with the DMA_ATTR_WRITE_BARRIER get mapped with
+ * dma_map_consistent() so that writes force a flush of pending DMA.
+ * (See "SGI Altix Architecture Considerations for Linux Device Drivers",
+ * Document Number: 007-4763-001)
  *
  * Maps each entry of @sg for DMA.
  */
-int sn_dma_map_sg(struct device *dev, struct scatterlist *sg, int nhwentries,
-		  int direction)
+static int sn_dma_map_sg(struct device *dev, struct scatterlist *sgl,
+			 int nhwentries, enum dma_data_direction dir,
+			 unsigned long attrs)
 {
 	unsigned long phys_addr;
-	struct scatterlist *saved_sg = sg;
-	struct pcidev_info *pcidev_info = SN_PCIDEV_INFO(to_pci_dev(dev));
+	struct scatterlist *saved_sg = sgl, *sg;
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct sn_pcibus_provider *provider = SN_PCIDEV_BUSPROVIDER(pdev);
 	int i;
 
-	BUG_ON(dev->bus != &pci_bus_type);
+	BUG_ON(!dev_is_pci(dev));
 
 	/*
 	 * Setup a DMA address for each entry in the scatterlist.
 	 */
-	for (i = 0; i < nhwentries; i++, sg++) {
+	for_each_sg(sgl, sg, nhwentries, i) {
+		dma_addr_t dma_addr;
 		phys_addr = SG_ENT_PHYS_ADDRESS(sg);
-		sg->dma_address = pcibr_dma_map(pcidev_info, phys_addr,
-						sg->length, 0);
+		if (attrs & DMA_ATTR_WRITE_BARRIER)
+			dma_addr = provider->dma_map_consistent(pdev,
+								phys_addr,
+								sg->length,
+								SN_DMA_ADDR_PHYS);
+		else
+			dma_addr = provider->dma_map(pdev, phys_addr,
+						     sg->length,
+						     SN_DMA_ADDR_PHYS);
 
+		sg->dma_address = dma_addr;
 		if (!sg->dma_address) {
-			printk(KERN_ERR "%s: out of ATEs\n", __FUNCTION__);
+			printk(KERN_ERR "%s: out of ATEs\n", __func__);
 
 			/*
 			 * Free any successfully allocated entries.
 			 */
 			if (i > 0)
-				sn_dma_unmap_sg(dev, saved_sg, i, direction);
+				sn_dma_unmap_sg(dev, saved_sg, i, dir, attrs);
 			return 0;
 		}
 
@@ -262,41 +313,42 @@ int sn_dma_map_sg(struct device *dev, struct scatterlist *sg, int nhwentries,
 
 	return nhwentries;
 }
-EXPORT_SYMBOL(sn_dma_map_sg);
 
-void sn_dma_sync_single_for_cpu(struct device *dev, dma_addr_t dma_handle,
-				size_t size, int direction)
+static void sn_dma_sync_single_for_cpu(struct device *dev, dma_addr_t dma_handle,
+				       size_t size, enum dma_data_direction dir)
 {
-	BUG_ON(dev->bus != &pci_bus_type);
+	BUG_ON(!dev_is_pci(dev));
 }
-EXPORT_SYMBOL(sn_dma_sync_single_for_cpu);
 
-void sn_dma_sync_single_for_device(struct device *dev, dma_addr_t dma_handle,
-				   size_t size, int direction)
+static void sn_dma_sync_single_for_device(struct device *dev, dma_addr_t dma_handle,
+					  size_t size,
+					  enum dma_data_direction dir)
 {
-	BUG_ON(dev->bus != &pci_bus_type);
+	BUG_ON(!dev_is_pci(dev));
 }
-EXPORT_SYMBOL(sn_dma_sync_single_for_device);
 
-void sn_dma_sync_sg_for_cpu(struct device *dev, struct scatterlist *sg,
-			    int nelems, int direction)
+static void sn_dma_sync_sg_for_cpu(struct device *dev, struct scatterlist *sg,
+				   int nelems, enum dma_data_direction dir)
 {
-	BUG_ON(dev->bus != &pci_bus_type);
+	BUG_ON(!dev_is_pci(dev));
 }
-EXPORT_SYMBOL(sn_dma_sync_sg_for_cpu);
 
-void sn_dma_sync_sg_for_device(struct device *dev, struct scatterlist *sg,
-			       int nelems, int direction)
+static void sn_dma_sync_sg_for_device(struct device *dev, struct scatterlist *sg,
+				      int nelems, enum dma_data_direction dir)
 {
-	BUG_ON(dev->bus != &pci_bus_type);
+	BUG_ON(!dev_is_pci(dev));
 }
-EXPORT_SYMBOL(sn_dma_sync_sg_for_device);
 
-int sn_dma_mapping_error(dma_addr_t dma_addr)
+static int sn_dma_mapping_error(struct device *dev, dma_addr_t dma_addr)
 {
 	return 0;
 }
-EXPORT_SYMBOL(sn_dma_mapping_error);
+
+u64 sn_dma_get_required_mask(struct device *dev)
+{
+	return DMA_BIT_MASK(64);
+}
+EXPORT_SYMBOL_GPL(sn_dma_get_required_mask);
 
 char *sn_pci_get_legacy_mem(struct pci_bus *bus)
 {
@@ -310,6 +362,29 @@ int sn_pci_legacy_read(struct pci_bus *bus, u16 port, u32 *val, u8 size)
 {
 	unsigned long addr;
 	int ret;
+	struct ia64_sal_retval isrv;
+
+	/*
+	 * First, try the SN_SAL_IOIF_PCI_SAFE SAL call which can work
+	 * around hw issues at the pci bus level.  SGI proms older than
+	 * 4.10 don't implement this.
+	 */
+
+	SAL_CALL(isrv, SN_SAL_IOIF_PCI_SAFE,
+		 pci_domain_nr(bus), bus->number,
+		 0, /* io */
+		 0, /* read */
+		 port, size, __pa(val));
+
+	if (isrv.status == 0)
+		return size;
+
+	/*
+	 * If the above failed, retry using the SAL_PROBE call which should
+	 * be present in all proms (but which cannot work round PCI chipset
+	 * bugs).  This code is retained for compatibility with old
+	 * pre-4.10 proms, and should be removed at some point in the future.
+	 */
 
 	if (!SN_PCIBUS_BUSSOFT(bus))
 		return -ENODEV;
@@ -333,6 +408,29 @@ int sn_pci_legacy_write(struct pci_bus *bus, u16 port, u32 val, u8 size)
 	int ret = size;
 	unsigned long paddr;
 	unsigned long *addr;
+	struct ia64_sal_retval isrv;
+
+	/*
+	 * First, try the SN_SAL_IOIF_PCI_SAFE SAL call which can work
+	 * around hw issues at the pci bus level.  SGI proms older than
+	 * 4.10 don't implement this.
+	 */
+
+	SAL_CALL(isrv, SN_SAL_IOIF_PCI_SAFE,
+		 pci_domain_nr(bus), bus->number,
+		 0, /* io */
+		 1, /* write */
+		 port, size, __pa(&val));
+
+	if (isrv.status == 0)
+		return size;
+
+	/*
+	 * If the above failed, retry using the SAL_PROBE call which should
+	 * be present in all proms (but which cannot work round PCI chipset
+	 * bugs).  This code is retained for compatibility with old
+	 * pre-4.10 proms, and should be removed at some point in the future.
+	 */
 
 	if (!SN_PCIBUS_BUSSOFT(bus)) {
 		ret = -ENODEV;
@@ -360,4 +458,24 @@ int sn_pci_legacy_write(struct pci_bus *bus, u16 port, u32 val, u8 size)
 	}
  out:
 	return ret;
+}
+
+static struct dma_map_ops sn_dma_ops = {
+	.alloc			= sn_dma_alloc_coherent,
+	.free			= sn_dma_free_coherent,
+	.map_page		= sn_dma_map_page,
+	.unmap_page		= sn_dma_unmap_page,
+	.map_sg			= sn_dma_map_sg,
+	.unmap_sg		= sn_dma_unmap_sg,
+	.sync_single_for_cpu 	= sn_dma_sync_single_for_cpu,
+	.sync_sg_for_cpu	= sn_dma_sync_sg_for_cpu,
+	.sync_single_for_device = sn_dma_sync_single_for_device,
+	.sync_sg_for_device	= sn_dma_sync_sg_for_device,
+	.mapping_error		= sn_dma_mapping_error,
+	.dma_supported		= sn_dma_supported,
+};
+
+void sn_dma_init(void)
+{
+	dma_ops = &sn_dma_ops;
 }

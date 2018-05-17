@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *     and (c) 1999 Steve Ratcliffe <steve@parabola.demon.co.uk>
  *  Copyright (C) 1999-2000 Takashi Iwai <tiwai@suse.de>
  *
@@ -22,6 +22,7 @@
 
 #include "emu8000_local.h"
 #include <linux/init.h>
+#include <linux/module.h>
 #include <sound/initval.h>
 
 MODULE_AUTHOR("Takashi Iwai, Steve Ratcliffe");
@@ -33,12 +34,13 @@ MODULE_LICENSE("GPL");
 /*
  * create a new hardware dependent device for Emu8000
  */
-static int snd_emu8000_new_device(snd_seq_device_t *dev)
+static int snd_emu8000_probe(struct device *_dev)
 {
-	emu8000_t *hw;
-	snd_emux_t *emu;
+	struct snd_seq_device *dev = to_seq_dev(_dev);
+	struct snd_emu8000 *hw;
+	struct snd_emux *emu;
 
-	hw = *(emu8000_t**)SNDRV_SEQ_DEVICE_ARGPTR(dev);
+	hw = *(struct snd_emu8000**)SNDRV_SEQ_DEVICE_ARGPTR(dev);
 	if (hw == NULL)
 		return -EINVAL;
 
@@ -56,7 +58,7 @@ static int snd_emu8000_new_device(snd_seq_device_t *dev)
 	emu->num_ports = hw->seq_ports;
 
 	if (hw->memhdr) {
-		snd_printk("memhdr is already initialized!?\n");
+		snd_printk(KERN_ERR "memhdr is already initialized!?\n");
 		snd_util_memhdr_free(hw->memhdr);
 	}
 	hw->memhdr = snd_util_memhdr_new(hw->mem_size);
@@ -92,9 +94,10 @@ static int snd_emu8000_new_device(snd_seq_device_t *dev)
 /*
  * free all resources
  */
-static int snd_emu8000_delete_device(snd_seq_device_t *dev)
+static int snd_emu8000_remove(struct device *_dev)
 {
-	emu8000_t *hw;
+	struct snd_seq_device *dev = to_seq_dev(_dev);
+	struct snd_emu8000 *hw;
 
 	if (dev->driver_data == NULL)
 		return 0; /* no synth was allocated actually */
@@ -102,10 +105,8 @@ static int snd_emu8000_delete_device(snd_seq_device_t *dev)
 	hw = dev->driver_data;
 	if (hw->pcm)
 		snd_device_free(dev->card, hw->pcm);
-	if (hw->emu)
-		snd_emux_free(hw->emu);
-	if (hw->memhdr)
-		snd_util_memhdr_free(hw->memhdr);
+	snd_emux_free(hw->emu);
+	snd_util_memhdr_free(hw->memhdr);
 	hw->emu = NULL;
 	hw->memhdr = NULL;
 	return 0;
@@ -115,20 +116,14 @@ static int snd_emu8000_delete_device(snd_seq_device_t *dev)
  *  INIT part
  */
 
-static int __init alsa_emu8000_init(void)
-{
-	
-	static snd_seq_dev_ops_t ops = {
-		snd_emu8000_new_device,
-		snd_emu8000_delete_device,
-	};
-	return snd_seq_device_register_driver(SNDRV_SEQ_DEV_ID_EMU8000, &ops, sizeof(emu8000_t*));
-}
+static struct snd_seq_driver emu8000_driver = {
+	.driver = {
+		.name = KBUILD_MODNAME,
+		.probe = snd_emu8000_probe,
+		.remove = snd_emu8000_remove,
+	},
+	.id = SNDRV_SEQ_DEV_ID_EMU8000,
+	.argsize = sizeof(struct snd_emu8000 *),
+};
 
-static void __exit alsa_emu8000_exit(void)
-{
-	snd_seq_device_unregister_driver(SNDRV_SEQ_DEV_ID_EMU8000);
-}
-
-module_init(alsa_emu8000_init)
-module_exit(alsa_emu8000_exit)
+module_snd_seq_driver(emu8000_driver);

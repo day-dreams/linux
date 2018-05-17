@@ -14,10 +14,34 @@
 #include <asm/io.h>
 #include <linux/rtc.h>			/* get the user-level API */
 #include <asm/mc146818rtc.h>		/* register access macros */
+#include <linux/bcd.h>
+#include <linux/delay.h>
+#include <linux/pm-trace.h>
 
 #ifdef __KERNEL__
 #include <linux/spinlock.h>		/* spinlock_t */
 extern spinlock_t rtc_lock;		/* serialize CMOS RAM access */
+
+/* Some RTCs extend the mc146818 register set to support alarms of more
+ * than 24 hours in the future; or dates that include a century code.
+ * This platform_data structure can pass this information to the driver.
+ *
+ * Also, some platforms need suspend()/resume() hooks to kick in special
+ * handling of wake alarms, e.g. activating ACPI BIOS hooks or setting up
+ * a separate wakeup alarm used by some almost-clone chips.
+ */
+struct cmos_rtc_board_info {
+	void	(*wake_on)(struct device *dev);
+	void	(*wake_off)(struct device *dev);
+
+	u32	flags;
+#define CMOS_RTC_FLAGS_NOFREQ	(1 << 0)
+	int	address_space;
+
+	u8	rtc_day_alarm;		/* zero, or register index */
+	u8	rtc_mon_alarm;		/* zero, or register index */
+	u8	rtc_century;		/* zero, or register index */
+};
 #endif
 
 /**********************************************************************
@@ -88,5 +112,18 @@ extern spinlock_t rtc_lock;		/* serialize CMOS RAM access */
 #define RTC_VALID	RTC_REG_D
 # define RTC_VRT 0x80		/* valid RAM and time */
 /**********************************************************************/
+
+#ifndef ARCH_RTC_LOCATION	/* Override by <asm/mc146818rtc.h>? */
+
+#define RTC_IO_EXTENT	0x8
+#define RTC_IO_EXTENT_USED	0x2
+#define RTC_IOMAPPED	1	/* Default to I/O mapping. */
+
+#else
+#define RTC_IO_EXTENT_USED      RTC_IO_EXTENT
+#endif /* ARCH_RTC_LOCATION */
+
+unsigned int mc146818_get_time(struct rtc_time *time);
+int mc146818_set_time(struct rtc_time *time);
 
 #endif /* _MC146818RTC_H */

@@ -1,6 +1,6 @@
-/* proc.c: /proc interface for RxRPC
+/* /proc/net/ support for AF_RXRPC
  *
- * Copyright (C) 2002 Red Hat, Inc. All Rights Reserved.
+ * Copyright (C) 2007 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
  *
  * This program is free software; you can redistribute it and/or
@@ -9,609 +9,215 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/sched.h>
-#include <linux/slab.h>
 #include <linux/module.h>
-#include <linux/proc_fs.h>
-#include <linux/seq_file.h>
-#include <rxrpc/rxrpc.h>
-#include <rxrpc/transport.h>
-#include <rxrpc/peer.h>
-#include <rxrpc/connection.h>
-#include <rxrpc/call.h>
-#include <rxrpc/message.h>
-#include "internal.h"
+#include <net/sock.h>
+#include <net/af_rxrpc.h>
+#include "ar-internal.h"
 
-static struct proc_dir_entry *proc_rxrpc;
-
-static int rxrpc_proc_transports_open(struct inode *inode, struct file *file);
-static void *rxrpc_proc_transports_start(struct seq_file *p, loff_t *pos);
-static void *rxrpc_proc_transports_next(struct seq_file *p, void *v, loff_t *pos);
-static void rxrpc_proc_transports_stop(struct seq_file *p, void *v);
-static int rxrpc_proc_transports_show(struct seq_file *m, void *v);
-
-static struct seq_operations rxrpc_proc_transports_ops = {
-	.start	= rxrpc_proc_transports_start,
-	.next	= rxrpc_proc_transports_next,
-	.stop	= rxrpc_proc_transports_stop,
-	.show	= rxrpc_proc_transports_show,
+static const char *const rxrpc_conn_states[RXRPC_CONN__NR_STATES] = {
+	[RXRPC_CONN_UNUSED]			= "Unused  ",
+	[RXRPC_CONN_CLIENT]			= "Client  ",
+	[RXRPC_CONN_SERVICE_PREALLOC]		= "SvPrealc",
+	[RXRPC_CONN_SERVICE_UNSECURED]		= "SvUnsec ",
+	[RXRPC_CONN_SERVICE_CHALLENGING]	= "SvChall ",
+	[RXRPC_CONN_SERVICE]			= "SvSecure",
+	[RXRPC_CONN_REMOTELY_ABORTED]		= "RmtAbort",
+	[RXRPC_CONN_LOCALLY_ABORTED]		= "LocAbort",
 };
 
-static struct file_operations rxrpc_proc_transports_fops = {
-	.open		= rxrpc_proc_transports_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= seq_release,
-};
-
-static int rxrpc_proc_peers_open(struct inode *inode, struct file *file);
-static void *rxrpc_proc_peers_start(struct seq_file *p, loff_t *pos);
-static void *rxrpc_proc_peers_next(struct seq_file *p, void *v, loff_t *pos);
-static void rxrpc_proc_peers_stop(struct seq_file *p, void *v);
-static int rxrpc_proc_peers_show(struct seq_file *m, void *v);
-
-static struct seq_operations rxrpc_proc_peers_ops = {
-	.start	= rxrpc_proc_peers_start,
-	.next	= rxrpc_proc_peers_next,
-	.stop	= rxrpc_proc_peers_stop,
-	.show	= rxrpc_proc_peers_show,
-};
-
-static struct file_operations rxrpc_proc_peers_fops = {
-	.open		= rxrpc_proc_peers_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= seq_release,
-};
-
-static int rxrpc_proc_conns_open(struct inode *inode, struct file *file);
-static void *rxrpc_proc_conns_start(struct seq_file *p, loff_t *pos);
-static void *rxrpc_proc_conns_next(struct seq_file *p, void *v, loff_t *pos);
-static void rxrpc_proc_conns_stop(struct seq_file *p, void *v);
-static int rxrpc_proc_conns_show(struct seq_file *m, void *v);
-
-static struct seq_operations rxrpc_proc_conns_ops = {
-	.start	= rxrpc_proc_conns_start,
-	.next	= rxrpc_proc_conns_next,
-	.stop	= rxrpc_proc_conns_stop,
-	.show	= rxrpc_proc_conns_show,
-};
-
-static struct file_operations rxrpc_proc_conns_fops = {
-	.open		= rxrpc_proc_conns_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= seq_release,
-};
-
-static int rxrpc_proc_calls_open(struct inode *inode, struct file *file);
-static void *rxrpc_proc_calls_start(struct seq_file *p, loff_t *pos);
-static void *rxrpc_proc_calls_next(struct seq_file *p, void *v, loff_t *pos);
-static void rxrpc_proc_calls_stop(struct seq_file *p, void *v);
-static int rxrpc_proc_calls_show(struct seq_file *m, void *v);
-
-static struct seq_operations rxrpc_proc_calls_ops = {
-	.start	= rxrpc_proc_calls_start,
-	.next	= rxrpc_proc_calls_next,
-	.stop	= rxrpc_proc_calls_stop,
-	.show	= rxrpc_proc_calls_show,
-};
-
-static struct file_operations rxrpc_proc_calls_fops = {
-	.open		= rxrpc_proc_calls_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= seq_release,
-};
-
-static const char *rxrpc_call_states7[] = {
-	"complet",
-	"error  ",
-	"rcv_op ",
-	"rcv_arg",
-	"got_arg",
-	"snd_rpl",
-	"fin_ack",
-	"snd_arg",
-	"rcv_rpl",
-	"got_rpl"
-};
-
-static const char *rxrpc_call_error_states7[] = {
-	"no_err ",
-	"loc_abt",
-	"rmt_abt",
-	"loc_err",
-	"rmt_err"
-};
-
-/*****************************************************************************/
 /*
- * initialise the /proc/net/rxrpc/ directory
+ * generate a list of extant and dead calls in /proc/net/rxrpc_calls
  */
-int rxrpc_proc_init(void)
+static void *rxrpc_call_seq_start(struct seq_file *seq, loff_t *_pos)
 {
-	struct proc_dir_entry *p;
+	struct rxrpc_net *rxnet = rxrpc_net(seq_file_net(seq));
 
-	proc_rxrpc = proc_mkdir("rxrpc", proc_net);
-	if (!proc_rxrpc)
-		goto error;
-	proc_rxrpc->owner = THIS_MODULE;
+	rcu_read_lock();
+	read_lock(&rxnet->call_lock);
+	return seq_list_start_head(&rxnet->calls, *_pos);
+}
 
-	p = create_proc_entry("calls", 0, proc_rxrpc);
-	if (!p)
-		goto error_proc;
-	p->proc_fops = &rxrpc_proc_calls_fops;
-	p->owner = THIS_MODULE;
-
-	p = create_proc_entry("connections", 0, proc_rxrpc);
-	if (!p)
-		goto error_calls;
-	p->proc_fops = &rxrpc_proc_conns_fops;
-	p->owner = THIS_MODULE;
-
-	p = create_proc_entry("peers", 0, proc_rxrpc);
-	if (!p)
-		goto error_calls;
-	p->proc_fops = &rxrpc_proc_peers_fops;
-	p->owner = THIS_MODULE;
-
-	p = create_proc_entry("transports", 0, proc_rxrpc);
-	if (!p)
-		goto error_conns;
-	p->proc_fops = &rxrpc_proc_transports_fops;
-	p->owner = THIS_MODULE;
-
-	return 0;
-
- error_conns:
-	remove_proc_entry("connections", proc_rxrpc);
- error_calls:
-	remove_proc_entry("calls", proc_rxrpc);
- error_proc:
-	remove_proc_entry("rxrpc", proc_net);
- error:
-	return -ENOMEM;
-} /* end rxrpc_proc_init() */
-
-/*****************************************************************************/
-/*
- * clean up the /proc/net/rxrpc/ directory
- */
-void rxrpc_proc_cleanup(void)
+static void *rxrpc_call_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
-	remove_proc_entry("transports", proc_rxrpc);
-	remove_proc_entry("peers", proc_rxrpc);
-	remove_proc_entry("connections", proc_rxrpc);
-	remove_proc_entry("calls", proc_rxrpc);
+	struct rxrpc_net *rxnet = rxrpc_net(seq_file_net(seq));
 
-	remove_proc_entry("rxrpc", proc_net);
+	return seq_list_next(v, &rxnet->calls, pos);
+}
 
-} /* end rxrpc_proc_cleanup() */
-
-/*****************************************************************************/
-/*
- * open "/proc/net/rxrpc/transports" which provides a summary of extant transports
- */
-static int rxrpc_proc_transports_open(struct inode *inode, struct file *file)
+static void rxrpc_call_seq_stop(struct seq_file *seq, void *v)
 {
-	struct seq_file *m;
-	int ret;
+	struct rxrpc_net *rxnet = rxrpc_net(seq_file_net(seq));
 
-	ret = seq_open(file, &rxrpc_proc_transports_ops);
-	if (ret < 0)
-		return ret;
+	read_unlock(&rxnet->call_lock);
+	rcu_read_unlock();
+}
 
-	m = file->private_data;
-	m->private = PDE(inode)->data;
-
-	return 0;
-} /* end rxrpc_proc_transports_open() */
-
-/*****************************************************************************/
-/*
- * set up the iterator to start reading from the transports list and return the first item
- */
-static void *rxrpc_proc_transports_start(struct seq_file *m, loff_t *_pos)
+static int rxrpc_call_seq_show(struct seq_file *seq, void *v)
 {
-	struct list_head *_p;
-	loff_t pos = *_pos;
+	struct rxrpc_local *local;
+	struct rxrpc_sock *rx;
+	struct rxrpc_peer *peer;
+	struct rxrpc_call *call;
+	struct rxrpc_net *rxnet = rxrpc_net(seq_file_net(seq));
+	rxrpc_seq_t tx_hard_ack, rx_hard_ack;
+	char lbuff[50], rbuff[50];
 
-	/* lock the list against modification */
-	down_read(&rxrpc_proc_transports_sem);
-
-	/* allow for the header line */
-	if (!pos)
-		return SEQ_START_TOKEN;
-	pos--;
-
-	/* find the n'th element in the list */
-	list_for_each(_p, &rxrpc_proc_transports)
-		if (!pos--)
-			break;
-
-	return _p != &rxrpc_proc_transports ? _p : NULL;
-} /* end rxrpc_proc_transports_start() */
-
-/*****************************************************************************/
-/*
- * move to next call in transports list
- */
-static void *rxrpc_proc_transports_next(struct seq_file *p, void *v, loff_t *pos)
-{
-	struct list_head *_p;
-
-	(*pos)++;
-
-	_p = v;
-	_p = (v == SEQ_START_TOKEN) ? rxrpc_proc_transports.next : _p->next;
-
-	return _p != &rxrpc_proc_transports ? _p : NULL;
-} /* end rxrpc_proc_transports_next() */
-
-/*****************************************************************************/
-/*
- * clean up after reading from the transports list
- */
-static void rxrpc_proc_transports_stop(struct seq_file *p, void *v)
-{
-	up_read(&rxrpc_proc_transports_sem);
-
-} /* end rxrpc_proc_transports_stop() */
-
-/*****************************************************************************/
-/*
- * display a header line followed by a load of call lines
- */
-static int rxrpc_proc_transports_show(struct seq_file *m, void *v)
-{
-	struct rxrpc_transport *trans =
-		list_entry(v, struct rxrpc_transport, proc_link);
-
-	/* display header on line 1 */
-	if (v == SEQ_START_TOKEN) {
-		seq_puts(m, "LOCAL USE\n");
+	if (v == &rxnet->calls) {
+		seq_puts(seq,
+			 "Proto Local                                          "
+			 " Remote                                         "
+			 " SvID ConnID   CallID   End Use State    Abort   "
+			 " UserID\n");
 		return 0;
 	}
 
-	/* display one transport per line on subsequent lines */
-	seq_printf(m, "%5hu %3d\n",
-		   trans->port,
-		   atomic_read(&trans->usage)
-		   );
+	call = list_entry(v, struct rxrpc_call, link);
 
-	return 0;
-} /* end rxrpc_proc_transports_show() */
-
-/*****************************************************************************/
-/*
- * open "/proc/net/rxrpc/peers" which provides a summary of extant peers
- */
-static int rxrpc_proc_peers_open(struct inode *inode, struct file *file)
-{
-	struct seq_file *m;
-	int ret;
-
-	ret = seq_open(file, &rxrpc_proc_peers_ops);
-	if (ret < 0)
-		return ret;
-
-	m = file->private_data;
-	m->private = PDE(inode)->data;
-
-	return 0;
-} /* end rxrpc_proc_peers_open() */
-
-/*****************************************************************************/
-/*
- * set up the iterator to start reading from the peers list and return the
- * first item
- */
-static void *rxrpc_proc_peers_start(struct seq_file *m, loff_t *_pos)
-{
-	struct list_head *_p;
-	loff_t pos = *_pos;
-
-	/* lock the list against modification */
-	down_read(&rxrpc_peers_sem);
-
-	/* allow for the header line */
-	if (!pos)
-		return SEQ_START_TOKEN;
-	pos--;
-
-	/* find the n'th element in the list */
-	list_for_each(_p, &rxrpc_peers)
-		if (!pos--)
-			break;
-
-	return _p != &rxrpc_peers ? _p : NULL;
-} /* end rxrpc_proc_peers_start() */
-
-/*****************************************************************************/
-/*
- * move to next conn in peers list
- */
-static void *rxrpc_proc_peers_next(struct seq_file *p, void *v, loff_t *pos)
-{
-	struct list_head *_p;
-
-	(*pos)++;
-
-	_p = v;
-	_p = (v == SEQ_START_TOKEN) ? rxrpc_peers.next : _p->next;
-
-	return _p != &rxrpc_peers ? _p : NULL;
-} /* end rxrpc_proc_peers_next() */
-
-/*****************************************************************************/
-/*
- * clean up after reading from the peers list
- */
-static void rxrpc_proc_peers_stop(struct seq_file *p, void *v)
-{
-	up_read(&rxrpc_peers_sem);
-
-} /* end rxrpc_proc_peers_stop() */
-
-/*****************************************************************************/
-/*
- * display a header line followed by a load of conn lines
- */
-static int rxrpc_proc_peers_show(struct seq_file *m, void *v)
-{
-	struct rxrpc_peer *peer = list_entry(v, struct rxrpc_peer, proc_link);
-	signed long timeout;
-
-	/* display header on line 1 */
-	if (v == SEQ_START_TOKEN) {
-		seq_puts(m, "LOCAL REMOTE   USAGE CONNS  TIMEOUT"
-			 "   MTU RTT(uS)\n");
-		return 0;
+	rx = rcu_dereference(call->socket);
+	if (rx) {
+		local = READ_ONCE(rx->local);
+		if (local)
+			sprintf(lbuff, "%pISpc", &local->srx.transport);
+		else
+			strcpy(lbuff, "no_local");
+	} else {
+		strcpy(lbuff, "no_socket");
 	}
 
-	/* display one peer per line on subsequent lines */
-	timeout = 0;
-	if (!list_empty(&peer->timeout.link))
-		timeout = (signed long) peer->timeout.timo_jif -
-			(signed long) jiffies;
+	peer = call->peer;
+	if (peer)
+		sprintf(rbuff, "%pISpc", &peer->srx.transport);
+	else
+		strcpy(rbuff, "no_connection");
 
-	seq_printf(m, "%5hu %08x %5d %5d %8ld %5Zu %7lu\n",
-		   peer->trans->port,
-		   ntohl(peer->addr.s_addr),
-		   atomic_read(&peer->usage),
-		   atomic_read(&peer->conn_count),
-		   timeout,
-		   peer->if_mtu,
-		   (long) peer->rtt
-		   );
-
-	return 0;
-} /* end rxrpc_proc_peers_show() */
-
-/*****************************************************************************/
-/*
- * open "/proc/net/rxrpc/connections" which provides a summary of extant
- * connections
- */
-static int rxrpc_proc_conns_open(struct inode *inode, struct file *file)
-{
-	struct seq_file *m;
-	int ret;
-
-	ret = seq_open(file, &rxrpc_proc_conns_ops);
-	if (ret < 0)
-		return ret;
-
-	m = file->private_data;
-	m->private = PDE(inode)->data;
+	tx_hard_ack = READ_ONCE(call->tx_hard_ack);
+	rx_hard_ack = READ_ONCE(call->rx_hard_ack);
+	seq_printf(seq,
+		   "UDP   %-47.47s %-47.47s %4x %08x %08x %s %3u"
+		   " %-8.8s %08x %lx %08x %02x %08x %02x\n",
+		   lbuff,
+		   rbuff,
+		   call->service_id,
+		   call->cid,
+		   call->call_id,
+		   rxrpc_is_service_call(call) ? "Svc" : "Clt",
+		   atomic_read(&call->usage),
+		   rxrpc_call_states[call->state],
+		   call->abort_code,
+		   call->user_call_ID,
+		   tx_hard_ack, READ_ONCE(call->tx_top) - tx_hard_ack,
+		   rx_hard_ack, READ_ONCE(call->rx_top) - rx_hard_ack);
 
 	return 0;
-} /* end rxrpc_proc_conns_open() */
+}
 
-/*****************************************************************************/
-/*
- * set up the iterator to start reading from the conns list and return the
- * first item
- */
-static void *rxrpc_proc_conns_start(struct seq_file *m, loff_t *_pos)
+static const struct seq_operations rxrpc_call_seq_ops = {
+	.start  = rxrpc_call_seq_start,
+	.next   = rxrpc_call_seq_next,
+	.stop   = rxrpc_call_seq_stop,
+	.show   = rxrpc_call_seq_show,
+};
+
+static int rxrpc_call_seq_open(struct inode *inode, struct file *file)
 {
-	struct list_head *_p;
-	loff_t pos = *_pos;
+	return seq_open_net(inode, file, &rxrpc_call_seq_ops,
+			    sizeof(struct seq_net_private));
+}
 
-	/* lock the list against modification */
-	down_read(&rxrpc_conns_sem);
+const struct file_operations rxrpc_call_seq_fops = {
+	.open		= rxrpc_call_seq_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
 
-	/* allow for the header line */
-	if (!pos)
-		return SEQ_START_TOKEN;
-	pos--;
-
-	/* find the n'th element in the list */
-	list_for_each(_p, &rxrpc_conns)
-		if (!pos--)
-			break;
-
-	return _p != &rxrpc_conns ? _p : NULL;
-} /* end rxrpc_proc_conns_start() */
-
-/*****************************************************************************/
 /*
- * move to next conn in conns list
+ * generate a list of extant virtual connections in /proc/net/rxrpc_conns
  */
-static void *rxrpc_proc_conns_next(struct seq_file *p, void *v, loff_t *pos)
+static void *rxrpc_connection_seq_start(struct seq_file *seq, loff_t *_pos)
 {
-	struct list_head *_p;
+	struct rxrpc_net *rxnet = rxrpc_net(seq_file_net(seq));
 
-	(*pos)++;
+	read_lock(&rxnet->conn_lock);
+	return seq_list_start_head(&rxnet->conn_proc_list, *_pos);
+}
 
-	_p = v;
-	_p = (v == SEQ_START_TOKEN) ? rxrpc_conns.next : _p->next;
-
-	return _p != &rxrpc_conns ? _p : NULL;
-} /* end rxrpc_proc_conns_next() */
-
-/*****************************************************************************/
-/*
- * clean up after reading from the conns list
- */
-static void rxrpc_proc_conns_stop(struct seq_file *p, void *v)
+static void *rxrpc_connection_seq_next(struct seq_file *seq, void *v,
+				       loff_t *pos)
 {
-	up_read(&rxrpc_conns_sem);
+	struct rxrpc_net *rxnet = rxrpc_net(seq_file_net(seq));
 
-} /* end rxrpc_proc_conns_stop() */
+	return seq_list_next(v, &rxnet->conn_proc_list, pos);
+}
 
-/*****************************************************************************/
-/*
- * display a header line followed by a load of conn lines
- */
-static int rxrpc_proc_conns_show(struct seq_file *m, void *v)
+static void rxrpc_connection_seq_stop(struct seq_file *seq, void *v)
+{
+	struct rxrpc_net *rxnet = rxrpc_net(seq_file_net(seq));
+
+	read_unlock(&rxnet->conn_lock);
+}
+
+static int rxrpc_connection_seq_show(struct seq_file *seq, void *v)
 {
 	struct rxrpc_connection *conn;
-	signed long timeout;
+	struct rxrpc_net *rxnet = rxrpc_net(seq_file_net(seq));
+	char lbuff[50], rbuff[50];
 
-	conn = list_entry(v, struct rxrpc_connection, proc_link);
-
-	/* display header on line 1 */
-	if (v == SEQ_START_TOKEN) {
-		seq_puts(m,
-			 "LOCAL REMOTE   RPORT SRVC CONN     END SERIALNO "
-			 "CALLNO     MTU  TIMEOUT"
-			 "\n");
-		return 0;
-	}
-
-	/* display one conn per line on subsequent lines */
-	timeout = 0;
-	if (!list_empty(&conn->timeout.link))
-		timeout = (signed long) conn->timeout.timo_jif -
-			(signed long) jiffies;
-
-	seq_printf(m,
-		   "%5hu %08x %5hu %04hx %08x %-3.3s %08x %08x %5Zu %8ld\n",
-		   conn->trans->port,
-		   ntohl(conn->addr.sin_addr.s_addr),
-		   ntohs(conn->addr.sin_port),
-		   ntohs(conn->service_id),
-		   ntohl(conn->conn_id),
-		   conn->out_clientflag ? "CLT" : "SRV",
-		   conn->serial_counter,
-		   conn->call_counter,
-		   conn->mtu_size,
-		   timeout
-		   );
-
-	return 0;
-} /* end rxrpc_proc_conns_show() */
-
-/*****************************************************************************/
-/*
- * open "/proc/net/rxrpc/calls" which provides a summary of extant calls
- */
-static int rxrpc_proc_calls_open(struct inode *inode, struct file *file)
-{
-	struct seq_file *m;
-	int ret;
-
-	ret = seq_open(file, &rxrpc_proc_calls_ops);
-	if (ret < 0)
-		return ret;
-
-	m = file->private_data;
-	m->private = PDE(inode)->data;
-
-	return 0;
-} /* end rxrpc_proc_calls_open() */
-
-/*****************************************************************************/
-/*
- * set up the iterator to start reading from the calls list and return the
- * first item
- */
-static void *rxrpc_proc_calls_start(struct seq_file *m, loff_t *_pos)
-{
-	struct list_head *_p;
-	loff_t pos = *_pos;
-
-	/* lock the list against modification */
-	down_read(&rxrpc_calls_sem);
-
-	/* allow for the header line */
-	if (!pos)
-		return SEQ_START_TOKEN;
-	pos--;
-
-	/* find the n'th element in the list */
-	list_for_each(_p, &rxrpc_calls)
-		if (!pos--)
-			break;
-
-	return _p != &rxrpc_calls ? _p : NULL;
-} /* end rxrpc_proc_calls_start() */
-
-/*****************************************************************************/
-/*
- * move to next call in calls list
- */
-static void *rxrpc_proc_calls_next(struct seq_file *p, void *v, loff_t *pos)
-{
-	struct list_head *_p;
-
-	(*pos)++;
-
-	_p = v;
-	_p = (v == SEQ_START_TOKEN) ? rxrpc_calls.next : _p->next;
-
-	return _p != &rxrpc_calls ? _p : NULL;
-} /* end rxrpc_proc_calls_next() */
-
-/*****************************************************************************/
-/*
- * clean up after reading from the calls list
- */
-static void rxrpc_proc_calls_stop(struct seq_file *p, void *v)
-{
-	up_read(&rxrpc_calls_sem);
-
-} /* end rxrpc_proc_calls_stop() */
-
-/*****************************************************************************/
-/*
- * display a header line followed by a load of call lines
- */
-static int rxrpc_proc_calls_show(struct seq_file *m, void *v)
-{
-	struct rxrpc_call *call = list_entry(v, struct rxrpc_call, call_link);
-
-	/* display header on line 1 */
-	if (v == SEQ_START_TOKEN) {
-		seq_puts(m,
-			 "LOCAL REMOT SRVC CONN     CALL     DIR USE "
-			 " L STATE   OPCODE ABORT    ERRNO\n"
+	if (v == &rxnet->conn_proc_list) {
+		seq_puts(seq,
+			 "Proto Local                                          "
+			 " Remote                                         "
+			 " SvID ConnID   End Use State    Key     "
+			 " Serial   ISerial\n"
 			 );
 		return 0;
 	}
 
-	/* display one call per line on subsequent lines */
-	seq_printf(m,
-		   "%5hu %5hu %04hx %08x %08x %s %3u%c"
-		   " %c %-7.7s %6d %08x %5d\n",
-		   call->conn->trans->port,
-		   ntohs(call->conn->addr.sin_port),
-		   ntohs(call->conn->service_id),
-		   ntohl(call->conn->conn_id),
-		   ntohl(call->call_id),
-		   call->conn->service ? "SVC" : "CLT",
-		   atomic_read(&call->usage),
-		   waitqueue_active(&call->waitq) ? 'w' : ' ',
-		   call->app_last_rcv ? 'Y' : '-',
-		   (call->app_call_state!=RXRPC_CSTATE_ERROR ?
-		    rxrpc_call_states7[call->app_call_state] :
-		    rxrpc_call_error_states7[call->app_err_state]),
-		   call->app_opcode,
-		   call->app_abort_code,
-		   call->app_errno
-		   );
+	conn = list_entry(v, struct rxrpc_connection, proc_link);
+	if (conn->state == RXRPC_CONN_SERVICE_PREALLOC) {
+		strcpy(lbuff, "no_local");
+		strcpy(rbuff, "no_connection");
+		goto print;
+	}
+
+	sprintf(lbuff, "%pISpc", &conn->params.local->srx.transport);
+
+	sprintf(rbuff, "%pISpc", &conn->params.peer->srx.transport);
+print:
+	seq_printf(seq,
+		   "UDP   %-47.47s %-47.47s %4x %08x %s %3u"
+		   " %s %08x %08x %08x\n",
+		   lbuff,
+		   rbuff,
+		   conn->service_id,
+		   conn->proto.cid,
+		   rxrpc_conn_is_service(conn) ? "Svc" : "Clt",
+		   atomic_read(&conn->usage),
+		   rxrpc_conn_states[conn->state],
+		   key_serial(conn->params.key),
+		   atomic_read(&conn->serial),
+		   conn->hi_serial);
 
 	return 0;
-} /* end rxrpc_proc_calls_show() */
+}
+
+static const struct seq_operations rxrpc_connection_seq_ops = {
+	.start  = rxrpc_connection_seq_start,
+	.next   = rxrpc_connection_seq_next,
+	.stop   = rxrpc_connection_seq_stop,
+	.show   = rxrpc_connection_seq_show,
+};
+
+
+static int rxrpc_connection_seq_open(struct inode *inode, struct file *file)
+{
+	return seq_open_net(inode, file, &rxrpc_connection_seq_ops,
+			    sizeof(struct seq_net_private));
+}
+
+const struct file_operations rxrpc_connection_seq_fops = {
+	.open		= rxrpc_connection_seq_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};

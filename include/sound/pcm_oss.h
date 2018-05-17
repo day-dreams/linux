@@ -3,7 +3,7 @@
 
 /*
  *  Digital Audio (PCM) - OSS compatibility abstract layer
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -22,23 +22,21 @@
  *
  */
 
-typedef struct _snd_pcm_plugin snd_pcm_plugin_t;
-typedef struct _snd_pcm_oss_setup snd_pcm_oss_setup_t;
-
-struct _snd_pcm_oss_setup {
+struct snd_pcm_oss_setup {
 	char *task_name;
 	unsigned int disable:1,
 		     direct:1,
 		     block:1,
 		     nonblock:1,
 		     partialfrag:1,
-		     nosilence:1;
+		     nosilence:1,
+		     buggyptr:1;
 	unsigned int periods;
 	unsigned int period_size;
-	snd_pcm_oss_setup_t *next;
+	struct snd_pcm_oss_setup *next;
 };
 
-typedef struct _snd_pcm_oss_runtime {
+struct snd_pcm_oss_runtime {
 	unsigned params: 1,			/* format/parameter change */
 		 prepare: 1,			/* need to prepare the operation */
 		 trigger: 1,			/* trigger flag */
@@ -58,30 +56,34 @@ typedef struct _snd_pcm_oss_runtime {
 	size_t mmap_bytes;
 	char *buffer;				/* vmallocated period */
 	size_t buffer_used;			/* used length from period buffer */
-	snd_pcm_plugin_t *plugin_first;
-	snd_pcm_plugin_t *plugin_last;
-	unsigned int prev_hw_ptr_interrupt;
-} snd_pcm_oss_runtime_t;
+	struct mutex params_lock;
+#ifdef CONFIG_SND_PCM_OSS_PLUGINS
+	struct snd_pcm_plugin *plugin_first;
+	struct snd_pcm_plugin *plugin_last;
+#endif
+	unsigned int prev_hw_ptr_period;
+};
 
-typedef struct _snd_pcm_oss_file {
-	snd_pcm_substream_t *streams[2];
-} snd_pcm_oss_file_t;
+struct snd_pcm_oss_file {
+	struct snd_pcm_substream *streams[2];
+};
 
-typedef struct _snd_pcm_oss_substream {
+struct snd_pcm_oss_substream {
 	unsigned oss: 1;			/* oss mode */
-	snd_pcm_oss_setup_t *setup;		/* active setup */
-	snd_pcm_oss_file_t *file;
-} snd_pcm_oss_substream_t;
+	struct snd_pcm_oss_setup setup;		/* active setup */
+};
 
-typedef struct _snd_pcm_oss_stream {
-	snd_pcm_oss_setup_t *setup_list;	/* setup list */
-        struct semaphore setup_mutex;
-	snd_info_entry_t *proc_entry;
-} snd_pcm_oss_stream_t;
+struct snd_pcm_oss_stream {
+	struct snd_pcm_oss_setup *setup_list;	/* setup list */
+	struct mutex setup_mutex;
+#ifdef CONFIG_SND_VERBOSE_PROCFS
+	struct snd_info_entry *proc_entry;
+#endif
+};
 
-typedef struct _snd_pcm_oss {
+struct snd_pcm_oss {
 	int reg;
 	unsigned int reg_mask;
-} snd_pcm_oss_t;
+};
 
 #endif /* __SOUND_PCM_OSS_H */

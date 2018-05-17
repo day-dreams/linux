@@ -32,14 +32,16 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/config.h>
+#include <linux/slab.h>
+#include <linux/platform_device.h>
 
-#include <pcmcia/version.h>
-#include <pcmcia/cs_types.h>
-#include <pcmcia/cs.h>
 #include <pcmcia/ss.h>
 
+#include <asm/hardware/scoop.h>
+
 #include "sa1100_generic.h"
+
+int __init pcmcia_collie_init(struct device *dev);
 
 static int (*sa11x0_pcmcia_hw_init[])(struct device *dev) = {
 #ifdef CONFIG_SA1100_ASSABET
@@ -48,8 +50,11 @@ static int (*sa11x0_pcmcia_hw_init[])(struct device *dev) = {
 #ifdef CONFIG_SA1100_CERF
 	pcmcia_cerf_init,
 #endif
-#ifdef CONFIG_SA1100_H3600
+#if defined(CONFIG_SA1100_H3100) || defined(CONFIG_SA1100_H3600)
 	pcmcia_h3600_init,
+#endif
+#ifdef CONFIG_SA1100_NANOENGINE
+	pcmcia_nanoengine_init,
 #endif
 #ifdef CONFIG_SA1100_SHANNON
 	pcmcia_shannon_init,
@@ -57,9 +62,12 @@ static int (*sa11x0_pcmcia_hw_init[])(struct device *dev) = {
 #ifdef CONFIG_SA1100_SIMPAD
 	pcmcia_simpad_init,
 #endif
+#ifdef CONFIG_SA1100_COLLIE
+       pcmcia_collie_init,
+#endif
 };
 
-static int sa11x0_drv_pcmcia_probe(struct device *dev)
+static int sa11x0_drv_pcmcia_probe(struct platform_device *dev)
 {
 	int i, ret = -ENODEV;
 
@@ -67,7 +75,7 @@ static int sa11x0_drv_pcmcia_probe(struct device *dev)
 	 * Initialise any "on-board" PCMCIA sockets.
 	 */
 	for (i = 0; i < ARRAY_SIZE(sa11x0_pcmcia_hw_init); i++) {
-		ret = sa11x0_pcmcia_hw_init[i](dev);
+		ret = sa11x0_pcmcia_hw_init[i](&dev->dev);
 		if (ret == 0)
 			break;
 	}
@@ -75,29 +83,25 @@ static int sa11x0_drv_pcmcia_probe(struct device *dev)
 	return ret;
 }
 
-static int sa11x0_drv_pcmcia_suspend(struct device *dev, u32 state, u32 level)
+static int sa11x0_drv_pcmcia_remove(struct platform_device *dev)
 {
-	int ret = 0;
-	if (level == SUSPEND_SAVE_STATE)
-		ret = pcmcia_socket_dev_suspend(dev, state);
-	return ret;
+	struct skt_dev_info *sinfo = platform_get_drvdata(dev);
+	int i;
+
+	platform_set_drvdata(dev, NULL);
+
+	for (i = 0; i < sinfo->nskt; i++)
+		soc_pcmcia_remove_one(&sinfo->skt[i]);
+
+	return 0;
 }
 
-static int sa11x0_drv_pcmcia_resume(struct device *dev, u32 level)
-{
-	int ret = 0;
-	if (level == RESUME_RESTORE_STATE)
-		ret = pcmcia_socket_dev_resume(dev);
-	return ret;
-}
-
-static struct device_driver sa11x0_pcmcia_driver = {
+static struct platform_driver sa11x0_pcmcia_driver = {
+	.driver = {
+		.name		= "sa11x0-pcmcia",
+	},
 	.probe		= sa11x0_drv_pcmcia_probe,
-	.remove		= soc_common_drv_pcmcia_remove,
-	.name		= "sa11x0-pcmcia",
-	.bus		= &platform_bus_type,
-	.suspend 	= sa11x0_drv_pcmcia_suspend,
-	.resume 	= sa11x0_drv_pcmcia_resume,
+	.remove		= sa11x0_drv_pcmcia_remove,
 };
 
 /* sa11x0_pcmcia_init()
@@ -110,7 +114,7 @@ static struct device_driver sa11x0_pcmcia_driver = {
  */
 static int __init sa11x0_pcmcia_init(void)
 {
-	return driver_register(&sa11x0_pcmcia_driver);
+	return platform_driver_register(&sa11x0_pcmcia_driver);
 }
 
 /* sa11x0_pcmcia_exit()
@@ -120,12 +124,12 @@ static int __init sa11x0_pcmcia_init(void)
  */
 static void __exit sa11x0_pcmcia_exit(void)
 {
-	driver_unregister(&sa11x0_pcmcia_driver);
+	platform_driver_unregister(&sa11x0_pcmcia_driver);
 }
 
 MODULE_AUTHOR("John Dorsey <john+@cs.cmu.edu>");
 MODULE_DESCRIPTION("Linux PCMCIA Card Services: SA-11x0 Socket Controller");
 MODULE_LICENSE("Dual MPL/GPL");
 
-module_init(sa11x0_pcmcia_init);
+fs_initcall(sa11x0_pcmcia_init);
 module_exit(sa11x0_pcmcia_exit);

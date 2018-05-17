@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Inode operations for Coda filesystem
  * Original version: (C) 1996 P. Braam and M. Callahan
@@ -13,13 +14,12 @@
 #include <linux/fs.h>
 #include <linux/stat.h>
 #include <linux/errno.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/string.h>
 
 #include <linux/coda.h>
-#include <linux/coda_linux.h>
 #include <linux/coda_psdev.h>
-#include <linux/coda_fs_i.h>
+#include "coda_linux.h"
 
 /* initialize the debugging variables */
 int coda_fake_statfs;
@@ -28,11 +28,9 @@ int coda_fake_statfs;
 char * coda_f2s(struct CodaFid *f)
 {
 	static char s[60];
-#ifdef CONFIG_CODA_FS_OLD_API
- 	sprintf(s, "(%08x.%08x.%08x)", f->opaque[0], f->opaque[1], f->opaque[2]);
-#else
+
  	sprintf(s, "(%08x.%08x.%08x.%08x)", f->opaque[0], f->opaque[1], f->opaque[2], f->opaque[3]);
-#endif
+
 	return s;
 }
 
@@ -41,12 +39,6 @@ int coda_iscontrol(const char *name, size_t length)
 {
 	return ((CODA_CONTROLLEN == length) && 
                 (strncmp(name, CODA_CONTROL, CODA_CONTROLLEN) == 0));
-}
-
-/* recognize /coda inode */
-int coda_isroot(struct inode *i)
-{
-    return ( i->i_sb->s_root->d_inode == i );
 }
 
 unsigned short coda_flags_to_cflags(unsigned short flags)
@@ -103,15 +95,13 @@ void coda_vattr_to_iattr(struct inode *inode, struct coda_vattr *attr)
 	if (attr->va_mode != (u_short) -1)
 	        inode->i_mode = attr->va_mode | inode_type;
         if (attr->va_uid != -1) 
-	        inode->i_uid = (uid_t) attr->va_uid;
+	        inode->i_uid = make_kuid(&init_user_ns, (uid_t) attr->va_uid);
         if (attr->va_gid != -1)
-	        inode->i_gid = (gid_t) attr->va_gid;
+	        inode->i_gid = make_kgid(&init_user_ns, (gid_t) attr->va_gid);
 	if (attr->va_nlink != -1)
-	        inode->i_nlink = attr->va_nlink;
+		set_nlink(inode, attr->va_nlink);
 	if (attr->va_size != -1)
 	        inode->i_size = attr->va_size;
-	if (attr->va_blocksize != -1)
-		inode->i_blksize = attr->va_blocksize;
 	if (attr->va_size != -1)
 		inode->i_blocks = (attr->va_size + 511) >> 9;
 	if (attr->va_atime.tv_sec != -1) 
@@ -136,7 +126,7 @@ void coda_iattr_to_vattr(struct iattr *iattr, struct coda_vattr *vattr)
         unsigned int valid;
 
         /* clean out */        
-        vattr->va_mode = (umode_t) -1;
+	vattr->va_mode = -1;
         vattr->va_uid = (vuid_t) -1; 
         vattr->va_gid = (vgid_t) -1;
         vattr->va_size = (off_t) -1;
@@ -176,10 +166,10 @@ void coda_iattr_to_vattr(struct iattr *iattr, struct coda_vattr *vattr)
                 vattr->va_mode = iattr->ia_mode;
 	}
         if ( valid & ATTR_UID ) {
-                vattr->va_uid = (vuid_t) iattr->ia_uid;
+                vattr->va_uid = (vuid_t) from_kuid(&init_user_ns, iattr->ia_uid);
 	}
         if ( valid & ATTR_GID ) {
-                vattr->va_gid = (vgid_t) iattr->ia_gid;
+                vattr->va_gid = (vgid_t) from_kgid(&init_user_ns, iattr->ia_gid);
 	}
         if ( valid & ATTR_SIZE ) {
                 vattr->va_size = iattr->ia_size;

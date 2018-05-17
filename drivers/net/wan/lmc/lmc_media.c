@@ -1,15 +1,12 @@
 /* $Id: lmc_media.c,v 1.13 2000/04/11 05:25:26 asj Exp $ */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
 #include <linux/interrupt.h>
-#include <linux/pci.h>
 #include <linux/in.h>
 #include <linux/if_arp.h>
 #include <linux/netdevice.h>
@@ -18,13 +15,11 @@
 #include <linux/inet.h>
 #include <linux/bitops.h>
 
-#include <net/syncppp.h>
-
 #include <asm/processor.h>             /* Processor type for cache alignment. */
 #include <asm/io.h>
 #include <asm/dma.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include "lmc.h"
 #include "lmc_var.h"
@@ -46,14 +41,6 @@
   * This software may be used and distributed according to the terms
   * of the GNU General Public License version 2, incorporated herein by reference.
   */
-
-/*
- * For lack of a better place, put the SSI cable stuff here.
- */
-char *lmc_t1_cables[] = {
-  "V.10/RS423", "EIA530A", "reserved", "X.21", "V.35",
-  "EIA449/EIA530/V.36", "V.28/EIA232", "none", NULL
-};
 
 /*
  * protocol independent method.
@@ -105,66 +92,66 @@ static void lmc_dummy_set_1 (lmc_softc_t * const, int);
 static void lmc_dummy_set2_1 (lmc_softc_t * const, lmc_ctl_t *);
 
 static inline void write_av9110_bit (lmc_softc_t *, int);
-static void write_av9110 (lmc_softc_t *, u_int32_t, u_int32_t, u_int32_t,
-			  u_int32_t, u_int32_t);
+static void write_av9110(lmc_softc_t *, u32, u32, u32, u32, u32);
 
 lmc_media_t lmc_ds3_media = {
-  lmc_ds3_init,			/* special media init stuff */
-  lmc_ds3_default,		/* reset to default state */
-  lmc_ds3_set_status,		/* reset status to state provided */
-  lmc_dummy_set_1,		/* set clock source */
-  lmc_dummy_set2_1,		/* set line speed */
-  lmc_ds3_set_100ft,		/* set cable length */
-  lmc_ds3_set_scram,		/* set scrambler */
-  lmc_ds3_get_link_status,	/* get link status */
-  lmc_dummy_set_1,		/* set link status */
-  lmc_ds3_set_crc_length,	/* set CRC length */
-  lmc_dummy_set_1,		/* set T1 or E1 circuit type */
-  lmc_ds3_watchdog
+  .init = lmc_ds3_init,				/* special media init stuff */
+  .defaults = lmc_ds3_default,			/* reset to default state */
+  .set_status = lmc_ds3_set_status,		/* reset status to state provided */
+  .set_clock_source = lmc_dummy_set_1,		/* set clock source */
+  .set_speed = lmc_dummy_set2_1,		/* set line speed */
+  .set_cable_length = lmc_ds3_set_100ft,	/* set cable length */
+  .set_scrambler = lmc_ds3_set_scram,		/* set scrambler */
+  .get_link_status = lmc_ds3_get_link_status,	/* get link status */
+  .set_link_status = lmc_dummy_set_1,		/* set link status */
+  .set_crc_length = lmc_ds3_set_crc_length,	/* set CRC length */
+  .set_circuit_type = lmc_dummy_set_1,		/* set T1 or E1 circuit type */
+  .watchdog = lmc_ds3_watchdog
 };
 
 lmc_media_t lmc_hssi_media = {
-  lmc_hssi_init,		/* special media init stuff */
-  lmc_hssi_default,		/* reset to default state */
-  lmc_hssi_set_status,		/* reset status to state provided */
-  lmc_hssi_set_clock,		/* set clock source */
-  lmc_dummy_set2_1,		/* set line speed */
-  lmc_dummy_set_1,		/* set cable length */
-  lmc_dummy_set_1,		/* set scrambler */
-  lmc_hssi_get_link_status,	/* get link status */
-  lmc_hssi_set_link_status,	/* set link status */
-  lmc_hssi_set_crc_length,	/* set CRC length */
-  lmc_dummy_set_1,		/* set T1 or E1 circuit type */
-  lmc_hssi_watchdog
+  .init = lmc_hssi_init,			/* special media init stuff */
+  .defaults = lmc_hssi_default,			/* reset to default state */
+  .set_status = lmc_hssi_set_status,		/* reset status to state provided */
+  .set_clock_source = lmc_hssi_set_clock,	/* set clock source */
+  .set_speed = lmc_dummy_set2_1,		/* set line speed */
+  .set_cable_length = lmc_dummy_set_1,		/* set cable length */
+  .set_scrambler = lmc_dummy_set_1,		/* set scrambler */
+  .get_link_status = lmc_hssi_get_link_status,	/* get link status */
+  .set_link_status = lmc_hssi_set_link_status,	/* set link status */
+  .set_crc_length = lmc_hssi_set_crc_length,	/* set CRC length */
+  .set_circuit_type = lmc_dummy_set_1,		/* set T1 or E1 circuit type */
+  .watchdog = lmc_hssi_watchdog
 };
 
-lmc_media_t lmc_ssi_media = { lmc_ssi_init,	/* special media init stuff */
-  lmc_ssi_default,		/* reset to default state */
-  lmc_ssi_set_status,		/* reset status to state provided */
-  lmc_ssi_set_clock,		/* set clock source */
-  lmc_ssi_set_speed,		/* set line speed */
-  lmc_dummy_set_1,		/* set cable length */
-  lmc_dummy_set_1,		/* set scrambler */
-  lmc_ssi_get_link_status,	/* get link status */
-  lmc_ssi_set_link_status,	/* set link status */
-  lmc_ssi_set_crc_length,	/* set CRC length */
-  lmc_dummy_set_1,		/* set T1 or E1 circuit type */
-  lmc_ssi_watchdog
+lmc_media_t lmc_ssi_media = {
+  .init = lmc_ssi_init,				/* special media init stuff */
+  .defaults = lmc_ssi_default,			/* reset to default state */
+  .set_status = lmc_ssi_set_status,		/* reset status to state provided */
+  .set_clock_source = lmc_ssi_set_clock,	/* set clock source */
+  .set_speed = lmc_ssi_set_speed,		/* set line speed */
+  .set_cable_length = lmc_dummy_set_1,		/* set cable length */
+  .set_scrambler = lmc_dummy_set_1,		/* set scrambler */
+  .get_link_status = lmc_ssi_get_link_status,	/* get link status */
+  .set_link_status = lmc_ssi_set_link_status,	/* set link status */
+  .set_crc_length = lmc_ssi_set_crc_length,	/* set CRC length */
+  .set_circuit_type = lmc_dummy_set_1,		/* set T1 or E1 circuit type */
+  .watchdog = lmc_ssi_watchdog
 };
 
 lmc_media_t lmc_t1_media = {
-  lmc_t1_init,			/* special media init stuff */
-  lmc_t1_default,		/* reset to default state */
-  lmc_t1_set_status,		/* reset status to state provided */
-  lmc_t1_set_clock,		/* set clock source */
-  lmc_dummy_set2_1,		/* set line speed */
-  lmc_dummy_set_1,		/* set cable length */
-  lmc_dummy_set_1,		/* set scrambler */
-  lmc_t1_get_link_status,	/* get link status */
-  lmc_dummy_set_1,		/* set link status */
-  lmc_t1_set_crc_length,	/* set CRC length */
-  lmc_t1_set_circuit_type,	/* set T1 or E1 circuit type */
-  lmc_t1_watchdog
+  .init = lmc_t1_init,				/* special media init stuff */
+  .defaults = lmc_t1_default,			/* reset to default state */
+  .set_status = lmc_t1_set_status,		/* reset status to state provided */
+  .set_clock_source = lmc_t1_set_clock,		/* set clock source */
+  .set_speed = lmc_dummy_set2_1,		/* set line speed */
+  .set_cable_length = lmc_dummy_set_1,		/* set cable length */
+  .set_scrambler = lmc_dummy_set_1,		/* set scrambler */
+  .get_link_status = lmc_t1_get_link_status,	/* get link status */
+  .set_link_status = lmc_dummy_set_1,		/* set link status */
+  .set_crc_length = lmc_t1_set_crc_length,	/* set CRC length */
+  .set_circuit_type = lmc_t1_set_circuit_type,	/* set T1 or E1 circuit type */
+  .watchdog = lmc_t1_watchdog
 };
 
 static void
@@ -437,7 +424,7 @@ lmc_ds3_set_scram (lmc_softc_t * const sc, int ie)
 static int
 lmc_ds3_get_link_status (lmc_softc_t * const sc)
 {
-    u_int16_t link_status, link_status_11;
+    u16 link_status, link_status_11;
     int ret = 1;
 
     lmc_mii_writereg (sc, 0, 17, 7);
@@ -459,7 +446,7 @@ lmc_ds3_get_link_status (lmc_softc_t * const sc)
         (link_status & LMC_FRAMER_REG0_OOFS)){
         ret = 0;
         if(sc->last_led_err[3] != 1){
-            u16 r1;
+	    u16 r1;
             lmc_mii_writereg (sc, 0, 17, 01); /* Turn on Xbit error as our cisco does */
             r1 = lmc_mii_readreg (sc, 0, 18);
             r1 &= 0xfe;
@@ -472,7 +459,7 @@ lmc_ds3_get_link_status (lmc_softc_t * const sc)
     else {
         lmc_led_off(sc, LMC_DS3_LED3);	/* turn on red LED */
         if(sc->last_led_err[3] == 1){
-            u16 r1;
+	    u16 r1;
             lmc_mii_writereg (sc, 0, 17, 01); /* Turn off Xbit error */
             r1 = lmc_mii_readreg (sc, 0, 18);
             r1 |= 0x01;
@@ -550,20 +537,19 @@ lmc_ds3_watchdog (lmc_softc_t * const sc)
  *  SSI methods
  */
 
-static void
-lmc_ssi_init (lmc_softc_t * const sc)
+static void lmc_ssi_init(lmc_softc_t * const sc)
 {
-  u_int16_t mii17;
-  int cable;
+	u16 mii17;
+	int cable;
 
-  sc->ictl.cardtype = LMC_CTL_CARDTYPE_LMC1000;
+	sc->ictl.cardtype = LMC_CTL_CARDTYPE_LMC1000;
 
-  mii17 = lmc_mii_readreg (sc, 0, 17);
+	mii17 = lmc_mii_readreg(sc, 0, 17);
 
-  cable = (mii17 & LMC_MII17_SSI_CABLE_MASK) >> LMC_MII17_SSI_CABLE_SHIFT;
-  sc->ictl.cable_type = cable;
+	cable = (mii17 & LMC_MII17_SSI_CABLE_MASK) >> LMC_MII17_SSI_CABLE_SHIFT;
+	sc->ictl.cable_type = cable;
 
-  lmc_gpio_mkoutput (sc, LMC_GEP_SSI_TXCLOCK);
+	lmc_gpio_mkoutput(sc, LMC_GEP_SSI_TXCLOCK);
 }
 
 static void
@@ -691,11 +677,11 @@ lmc_ssi_set_speed (lmc_softc_t * const sc, lmc_ctl_t * ctl)
 static int
 lmc_ssi_get_link_status (lmc_softc_t * const sc)
 {
-  u_int16_t link_status;
-  u_int32_t ticks;
+  u16 link_status;
+  u32 ticks;
   int ret = 1;
   int hw_hdsk = 1;
-  
+
   /*
    * missing CTS?  Hmm.  If we require CTS on, we may never get the
    * link to come up, so omit it in this test.
@@ -730,9 +716,9 @@ lmc_ssi_get_link_status (lmc_softc_t * const sc)
   }
   else if (ticks == 0 ) {				/* no clock found ? */
       ret = 0;
-      if(sc->last_led_err[3] != 1){
-          sc->stats.tx_lossOfClockCnt++;
-          printk(KERN_WARNING "%s: Lost Clock, Link Down\n", sc->name);
+      if (sc->last_led_err[3] != 1) {
+	      sc->extra_stats.tx_lossOfClockCnt++;
+	      printk(KERN_WARNING "%s: Lost Clock, Link Down\n", sc->name);
       }
       sc->last_led_err[3] = 1;
       lmc_led_on (sc, LMC_MII16_LED3);	/* turn ON red LED */
@@ -848,9 +834,7 @@ write_av9110_bit (lmc_softc_t * sc, int c)
   LMC_CSR_WRITE (sc, csr_gp, sc->lmc_gpio);
 }
 
-static void
-write_av9110 (lmc_softc_t * sc, u_int32_t n, u_int32_t m, u_int32_t v,
-	      u_int32_t x, u_int32_t r)
+static void write_av9110(lmc_softc_t *sc, u32 n, u32 m, u32 v, u32 x, u32 r)
 {
   int i;
 
@@ -897,27 +881,13 @@ write_av9110 (lmc_softc_t * sc, u_int32_t n, u_int32_t m, u_int32_t v,
 		     | LMC_GEP_SSI_GENERATOR));
 }
 
-static void
-lmc_ssi_watchdog (lmc_softc_t * const sc)
+static void lmc_ssi_watchdog(lmc_softc_t * const sc)
 {
-  u_int16_t mii17;
-  struct ssicsr2
-  {
-    unsigned short dtr:1, dsr:1, rts:1, cable:3, crc:1, led0:1, led1:1,
-      led2:1, led3:1, fifo:1, ll:1, rl:1, tm:1, loop:1;
-  };
-  struct ssicsr2 *ssicsr;
-  mii17 = lmc_mii_readreg (sc, 0, 17);
-  ssicsr = (struct ssicsr2 *) &mii17;
-  if (ssicsr->cable == 7)
-    {
-      lmc_led_off (sc, LMC_MII16_LED2);
-    }
-  else
-    {
-      lmc_led_on (sc, LMC_MII16_LED2);
-    }
-
+	u16 mii17 = lmc_mii_readreg(sc, 0, 17);
+	if (((mii17 >> 3) & 7) == 7)
+		lmc_led_off(sc, LMC_MII16_LED2);
+	else
+		lmc_led_on(sc, LMC_MII16_LED2);
 }
 
 /*
@@ -947,7 +917,7 @@ lmc_t1_read (lmc_softc_t * const sc, int a)
 static void
 lmc_t1_init (lmc_softc_t * const sc)
 {
-  u_int16_t mii16;
+  u16 mii16;
   int i;
 
   sc->ictl.cardtype = LMC_CTL_CARDTYPE_LMC1200;
@@ -1046,7 +1016,7 @@ lmc_t1_set_status (lmc_softc_t * const sc, lmc_ctl_t * ctl)
  */ static int
 lmc_t1_get_link_status (lmc_softc_t * const sc)
 {
-    u_int16_t link_status;
+    u16 link_status;
     int ret = 1;
 
   /* LMC5245 (DS3) & LMC1200 (DS1) LED definitions
@@ -1237,10 +1207,6 @@ lmc_t1_watchdog (lmc_softc_t * const sc)
 static void
 lmc_set_protocol (lmc_softc_t * const sc, lmc_ctl_t * ctl)
 {
-  if (ctl == 0)
-    {
-      sc->ictl.keepalive_onoff = LMC_CTL_ON;
-
-      return;
-    }
+	if (!ctl)
+		sc->ictl.keepalive_onoff = LMC_CTL_ON;
 }

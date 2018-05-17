@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  linux/arch/m32r/lib/memset.S
  *
@@ -12,9 +13,6 @@
  *        ret: r0
  *
  */
-/* $Id$ */
-
-#include <linux/config.h>
 
 	.text
 	.global	memset

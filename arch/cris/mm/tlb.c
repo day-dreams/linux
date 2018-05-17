@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/cris/mm/tlb.c
  *
@@ -8,6 +9,9 @@
  */
 
 #include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/mm_types.h>
+
 #include <asm/tlb.h>
 
 #define D(x)
@@ -15,7 +19,7 @@
 /* The TLB can host up to 64 different mm contexts at the same time.
  * The running context is R_MMU_CONTEXT, and each TLB entry contains a
  * page_id that has to match to give a hit. In page_id_map, we keep track
- * of which mm's we have assigned which page_id's, so that we know when
+ * of which mm we have assigned to which page_id, so that we know when
  * to invalidate TLB entries.
  *
  * The last page_id is never running - it is used as an invalid page_id
@@ -28,18 +32,6 @@
 
 struct mm_struct *page_id_map[NUM_PAGEID];
 static int map_replace_ptr = 1;  /* which page_id_map entry to replace next */
-
-/*
- * Initialize the context related info for a new mm_struct
- * instance.
- */
-
-int
-init_new_context(struct task_struct *tsk, struct mm_struct *mm)
-{
-	mm->context = NO_CONTEXT;
-	return 0;
-}
 
 /* the following functions are similar to those used in the PPC port */
 
@@ -60,12 +52,12 @@ alloc_context(struct mm_struct *mm)
 		 */
 		flush_tlb_mm(old_mm);
 
-		old_mm->context = NO_CONTEXT;
+		old_mm->context.page_id = NO_CONTEXT;
 	}
 
 	/* insert it into the page_id_map */
 
-	mm->context = map_replace_ptr;
+	mm->context.page_id = map_replace_ptr;
 	page_id_map[map_replace_ptr] = mm;
 
 	map_replace_ptr++;
@@ -81,7 +73,7 @@ alloc_context(struct mm_struct *mm)
 void
 get_mmu_context(struct mm_struct *mm)
 {
-	if(mm->context == NO_CONTEXT)
+	if(mm->context.page_id == NO_CONTEXT)
 		alloc_context(mm);
 }
 
@@ -96,11 +88,10 @@ get_mmu_context(struct mm_struct *mm)
 void
 destroy_context(struct mm_struct *mm)
 {
-	if(mm->context != NO_CONTEXT) {
-		D(printk("destroy_context %d (%p)\n", mm->context, mm));
+	if(mm->context.page_id != NO_CONTEXT) {
+		D(printk("destroy_context %d (%p)\n", mm->context.page_id, mm));
 		flush_tlb_mm(mm);  /* TODO this might be redundant ? */
-		page_id_map[mm->context] = NULL;
-		/* mm->context = NO_CONTEXT; redundant.. mm will be freed */
+		page_id_map[mm->context.page_id] = NULL;
 	}
 }
 
@@ -113,7 +104,7 @@ tlb_init(void)
 
 	/* clear the page_id map */
 
-	for (i = 1; i < sizeof (page_id_map) / sizeof (page_id_map[0]); i++)
+	for (i = 1; i < ARRAY_SIZE(page_id_map); i++)
 		page_id_map[i] = NULL;
 	
 	/* invalidate the entire TLB */

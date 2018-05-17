@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/alpha/lib/checksum.c
  *
@@ -5,7 +6,7 @@
  * in an architecture-specific manner due to speed..
  * Comments in other versions indicate that the algorithms are from RFC1071
  *
- * accellerated versions (and 21264 assembly versions ) contributed by
+ * accelerated versions (and 21264 assembly versions ) contributed by
  *	Rick Gorton	<rick.gorton@alpha-processor.com>
  */
  
@@ -41,28 +42,22 @@ static inline unsigned short from64to16(unsigned long x)
  * computes the checksum of the TCP/UDP pseudo-header
  * returns a 16-bit checksum, already complemented.
  */
-unsigned short int csum_tcpudp_magic(unsigned long saddr,
-				   unsigned long daddr,
-				   unsigned short len,
-				   unsigned short proto,
-				   unsigned int sum)
+__sum16 csum_tcpudp_magic(__be32 saddr, __be32 daddr,
+			  __u32 len, __u8 proto, __wsum sum)
 {
-	return ~from64to16(saddr + daddr + sum +
-		((unsigned long) ntohs(len) << 16) +
-		((unsigned long) proto << 8));
+	return (__force __sum16)~from64to16(
+		(__force u64)saddr + (__force u64)daddr +
+		(__force u64)sum + ((len + proto) << 8));
 }
+EXPORT_SYMBOL(csum_tcpudp_magic);
 
-unsigned int csum_tcpudp_nofold(unsigned long saddr,
-				   unsigned long daddr,
-				   unsigned short len,
-				   unsigned short proto,
-				   unsigned int sum)
+__wsum csum_tcpudp_nofold(__be32 saddr, __be32 daddr,
+			  __u32 len, __u8 proto, __wsum sum)
 {
 	unsigned long result;
 
-	result = (saddr + daddr + sum +
-		  ((unsigned long) ntohs(len) << 16) +
-		  ((unsigned long) proto << 8));
+	result = (__force u64)saddr + (__force u64)daddr +
+		 (__force u64)sum + ((len + proto) << 8);
 
 	/* Fold down to 32-bits so we don't lose in the typedef-less 
 	   network stack.  */
@@ -70,8 +65,9 @@ unsigned int csum_tcpudp_nofold(unsigned long saddr,
 	result = (result & 0xffffffff) + (result >> 32);
 	/* 33 to 32 */
 	result = (result & 0xffffffff) + (result >> 32);
-	return result;
+	return (__force __wsum)result;
 }
+EXPORT_SYMBOL(csum_tcpudp_nofold);
 
 /*
  * Do a 64-bit checksum on an arbitrary memory area..
@@ -146,10 +142,11 @@ out:
  *	This is a version of ip_compute_csum() optimized for IP headers,
  *	which always checksum on 4 octet boundaries.
  */
-unsigned short ip_fast_csum(unsigned char * iph, unsigned int ihl)
+__sum16 ip_fast_csum(const void *iph, unsigned int ihl)
 {
-	return ~do_csum(iph,ihl*4);
+	return (__force __sum16)~do_csum(iph,ihl*4);
 }
+EXPORT_SYMBOL(ip_fast_csum);
 
 /*
  * computes the checksum of a memory block at buff, length len,
@@ -163,15 +160,15 @@ unsigned short ip_fast_csum(unsigned char * iph, unsigned int ihl)
  *
  * it's best to have buff aligned on a 32-bit boundary
  */
-unsigned int csum_partial(const unsigned char * buff, int len, unsigned int sum)
+__wsum csum_partial(const void *buff, int len, __wsum sum)
 {
 	unsigned long result = do_csum(buff, len);
 
 	/* add in old sum, and carry.. */
-	result += sum;
+	result += (__force u32)sum;
 	/* 32+c bits -> 32 bits */
 	result = (result & 0xffffffff) + (result >> 32);
-	return result;
+	return (__force __wsum)result;
 }
 
 EXPORT_SYMBOL(csum_partial);
@@ -180,7 +177,8 @@ EXPORT_SYMBOL(csum_partial);
  * this routine is used for miscellaneous IP-like checksums, mainly
  * in icmp.c
  */
-unsigned short ip_compute_csum(unsigned char * buff, int len)
+__sum16 ip_compute_csum(const void *buff, int len)
 {
-	return ~from64to16(do_csum(buff,len));
+	return (__force __sum16)~from64to16(do_csum(buff,len));
 }
+EXPORT_SYMBOL(ip_compute_csum);

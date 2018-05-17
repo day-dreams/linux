@@ -11,17 +11,16 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
 #include <linux/net.h>
+#include <linux/gfp.h>
 #include <net/ax25.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <asm/system.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -33,7 +32,7 @@
  */
 static void rose_send_iframe(struct sock *sk, struct sk_buff *skb)
 {
-	rose_cb *rose = rose_sk(sk);
+	struct rose_sock *rose = rose_sk(sk);
 
 	if (skb == NULL)
 		return;
@@ -48,7 +47,7 @@ static void rose_send_iframe(struct sock *sk, struct sk_buff *skb)
 
 void rose_kick(struct sock *sk)
 {
-	rose_cb *rose = rose_sk(sk);
+	struct rose_sock *rose = rose_sk(sk);
 	struct sk_buff *skb, *skbn;
 	unsigned short start, end;
 
@@ -112,7 +111,7 @@ void rose_kick(struct sock *sk)
 
 void rose_enquiry_response(struct sock *sk)
 {
-	rose_cb *rose = rose_sk(sk);
+	struct rose_sock *rose = rose_sk(sk);
 
 	if (rose->condition & ROSE_COND_OWN_RX_BUSY)
 		rose_write_internal(sk, ROSE_RNR);

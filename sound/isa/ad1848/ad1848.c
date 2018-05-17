@@ -1,8 +1,8 @@
 /*
  *  Generic driver for AD1848/AD1847/CS4248 chips (0.1 Alpha)
  *  Copyright (c) by Tugrul Galatali <galatalt@stuy.edu>,
- *                   Jaroslav Kysela <perex@suse.cz>
- *  Based on card-4232.c by Jaroslav Kysela <perex@suse.cz>
+ *                   Jaroslav Kysela <perex@perex.cz>
+ *  Based on card-4232.c by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -21,17 +21,21 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/init.h>
+#include <linux/err.h>
+#include <linux/isa.h>
 #include <linux/time.h>
 #include <linux/wait.h>
-#include <linux/moduleparam.h>
+#include <linux/module.h>
 #include <sound/core.h>
-#include <sound/ad1848.h>
+#include <sound/wss.h>
 #include <sound/initval.h>
 
-MODULE_AUTHOR("Tugrul Galatali <galatalt@stuy.edu>, Jaroslav Kysela <perex@suse.cz>");
-MODULE_DESCRIPTION("AD1848/AD1847/CS4248");
+#define CRD_NAME "Generic AD1848/AD1847/CS4248"
+#define DEV_NAME "ad1848"
+
+MODULE_DESCRIPTION(CRD_NAME);
+MODULE_AUTHOR("Tugrul Galatali <galatalt@stuy.edu>, Jaroslav Kysela <perex@perex.cz>");
 MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE("{{Analog Devices,AD1848},"
 	        "{Analog Devices,AD1847},"
@@ -39,113 +43,135 @@ MODULE_SUPPORTED_DEVICE("{{Analog Devices,AD1848},"
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
-static int enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE;	/* Enable this card */
+static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE;	/* Enable this card */
 static long port[SNDRV_CARDS] = SNDRV_DEFAULT_PORT;	/* PnP setup */
 static int irq[SNDRV_CARDS] = SNDRV_DEFAULT_IRQ;	/* 5,7,9,11,12,15 */
 static int dma1[SNDRV_CARDS] = SNDRV_DEFAULT_DMA;	/* 0,1,3,5,6,7 */
-static int thinkpad[SNDRV_CARDS];			/* Thinkpad special case */
+static bool thinkpad[SNDRV_CARDS];			/* Thinkpad special case */
 
 module_param_array(index, int, NULL, 0444);
-MODULE_PARM_DESC(index, "Index value for AD1848 soundcard.");
+MODULE_PARM_DESC(index, "Index value for " CRD_NAME " soundcard.");
 module_param_array(id, charp, NULL, 0444);
-MODULE_PARM_DESC(id, "ID string for AD1848 soundcard.");
+MODULE_PARM_DESC(id, "ID string for " CRD_NAME " soundcard.");
 module_param_array(enable, bool, NULL, 0444);
-MODULE_PARM_DESC(enable, "Enable AD1848 soundcard.");
-module_param_array(port, long, NULL, 0444);
-MODULE_PARM_DESC(port, "Port # for AD1848 driver.");
-module_param_array(irq, int, NULL, 0444);
-MODULE_PARM_DESC(irq, "IRQ # for AD1848 driver.");
-module_param_array(dma1, int, NULL, 0444);
-MODULE_PARM_DESC(dma1, "DMA1 # for AD1848 driver.");
+MODULE_PARM_DESC(enable, "Enable " CRD_NAME " soundcard.");
+module_param_hw_array(port, long, ioport, NULL, 0444);
+MODULE_PARM_DESC(port, "Port # for " CRD_NAME " driver.");
+module_param_hw_array(irq, int, irq, NULL, 0444);
+MODULE_PARM_DESC(irq, "IRQ # for " CRD_NAME " driver.");
+module_param_hw_array(dma1, int, dma, NULL, 0444);
+MODULE_PARM_DESC(dma1, "DMA1 # for " CRD_NAME " driver.");
 module_param_array(thinkpad, bool, NULL, 0444);
 MODULE_PARM_DESC(thinkpad, "Enable only for the onboard CS4248 of IBM Thinkpad 360/750/755 series.");
 
-static snd_card_t *snd_ad1848_cards[SNDRV_CARDS] = SNDRV_DEFAULT_PTR;
-
-
-static int __init snd_card_ad1848_probe(int dev)
+static int snd_ad1848_match(struct device *dev, unsigned int n)
 {
-	snd_card_t *card;
-	ad1848_t *chip;
-	snd_pcm_t *pcm;
-	int err;
+	if (!enable[n])
+		return 0;
 
-	if (port[dev] == SNDRV_AUTO_PORT) {
-		snd_printk(KERN_ERR "ad1848: specify port\n");
-		return -EINVAL;
+	if (port[n] == SNDRV_AUTO_PORT) {
+		dev_err(dev, "please specify port\n");
+		return 0;
 	}
-	if (irq[dev] == SNDRV_AUTO_IRQ) {
-		snd_printk(KERN_ERR "ad1848: specify irq\n");
-		return -EINVAL;
+	if (irq[n] == SNDRV_AUTO_IRQ) {
+		dev_err(dev, "please specify irq\n");
+		return 0;	
 	}
-	if (dma1[dev] == SNDRV_AUTO_DMA) {
-		snd_printk(KERN_ERR "ad1848: specify dma1\n");
-		return -EINVAL;
+	if (dma1[n] == SNDRV_AUTO_DMA) {
+		dev_err(dev, "please specify dma1\n");
+		return 0;
 	}
+	return 1;
+}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+static int snd_ad1848_probe(struct device *dev, unsigned int n)
+{
+	struct snd_card *card;
+	struct snd_wss *chip;
+	int error;
 
-	if ((err = snd_ad1848_create(card, port[dev],
-				     irq[dev],
-				     dma1[dev],
-				     thinkpad[dev] ? AD1848_HW_THINKPAD : AD1848_HW_DETECT,
-				     &chip)) < 0) {
-		snd_card_free(card);
-		return err;
-	}
+	error = snd_card_new(dev, index[n], id[n], THIS_MODULE, 0, &card);
+	if (error < 0)
+		return error;
 
-	if ((err = snd_ad1848_pcm(chip, 0, &pcm)) < 0) {
-		snd_card_free(card);
-		return err;
-	}
-	if ((err = snd_ad1848_mixer(chip)) < 0) {
-		snd_card_free(card);
-		return err;
-	}
-	strcpy(card->driver, "AD1848");
-	strcpy(card->shortname, pcm->name);
+	error = snd_wss_create(card, port[n], -1, irq[n], dma1[n], -1,
+			thinkpad[n] ? WSS_HW_THINKPAD : WSS_HW_DETECT,
+			0, &chip);
+	if (error < 0)
+		goto out;
 
-	sprintf(card->longname, "%s at 0x%lx, irq %d, dma %d",
-		pcm->name, chip->port, irq[dev], dma1[dev]);
+	card->private_data = chip;
 
-	if (thinkpad[dev]) {
-		strcat(card->longname, " [Thinkpad]");
-	}
+	error = snd_wss_pcm(chip, 0);
+	if (error < 0)
+		goto out;
 
-	if ((err = snd_card_register(card)) < 0) {
-		snd_card_free(card);
-		return err;
-	}
-	snd_ad1848_cards[dev] = card;
+	error = snd_wss_mixer(chip);
+	if (error < 0)
+		goto out;
+
+	strlcpy(card->driver, "AD1848", sizeof(card->driver));
+	strlcpy(card->shortname, chip->pcm->name, sizeof(card->shortname));
+
+	if (!thinkpad[n])
+		snprintf(card->longname, sizeof(card->longname),
+			 "%s at 0x%lx, irq %d, dma %d",
+			 chip->pcm->name, chip->port, irq[n], dma1[n]);
+	else
+		snprintf(card->longname, sizeof(card->longname),
+			 "%s at 0x%lx, irq %d, dma %d [Thinkpad]",
+			 chip->pcm->name, chip->port, irq[n], dma1[n]);
+
+	error = snd_card_register(card);
+	if (error < 0)
+		goto out;
+
+	dev_set_drvdata(dev, card);
+	return 0;
+
+out:	snd_card_free(card);
+	return error;
+}
+
+static int snd_ad1848_remove(struct device *dev, unsigned int n)
+{
+	snd_card_free(dev_get_drvdata(dev));
 	return 0;
 }
 
-static int __init alsa_card_ad1848_init(void)
+#ifdef CONFIG_PM
+static int snd_ad1848_suspend(struct device *dev, unsigned int n, pm_message_t state)
 {
-	int dev, cards;
+	struct snd_card *card = dev_get_drvdata(dev);
+	struct snd_wss *chip = card->private_data;
 
-	for (dev = cards = 0; dev < SNDRV_CARDS && enable[dev]; dev++)
-		if (snd_card_ad1848_probe(dev) >= 0)
-			cards++;
+	snd_power_change_state(card, SNDRV_CTL_POWER_D3hot);
+	chip->suspend(chip);
+	return 0;
+}
 
-	if (!cards) {
-#ifdef MODULE
-		printk(KERN_ERR "AD1848 soundcard not found or device busy\n");
+static int snd_ad1848_resume(struct device *dev, unsigned int n)
+{
+	struct snd_card *card = dev_get_drvdata(dev);
+	struct snd_wss *chip = card->private_data;
+
+	chip->resume(chip);
+	snd_power_change_state(card, SNDRV_CTL_POWER_D0);
+	return 0;
+}
 #endif
-		return -ENODEV;
+
+static struct isa_driver snd_ad1848_driver = {
+	.match		= snd_ad1848_match,
+	.probe		= snd_ad1848_probe,
+	.remove		= snd_ad1848_remove,
+#ifdef CONFIG_PM
+	.suspend	= snd_ad1848_suspend,
+	.resume		= snd_ad1848_resume,
+#endif
+	.driver		= {
+		.name	= DEV_NAME
 	}
-	return 0;
-}
+};
 
-static void __exit alsa_card_ad1848_exit(void)
-{
-	int idx;
-
-	for (idx = 0; idx < SNDRV_CARDS; idx++)
-		snd_card_free(snd_ad1848_cards[idx]);
-}
-
-module_init(alsa_card_ad1848_init)
-module_exit(alsa_card_ad1848_exit)
+module_isa_driver(snd_ad1848_driver, SNDRV_CARDS);

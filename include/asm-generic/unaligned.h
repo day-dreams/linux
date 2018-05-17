@@ -1,20 +1,36 @@
-#ifndef _ASM_GENERIC_UNALIGNED_H_
-#define _ASM_GENERIC_UNALIGNED_H_
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef __ASM_GENERIC_UNALIGNED_H
+#define __ASM_GENERIC_UNALIGNED_H
 
 /*
- * For the benefit of those who are trying to port Linux to another
- * architecture, here are some C-language equivalents. 
+ * This is the most generic implementation of unaligned accesses
+ * and should work almost anywhere.
  */
+#include <asm/byteorder.h>
 
-#include <asm/string.h>
+/* Set by the arch if it can handle unaligned accesses in hardware. */
+#ifdef CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS
+# include <linux/unaligned/access_ok.h>
+#endif
 
+#if defined(__LITTLE_ENDIAN)
+# ifndef CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS
+#  include <linux/unaligned/le_struct.h>
+#  include <linux/unaligned/be_byteshift.h>
+# endif
+# include <linux/unaligned/generic.h>
+# define get_unaligned	__get_unaligned_le
+# define put_unaligned	__put_unaligned_le
+#elif defined(__BIG_ENDIAN)
+# ifndef CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS
+#  include <linux/unaligned/be_struct.h>
+#  include <linux/unaligned/le_byteshift.h>
+# endif
+# include <linux/unaligned/generic.h>
+# define get_unaligned	__get_unaligned_be
+# define put_unaligned	__put_unaligned_be
+#else
+# error need to define endianess
+#endif
 
-#define get_unaligned(ptr) \
-  ({ __typeof__(*(ptr)) __tmp; memcpy(&__tmp, (ptr), sizeof(*(ptr))); __tmp; })
-
-#define put_unaligned(val, ptr)				\
-  ({ __typeof__(*(ptr)) __tmp = (val);			\
-     memcpy((ptr), &__tmp, sizeof(*(ptr)));		\
-     (void)0; })
-
-#endif /* _ASM_GENERIC_UNALIGNED_H */
+#endif /* __ASM_GENERIC_UNALIGNED_H */

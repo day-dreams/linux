@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Support for 32-bit Linux/Parisc ELF binaries on 64 bit kernels
  *
@@ -37,7 +38,6 @@ typedef unsigned int elf_greg_t;
 #include <linux/spinlock.h>
 #include <asm/processor.h>
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/elfcore.h>
 #include <linux/compat.h>		/* struct compat_timeval */
 
@@ -76,7 +76,6 @@ struct elf_prpsinfo32
 	char	pr_psargs[ELF_PRARGSZ];	/* initial part of arg list */
 };
 
-#define elf_addr_t	unsigned int
 #define init_elf_binfmt init_elf32_binfmt
 
 #define ELF_PLATFORM  ("PARISC32\0")
@@ -87,41 +86,13 @@ struct elf_prpsinfo32
  * could set a processor dependent flag in the thread_struct.
  */
 
-#define SET_PERSONALITY(ex, ibcs2) \
-	current->personality = PER_LINUX32; \
+#undef SET_PERSONALITY
+#define SET_PERSONALITY(ex) \
+	set_thread_flag(TIF_32BIT); \
 	current->thread.map_base = DEFAULT_MAP_BASE32; \
 	current->thread.task_size = DEFAULT_TASK_SIZE32 \
 
-#undef cputime_to_timeval
-#define cputime_to_timeval cputime_to_compat_timeval
-static __inline__ void
-cputime_to_compat_timeval(const cputime_t cputime, struct compat_timeval *value)
-{
-	unsigned long jiffies = cputime_to_jiffies(cputime);
-	value->tv_usec = (jiffies % HZ) * (1000000L / HZ);
-	value->tv_sec = jiffies / HZ;
-}
+#undef ns_to_timeval
+#define ns_to_timeval ns_to_compat_timeval
 
 #include "../../../fs/binfmt_elf.c"
-
-/* Set up a separate execution domain for ELF32 binaries running
- * on an ELF64 kernel */
-
-static struct exec_domain parisc32_exec_domain = { 
-	.name = "Linux/ELF32",
-	.pers_low = PER_LINUX32,
-	.pers_high = PER_LINUX32,
-};      
-
-static int __init parisc32_exec_init(void)
-{
-	/* steal the identity signal mappings from the default domain */
-	parisc32_exec_domain.signal_map = default_exec_domain.signal_map;
-	parisc32_exec_domain.signal_invmap = default_exec_domain.signal_invmap;
-
-	register_exec_domain(&parisc32_exec_domain);
-
-	return 0;
-}
-
-__initcall(parisc32_exec_init);

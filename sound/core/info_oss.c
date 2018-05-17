@@ -1,6 +1,6 @@
 /*
  *  Information interface for ALSA driver
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -19,58 +19,57 @@
  *
  */
 
-#include <sound/driver.h>
 #include <linux/slab.h>
 #include <linux/time.h>
+#include <linux/string.h>
+#include <linux/export.h>
 #include <sound/core.h>
 #include <sound/minors.h>
 #include <sound/info.h>
-#include <sound/version.h>
 #include <linux/utsname.h>
-
-#if defined(CONFIG_SND_OSSEMUL) && defined(CONFIG_PROC_FS)
+#include <linux/mutex.h>
 
 /*
  *  OSS compatible part
  */
 
-static DECLARE_MUTEX(strings);
+static DEFINE_MUTEX(strings);
 static char *snd_sndstat_strings[SNDRV_CARDS][SNDRV_OSS_INFO_DEV_COUNT];
-static snd_info_entry_t *snd_sndstat_proc_entry;
 
 int snd_oss_info_register(int dev, int num, char *string)
 {
 	char *x;
 
-	snd_assert(dev >= 0 && dev < SNDRV_OSS_INFO_DEV_COUNT, return -ENXIO);
-	snd_assert(num >= 0 && num < SNDRV_CARDS, return -ENXIO);
-	down(&strings);
+	if (snd_BUG_ON(dev < 0 || dev >= SNDRV_OSS_INFO_DEV_COUNT))
+		return -ENXIO;
+	if (snd_BUG_ON(num < 0 || num >= SNDRV_CARDS))
+		return -ENXIO;
+	mutex_lock(&strings);
 	if (string == NULL) {
 		if ((x = snd_sndstat_strings[num][dev]) != NULL) {
 			kfree(x);
 			x = NULL;
 		}
 	} else {
-		x = snd_kmalloc_strdup(string, GFP_KERNEL);
+		x = kstrdup(string, GFP_KERNEL);
 		if (x == NULL) {
-			up(&strings);
+			mutex_unlock(&strings);
 			return -ENOMEM;
 		}
 	}
 	snd_sndstat_strings[num][dev] = x;
-	up(&strings);
+	mutex_unlock(&strings);
 	return 0;
 }
+EXPORT_SYMBOL(snd_oss_info_register);
 
-extern void snd_card_info_read_oss(snd_info_buffer_t * buffer);
-
-static int snd_sndstat_show_strings(snd_info_buffer_t * buf, char *id, int dev)
+static int snd_sndstat_show_strings(struct snd_info_buffer *buf, char *id, int dev)
 {
 	int idx, ok = -1;
 	char *str;
 
 	snd_iprintf(buf, "\n%s:", id);
-	down(&strings);
+	mutex_lock(&strings);
 	for (idx = 0; idx < SNDRV_CARDS; idx++) {
 		str = snd_sndstat_strings[idx][dev];
 		if (str) {
@@ -81,21 +80,22 @@ static int snd_sndstat_show_strings(snd_info_buffer_t * buf, char *id, int dev)
 			snd_iprintf(buf, "%i: %s\n", idx, str);
 		}
 	}
-	up(&strings);
+	mutex_unlock(&strings);
 	if (ok < 0)
 		snd_iprintf(buf, " NOT ENABLED IN CONFIG\n");
 	return ok;
 }
 
-static void snd_sndstat_proc_read(snd_info_entry_t *entry, snd_info_buffer_t * buffer)
+static void snd_sndstat_proc_read(struct snd_info_entry *entry,
+				  struct snd_info_buffer *buffer)
 {
-	snd_iprintf(buffer, "Sound Driver:3.8.1a-980706 (ALSA v" CONFIG_SND_VERSION " emulation code)\n");
+	snd_iprintf(buffer, "Sound Driver:3.8.1a-980706 (ALSA emulation code)\n");
 	snd_iprintf(buffer, "Kernel: %s %s %s %s %s\n",
-		    system_utsname.sysname,
-		    system_utsname.nodename,
-		    system_utsname.release,
-		    system_utsname.version,
-		    system_utsname.machine);
+		    init_utsname()->sysname,
+		    init_utsname()->nodename,
+		    init_utsname()->release,
+		    init_utsname()->version,
+		    init_utsname()->machine);
 	snd_iprintf(buffer, "Config options: 0\n");
 	snd_iprintf(buffer, "\nInstalled drivers: \n");
 	snd_iprintf(buffer, "Type 10: ALSA emulation\n");
@@ -108,30 +108,15 @@ static void snd_sndstat_proc_read(snd_info_entry_t *entry, snd_info_buffer_t * b
 	snd_sndstat_show_strings(buffer, "Mixers", SNDRV_OSS_INFO_DEV_MIXERS);
 }
 
-int snd_info_minor_register(void)
+int __init snd_info_minor_register(void)
 {
-	snd_info_entry_t *entry;
+	struct snd_info_entry *entry;
 
 	memset(snd_sndstat_strings, 0, sizeof(snd_sndstat_strings));
-	if ((entry = snd_info_create_module_entry(THIS_MODULE, "sndstat", snd_oss_root)) != NULL) {
-		entry->c.text.read_size = 2048;
-		entry->c.text.read = snd_sndstat_proc_read;
-		if (snd_info_register(entry) < 0) {
-			snd_info_free_entry(entry);
-			entry = NULL;
-		}
-	}
-	snd_sndstat_proc_entry = entry;
-	return 0;
+	entry = snd_info_create_module_entry(THIS_MODULE, "sndstat",
+					     snd_oss_root);
+	if (!entry)
+		return -ENOMEM;
+	entry->c.text.read = snd_sndstat_proc_read;
+	return snd_info_register(entry); /* freed in error path */
 }
-
-int snd_info_minor_unregister(void)
-{
-	if (snd_sndstat_proc_entry) {
-		snd_info_unregister(snd_sndstat_proc_entry);
-		snd_sndstat_proc_entry = NULL;
-	}
-	return 0;
-}
-
-#endif /* CONFIG_SND_OSSEMUL */

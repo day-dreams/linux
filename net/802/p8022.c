@@ -1,6 +1,5 @@
 /*
- *	NET3:	Support for 802.2 demultiplexing off Ethernet (Token ring
- *		is kept separate see p8022tr.c)
+ *	NET3:	Support for 802.2 demultiplexing off Ethernet
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
  *		as published by the Free Software Foundation; either version
@@ -18,6 +17,7 @@
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
+#include <linux/slab.h>
 #include <net/datalink.h>
 #include <linux/mm.h>
 #include <linux/in.h>
@@ -35,7 +35,8 @@ static int p8022_request(struct datalink_proto *dl, struct sk_buff *skb,
 struct datalink_proto *register_8022_client(unsigned char type,
 					    int (*func)(struct sk_buff *skb,
 							struct net_device *dev,
-							struct packet_type *pt))
+							struct packet_type *pt,
+							struct net_device *orig_dev))
 {
 	struct datalink_proto *proto;
 
@@ -55,7 +56,7 @@ struct datalink_proto *register_8022_client(unsigned char type,
 
 void unregister_8022_client(struct datalink_proto *proto)
 {
-	llc_sap_close(proto->sap);
+	llc_sap_put(proto->sap);
 	kfree(proto);
 }
 

@@ -36,9 +36,12 @@
  *	HP PARISC Hardware Database
  *	Access to this database is only possible during bootup
  *	so don't reference this table after starting the init process
+ *
+ *	NOTE: Product names which are listed here and ends with a '?'
+ *	are guessed. If you know the correct name, please let us know.
  */
  
-static struct hp_hardware hp_hardware_list[] __initdata = {
+static struct hp_hardware hp_hardware_list[] = {
 	{HPHW_NPROC,0x01,0x4,0x0,"Indigo (840, 930)"},
 	{HPHW_NPROC,0x8,0x4,0x01,"Firefox(825,925)"},
 	{HPHW_NPROC,0xA,0x4,0x01,"Top Gun (835,834,935,635)"},
@@ -222,6 +225,7 @@ static struct hp_hardware hp_hardware_list[] __initdata = {
 	{HPHW_NPROC,0x5DD,0x4,0x81,"Duet W2"},
 	{HPHW_NPROC,0x5DE,0x4,0x81,"Piccolo W+"},
 	{HPHW_NPROC,0x5DF,0x4,0x81,"Cantata W2"},
+	{HPHW_NPROC,0x5DF,0x0,0x00,"Marcato W+ (rp5470)?"},
 	{HPHW_NPROC,0x5E0,0x4,0x91,"Cantata DC- W2"},
 	{HPHW_NPROC,0x5E1,0x4,0x91,"Crescendo DC- W2"},
 	{HPHW_NPROC,0x5E2,0x4,0x91,"Crescendo 650 W2"},
@@ -231,6 +235,7 @@ static struct hp_hardware hp_hardware_list[] __initdata = {
 	{HPHW_NPROC,0x5E6,0x4,0x91,"Keystone/Matterhorn W2 650"},
 	{HPHW_NPROC,0x5E7,0x4,0x91,"Caribe W2 800"},
 	{HPHW_NPROC,0x5E8,0x4,0x91,"Pikes Peak W2"},
+	{HPHW_NPROC,0x5EB,0x4,0x91,"Perf/Leone 875 W2+"},
 	{HPHW_NPROC,0x5FF,0x4,0x91,"Hitachi W"},
 	{HPHW_NPROC,0x600,0x4,0x81,"Gecko (712/60)"},
 	{HPHW_NPROC,0x601,0x4,0x81,"Gecko 80 (712/80)"},
@@ -273,7 +278,20 @@ static struct hp_hardware hp_hardware_list[] __initdata = {
 	{HPHW_NPROC,0x887,0x4,0x91,"Storm Peak Slow"},
 	{HPHW_NPROC,0x888,0x4,0x91,"Storm Peak Fast DC-"},
 	{HPHW_NPROC,0x889,0x4,0x91,"Storm Peak Fast"},
-	{HPHW_NPROC,0x88A,0x4,0x91,"Crestone Peak"},
+	{HPHW_NPROC,0x88A,0x4,0x91,"Crestone Peak Slow"},
+	{HPHW_NPROC,0x88B,0x4,0x91,"Crestone Peak Fast?"},
+	{HPHW_NPROC,0x88C,0x4,0x91,"Orca Mako+"},
+	{HPHW_NPROC,0x88D,0x4,0x91,"Rainier/Medel Mako+ Slow"},
+	{HPHW_NPROC,0x88E,0x4,0x91,"Rainier/Medel Mako+ Fast"},
+	{HPHW_NPROC,0x892,0x4,0x91,"Mt. Hamilton Slow Mako+?"},
+	{HPHW_NPROC,0x894,0x4,0x91,"Mt. Hamilton Fast Mako+"},
+	{HPHW_NPROC,0x895,0x4,0x91,"Storm Peak Slow Mako+"},
+	{HPHW_NPROC,0x896,0x4,0x91,"Storm Peak Fast Mako+"},
+	{HPHW_NPROC,0x897,0x4,0x91,"Storm Peak DC- Slow Mako+"},
+	{HPHW_NPROC,0x898,0x4,0x91,"Storm Peak DC- Fast Mako+"},
+	{HPHW_NPROC,0x899,0x4,0x91,"Mt. Hamilton Slow Mako+"},
+	{HPHW_NPROC,0x89B,0x4,0x91,"Crestone Peak Mako+ Slow"},
+	{HPHW_NPROC,0x89C,0x4,0x91,"Crestone Peak Mako+ Fast"},
 	{HPHW_A_DIRECT, 0x004, 0x0000D, 0x00, "Arrakis MUX"}, 
 	{HPHW_A_DIRECT, 0x005, 0x0000D, 0x00, "Dyun Kiuh MUX"}, 
 	{HPHW_A_DIRECT, 0x006, 0x0000D, 0x00, "Baat Kiuh AP/MUX (40299B)"}, 
@@ -551,6 +569,7 @@ static struct hp_hardware hp_hardware_list[] __initdata = {
 	{HPHW_BCPORT, 0x804, 0x0000C, 0x10, "REO I/O BC Merced Port"}, 
 	{HPHW_BCPORT, 0x782, 0x0000C, 0x00, "REO I/O BC Ropes Port"}, 
 	{HPHW_BCPORT, 0x784, 0x0000C, 0x00, "Pluto I/O BC Ropes Port"}, 
+	{HPHW_BRIDGE, 0x05D, 0x0000A, 0x00, "SummitHawk Dino PCI Bridge"}, 
 	{HPHW_BRIDGE, 0x680, 0x0000A, 0x00, "Dino PCI Bridge"}, 
 	{HPHW_BRIDGE, 0x682, 0x0000A, 0x00, "Cujo PCI Bridge"}, 
 	{HPHW_BRIDGE, 0x782, 0x0000A, 0x00, "Elroy PCI Bridge"}, 
@@ -583,8 +602,10 @@ static struct hp_hardware hp_hardware_list[] __initdata = {
 	{HPHW_CONSOLE, 0x01A, 0x0001F, 0x00, "Jason/Anole 64 Null Console"}, 
 	{HPHW_CONSOLE, 0x01B, 0x0001F, 0x00, "Jason/Anole 100 Null Console"}, 
 	{HPHW_FABRIC, 0x004, 0x000AA, 0x80, "Halfdome DNA Central Agent"}, 
+	{HPHW_FABRIC, 0x005, 0x000AA, 0x80, "Keystone DNA Central Agent"},
 	{HPHW_FABRIC, 0x007, 0x000AA, 0x80, "Caribe DNA Central Agent"}, 
 	{HPHW_FABRIC, 0x004, 0x000AB, 0x00, "Halfdome TOGO Fabric Crossbar"}, 
+	{HPHW_FABRIC, 0x005, 0x000AB, 0x00, "Keystone TOGO Fabric Crossbar"},
 	{HPHW_FABRIC, 0x004, 0x000AC, 0x00, "Halfdome Sakura Fabric Router"}, 
 	{HPHW_FIO, 0x025, 0x0002E, 0x80, "Armyknife Optional X.25"}, 
 	{HPHW_FIO, 0x004, 0x0004F, 0x0, "8-Port X.25 EISA-ACC (AMSO)"}, 
@@ -1183,12 +1204,14 @@ static struct hp_hardware hp_hardware_list[] __initdata = {
 	{HPHW_FIO, 0x005, 0x000A9, 0x00, "AllegroLow Core PCI USB KB"}, 
 	{HPHW_FIO, 0x006, 0x000A9, 0x00, "AllegroHigh Core PCI SuperIO RS-232"}, 
 	{HPHW_FIO, 0x006, 0x000A9, 0x00, "AllegroHigh Core PCI USB KB"}, 
-	{HPHW_FIO, 0x007, 0x000A9, 0x0, "Miscelaneous PCI Plug-in"}, 
+	{HPHW_FIO, 0x007, 0x000A9, 0x0, "Miscellaneous PCI Plug-in"},
 	{HPHW_FIO, 0x00A, 0x000A9, 0x0, "Lego 360 Core PCI SuperIO RS-232"}, 
 	{HPHW_FIO, 0x00A, 0x000A9, 0x0, "Lego 360 Core PCI USB KB"}, 
 	{HPHW_FIO, 0x004, 0x00320, 0x0, "Metheus Frame Buffer"}, 
 	{HPHW_FIO, 0x004, 0x00340, 0x0, "BARCO CX4500 VME Grphx Cnsl"}, 
 	{HPHW_FIO, 0x004, 0x00360, 0x0, "Hughes TOG VME FDDI"}, 
+	{HPHW_FIO, 0x076, 0x000AD, 0x0, "Crestone Peak Core RS-232"},
+	{HPHW_FIO, 0x077, 0x000AD, 0x0, "Crestone Peak Fast? Core RS-232"},
 	{HPHW_IOA, 0x185, 0x0000B, 0x00, "Java BC Summit Port"}, 
 	{HPHW_IOA, 0x1FF, 0x0000B, 0x00, "Hitachi Ghostview Summit Port"}, 
 	{HPHW_IOA, 0x580, 0x0000B, 0x10, "U2-IOA BC Runway Port"}, 
@@ -1215,7 +1238,7 @@ static struct hp_cpu_type_mask {
 	unsigned short model;
 	unsigned short mask;
 	enum cpu_type cpu;
-} hp_cpu_type_mask_list[] __initdata = {
+} hp_cpu_type_mask_list[] = {
 
 	{ 0x0000, 0x0ff0, pcx    },  /* 0x0000 - 0x000f */
 	{ 0x0048, 0x0ff0, pcxl   },  /* 0x0040 - 0x004f */
@@ -1292,26 +1315,27 @@ static struct hp_cpu_type_mask {
 	{ 0x05f0, 0x0ff0, pcxw2  },  /* 0x05f0 - 0x05ff */
 	{ 0x0600, 0x0fe0, pcxl   },  /* 0x0600 - 0x061f */
 	{ 0x0880, 0x0ff0, mako   },  /* 0x0880 - 0x088f */
+	{ 0x0890, 0x0ff0, mako2  },  /* 0x0890 - 0x089f */
 	{ 0x0000, 0x0000, pcx    }	/* terminate table */
 };
 
-char *cpu_name_version[][2] = {
-	[pcx]	{ "PA7000 (PCX)",	"1.0" },
-	[pcxs]	{ "PA7000 (PCX-S)",	"1.1a" },
-	[pcxt]	{ "PA7100 (PCX-T)",	"1.1b" },
-	[pcxt_]	{ "PA7200 (PCX-T')",	"1.1c" },
-	[pcxl]	{ "PA7100LC (PCX-L)",	"1.1d" },
-	[pcxl2]	{ "PA7300LC (PCX-L2)",	"1.1e" },
-	[pcxu]	{ "PA8000 (PCX-U)",	"2.0" },
-	[pcxu_]	{ "PA8200 (PCX-U+)",	"2.0" },
-	[pcxw]	{ "PA8500 (PCX-W)",	"2.0" },
-	[pcxw_]	{ "PA8600 (PCX-W+)",	"2.0" },
-	[pcxw2]	{ "PA8700 (PCX-W2)",	"2.0" },
-	[mako]	{ "PA8800 (Mako)",	"2.0" }
+const char * const cpu_name_version[][2] = {
+	[pcx]	= { "PA7000 (PCX)",	"1.0" },
+	[pcxs]	= { "PA7000 (PCX-S)",	"1.1a" },
+	[pcxt]	= { "PA7100 (PCX-T)",	"1.1b" },
+	[pcxt_]	= { "PA7200 (PCX-T')",	"1.1c" },
+	[pcxl]	= { "PA7100LC (PCX-L)",	"1.1d" },
+	[pcxl2]	= { "PA7300LC (PCX-L2)",	"1.1e" },
+	[pcxu]	= { "PA8000 (PCX-U)",	"2.0" },
+	[pcxu_]	= { "PA8200 (PCX-U+)",	"2.0" },
+	[pcxw]	= { "PA8500 (PCX-W)",	"2.0" },
+	[pcxw_]	= { "PA8600 (PCX-W+)",	"2.0" },
+	[pcxw2]	= { "PA8700 (PCX-W2)",	"2.0" },
+	[mako]	= { "PA8800 (Mako)",	"2.0" },
+	[mako2] = { "PA8900 (Shortfin)",	"2.0" }
 };
 
-const char * __init
-parisc_hardware_description(struct parisc_device_id *id)
+const char *parisc_hardware_description(struct parisc_device_id *id)
 {
 	struct hp_hardware *listptr;
 	
@@ -1349,7 +1373,7 @@ parisc_hardware_description(struct parisc_device_id *id)
 
 
 /* Interpret hversion (ret[0]) from PDC_MODEL(4)/PDC_MODEL_INFO(0) */
-enum cpu_type __init
+enum cpu_type
 parisc_get_cpu_type(unsigned long hversion)
 {
 	struct hp_cpu_type_mask *ptr;

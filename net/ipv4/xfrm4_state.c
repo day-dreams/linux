@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * xfrm4_state.c
  *
@@ -7,27 +8,42 @@
  *
  */
 
+#include <net/ip.h>
 #include <net/xfrm.h>
 #include <linux/pfkeyv2.h>
 #include <linux/ipsec.h>
+#include <linux/netfilter_ipv4.h>
+#include <linux/export.h>
 
-static struct xfrm_state_afinfo xfrm4_state_afinfo;
+static int xfrm4_init_flags(struct xfrm_state *x)
+{
+	if (xs_net(x)->ipv4.sysctl_ip_no_pmtu_disc)
+		x->props.flags |= XFRM_STATE_NOPMTUDISC;
+	return 0;
+}
 
 static void
-__xfrm4_init_tempsel(struct xfrm_state *x, struct flowi *fl,
-		     struct xfrm_tmpl *tmpl,
-		     xfrm_address_t *daddr, xfrm_address_t *saddr)
+__xfrm4_init_tempsel(struct xfrm_selector *sel, const struct flowi *fl)
 {
-	x->sel.daddr.a4 = fl->fl4_dst;
-	x->sel.saddr.a4 = fl->fl4_src;
-	x->sel.dport = fl->fl_ip_dport;
-	x->sel.dport_mask = ~0;
-	x->sel.sport = fl->fl_ip_sport;
-	x->sel.sport_mask = ~0;
-	x->sel.prefixlen_d = 32;
-	x->sel.prefixlen_s = 32;
-	x->sel.proto = fl->proto;
-	x->sel.ifindex = fl->oif;
+	const struct flowi4 *fl4 = &fl->u.ip4;
+
+	sel->daddr.a4 = fl4->daddr;
+	sel->saddr.a4 = fl4->saddr;
+	sel->dport = xfrm_flowi_dport(fl, &fl4->uli);
+	sel->dport_mask = htons(0xffff);
+	sel->sport = xfrm_flowi_sport(fl, &fl4->uli);
+	sel->sport_mask = htons(0xffff);
+	sel->family = AF_INET;
+	sel->prefixlen_d = 32;
+	sel->prefixlen_s = 32;
+	sel->proto = fl4->flowi4_proto;
+	sel->ifindex = fl4->flowi4_oif;
+}
+
+static void
+xfrm4_init_temprop(struct xfrm_state *x, const struct xfrm_tmpl *tmpl,
+		   const xfrm_address_t *daddr, const xfrm_address_t *saddr)
+{
 	x->id = tmpl->id;
 	if (x->id.daddr.a4 == 0)
 		x->id.daddr.a4 = daddr->a4;
@@ -39,88 +55,39 @@ __xfrm4_init_tempsel(struct xfrm_state *x, struct flowi *fl,
 	x->props.family = AF_INET;
 }
 
-static struct xfrm_state *
-__xfrm4_state_lookup(xfrm_address_t *daddr, u32 spi, u8 proto)
+int xfrm4_extract_header(struct sk_buff *skb)
 {
-	unsigned h = __xfrm4_spi_hash(daddr, spi, proto);
-	struct xfrm_state *x;
+	const struct iphdr *iph = ip_hdr(skb);
 
-	list_for_each_entry(x, xfrm4_state_afinfo.state_byspi+h, byspi) {
-		if (x->props.family == AF_INET &&
-		    spi == x->id.spi &&
-		    daddr->a4 == x->id.daddr.a4 &&
-		    proto == x->id.proto) {
-			xfrm_state_hold(x);
-			return x;
-		}
-	}
-	return NULL;
-}
+	XFRM_MODE_SKB_CB(skb)->ihl = sizeof(*iph);
+	XFRM_MODE_SKB_CB(skb)->id = iph->id;
+	XFRM_MODE_SKB_CB(skb)->frag_off = iph->frag_off;
+	XFRM_MODE_SKB_CB(skb)->tos = iph->tos;
+	XFRM_MODE_SKB_CB(skb)->ttl = iph->ttl;
+	XFRM_MODE_SKB_CB(skb)->optlen = iph->ihl * 4 - sizeof(*iph);
+	memset(XFRM_MODE_SKB_CB(skb)->flow_lbl, 0,
+	       sizeof(XFRM_MODE_SKB_CB(skb)->flow_lbl));
 
-static struct xfrm_state *
-__xfrm4_find_acq(u8 mode, u32 reqid, u8 proto, 
-		 xfrm_address_t *daddr, xfrm_address_t *saddr, 
-		 int create)
-{
-	struct xfrm_state *x, *x0;
-	unsigned h = __xfrm4_dst_hash(daddr);
-
-	x0 = NULL;
-
-	list_for_each_entry(x, xfrm4_state_afinfo.state_bydst+h, bydst) {
-		if (x->props.family == AF_INET &&
-		    daddr->a4 == x->id.daddr.a4 &&
-		    mode == x->props.mode &&
-		    proto == x->id.proto &&
-		    saddr->a4 == x->props.saddr.a4 &&
-		    reqid == x->props.reqid &&
-		    x->km.state == XFRM_STATE_ACQ &&
-		    !x->id.spi) {
-			    x0 = x;
-			    break;
-		    }
-	}
-	if (!x0 && create && (x0 = xfrm_state_alloc()) != NULL) {
-		x0->sel.daddr.a4 = daddr->a4;
-		x0->sel.saddr.a4 = saddr->a4;
-		x0->sel.prefixlen_d = 32;
-		x0->sel.prefixlen_s = 32;
-		x0->props.saddr.a4 = saddr->a4;
-		x0->km.state = XFRM_STATE_ACQ;
-		x0->id.daddr.a4 = daddr->a4;
-		x0->id.proto = proto;
-		x0->props.family = AF_INET;
-		x0->props.mode = mode;
-		x0->props.reqid = reqid;
-		x0->props.family = AF_INET;
-		x0->lft.hard_add_expires_seconds = XFRM_ACQ_EXPIRES;
-		xfrm_state_hold(x0);
-		x0->timer.expires = jiffies + XFRM_ACQ_EXPIRES*HZ;
-		add_timer(&x0->timer);
-		xfrm_state_hold(x0);
-		list_add_tail(&x0->bydst, xfrm4_state_afinfo.state_bydst+h);
-		wake_up(&km_waitq);
-	}
-	if (x0)
-		xfrm_state_hold(x0);
-	return x0;
+	return 0;
 }
 
 static struct xfrm_state_afinfo xfrm4_state_afinfo = {
 	.family			= AF_INET,
-	.lock			= RW_LOCK_UNLOCKED,
+	.proto			= IPPROTO_IPIP,
+	.eth_proto		= htons(ETH_P_IP),
+	.owner			= THIS_MODULE,
+	.init_flags		= xfrm4_init_flags,
 	.init_tempsel		= __xfrm4_init_tempsel,
-	.state_lookup		= __xfrm4_state_lookup,
-	.find_acq		= __xfrm4_find_acq,
+	.init_temprop		= xfrm4_init_temprop,
+	.output			= xfrm4_output,
+	.output_finish		= xfrm4_output_finish,
+	.extract_input		= xfrm4_extract_input,
+	.extract_output		= xfrm4_extract_output,
+	.transport_finish	= xfrm4_transport_finish,
+	.local_error		= xfrm4_local_error,
 };
 
 void __init xfrm4_state_init(void)
 {
 	xfrm_state_register_afinfo(&xfrm4_state_afinfo);
 }
-
-void __exit xfrm4_state_fini(void)
-{
-	xfrm_state_unregister_afinfo(&xfrm4_state_afinfo);
-}
-

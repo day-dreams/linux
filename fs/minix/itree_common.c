@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* Generic part */
 
 typedef struct {
@@ -23,7 +24,7 @@ static inline int verify_chain(Indirect *from, Indirect *to)
 
 static inline block_t *block_end(struct buffer_head *bh)
 {
-	return (block_t *)((char*)bh->b_data + BLOCK_SIZE);
+	return (block_t *)((char*)bh->b_data + bh->b_size);
 }
 
 static inline Indirect *get_branch(struct inode *inode,
@@ -85,7 +86,7 @@ static int alloc_branch(struct inode *inode,
 		branch[n].key = cpu_to_block(nr);
 		bh = sb_getblk(inode->i_sb, parent);
 		lock_buffer(bh);
-		memset(bh->b_data, 0, BLOCK_SIZE);
+		memset(bh->b_data, 0, bh->b_size);
 		branch[n].bh = bh;
 		branch[n].p = (block_t*) bh->b_data + offsets[n];
 		*branch[n].p = branch[n].key;
@@ -124,7 +125,7 @@ static inline int splice_branch(struct inode *inode,
 
 	/* We are done with atomic stuff, now do the rest of housekeeping */
 
-	inode->i_ctime = CURRENT_TIME_SEC;
+	inode->i_ctime = current_time(inode);
 
 	/* had we spliced it onto indirect block? */
 	if (where->bh)
@@ -142,7 +143,7 @@ changed:
 	return -EAGAIN;
 }
 
-static inline int get_block(struct inode * inode, sector_t block,
+static int get_block(struct inode * inode, sector_t block,
 			struct buffer_head *bh, int create)
 {
 	int err = -EIO;
@@ -292,6 +293,7 @@ static void free_branches(struct inode *inode, block_t *p, block_t *q, int depth
 
 static inline void truncate (struct inode * inode)
 {
+	struct super_block *sb = inode->i_sb;
 	block_t *idata = i_data(inode);
 	int offsets[DEPTH];
 	Indirect chain[DEPTH];
@@ -301,7 +303,7 @@ static inline void truncate (struct inode * inode)
 	int first_whole;
 	long iblock;
 
-	iblock = (inode->i_size + BLOCK_SIZE-1) >> 10;
+	iblock = (inode->i_size + sb->s_blocksize -1) >> sb->s_blocksize_bits;
 	block_truncate_page(inode->i_mapping, inode->i_size, get_block);
 
 	n = block_to_path(inode, iblock, offsets);
@@ -342,19 +344,20 @@ do_indirects:
 		}
 		first_whole++;
 	}
-	inode->i_mtime = inode->i_ctime = CURRENT_TIME_SEC;
+	inode->i_mtime = inode->i_ctime = current_time(inode);
 	mark_inode_dirty(inode);
 }
 
-static inline unsigned nblocks(loff_t size)
+static inline unsigned nblocks(loff_t size, struct super_block *sb)
 {
+	int k = sb->s_blocksize_bits - 10;
 	unsigned blocks, res, direct = DIRECT, i = DEPTH;
-	blocks = (size + BLOCK_SIZE - 1) >> BLOCK_SIZE_BITS;
+	blocks = (size + sb->s_blocksize - 1) >> (BLOCK_SIZE_BITS + k);
 	res = blocks;
 	while (--i && blocks > direct) {
 		blocks -= direct;
-		blocks += BLOCK_SIZE/sizeof(block_t) - 1;
-		blocks /= BLOCK_SIZE/sizeof(block_t);
+		blocks += sb->s_blocksize/sizeof(block_t) - 1;
+		blocks /= sb->s_blocksize/sizeof(block_t);
 		res += blocks;
 		direct = 1;
 	}

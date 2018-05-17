@@ -1,9 +1,11 @@
 /*
    3w-9xxx.h -- 3ware 9000 Storage Controller device driver for Linux.
 
-   Written By: Adam Radford <linuxraid@amcc.com>
+   Written By: Adam Radford <aradford@gmail.com>
+   Modifications By: Tom Couch
 
-   Copyright (C) 2004 Applied Micro Circuits Corporation.
+   Copyright (C) 2004-2009 Applied Micro Circuits Corporation.
+   Copyright (C) 2010 LSI Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -39,10 +41,7 @@
    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
    Bugs/Comments/Suggestions should be mailed to:
-   linuxraid@amcc.com
-
-   For more information, goto:
-   http://www.amcc.com
+   aradford@gmail.com
 */
 
 #ifndef _3W_9XXX_H
@@ -59,7 +58,7 @@ static twa_message_type twa_aen_table[] = {
 	{0x0000, "AEN queue empty"},
 	{0x0001, "Controller reset occurred"},
 	{0x0002, "Degraded unit detected"},
-	{0x0003, "Controller error occured"},
+	{0x0003, "Controller error occurred"},
 	{0x0004, "Background rebuild failed"},
 	{0x0005, "Background rebuild done"},
 	{0x0006, "Incomplete unit detected"},
@@ -267,7 +266,6 @@ static twa_message_type twa_error_table[] = {
 #define TW_CONTROL_CLEAR_PARITY_ERROR          0x00800000
 #define TW_CONTROL_CLEAR_QUEUE_ERROR           0x00400000
 #define TW_CONTROL_CLEAR_PCI_ABORT             0x00100000
-#define TW_CONTROL_CLEAR_SBUF_WRITE_ERROR      0x00000008
 
 /* Status register bit definitions */
 #define TW_STATUS_MAJOR_VERSION_MASK	       0xF0000000
@@ -285,16 +283,10 @@ static twa_message_type twa_error_table[] = {
 #define TW_STATUS_MICROCONTROLLER_READY	       0x00002000
 #define TW_STATUS_COMMAND_QUEUE_EMPTY	       0x00001000
 #define TW_STATUS_EXPECTED_BITS		       0x00002000
-#define TW_STATUS_UNEXPECTED_BITS	       0x00F00008
-#define TW_STATUS_SBUF_WRITE_ERROR             0x00000008
-#define TW_STATUS_VALID_INTERRUPT              0x00DF0008
-
-/* RESPONSE QUEUE BIT DEFINITIONS */
-#define TW_RESPONSE_ID_MASK		       0x00000FF0
+#define TW_STATUS_UNEXPECTED_BITS	       0x00F00000
+#define TW_STATUS_VALID_INTERRUPT              0x00DF0000
 
 /* PCI related defines */
-#define TW_DEVICE_NAME			       "3w-9xxx"
-#define TW_NUMDEVICES 1
 #define TW_PCI_CLEAR_PARITY_ERRORS 0xc100
 #define TW_PCI_CLEAR_PCI_ABORT     0x2000
 
@@ -325,20 +317,17 @@ static twa_message_type twa_error_table[] = {
 
 /* Compatibility defines */
 #define TW_9000_ARCH_ID 0x5
-#define TW_CURRENT_FW_SRL 24
-#define TW_CURRENT_FW_BUILD 5
-#define TW_CURRENT_FW_BRANCH 1
-
-/* Phase defines */
-#define TW_PHASE_INITIAL 0
-#define TW_PHASE_SINGLE  1
-#define TW_PHASE_SGLIST  2
+#define TW_CURRENT_DRIVER_SRL 35
+#define TW_CURRENT_DRIVER_BUILD 0
+#define TW_CURRENT_DRIVER_BRANCH 0
 
 /* Misc defines */
+#define TW_9550SX_DRAIN_COMPLETED	      0xFFFF
 #define TW_SECTOR_SIZE                        512
 #define TW_ALIGNMENT_9000                     4  /* 4 bytes */
 #define TW_ALIGNMENT_9000_SGL                 0x3
 #define TW_MAX_UNITS			      16
+#define TW_MAX_UNITS_9650SE		      32
 #define TW_INIT_MESSAGE_CREDITS		      0x100
 #define TW_INIT_COMMAND_PACKET_SIZE	      0x3
 #define TW_INIT_COMMAND_PACKET_SIZE_EXTENDED  0x6
@@ -346,28 +335,19 @@ static twa_message_type twa_error_table[] = {
 #define TW_BUNDLED_FW_SAFE_TO_FLASH	      0x4
 #define TW_CTLR_FW_RECOMMENDS_FLASH	      0x8
 #define TW_CTLR_FW_COMPATIBLE		      0x2
-#define TW_BASE_FW_SRL			      0x17
+#define TW_BASE_FW_SRL			      24
 #define TW_BASE_FW_BRANCH		      0
 #define TW_BASE_FW_BUILD		      1
-#if BITS_PER_LONG > 32
-#define TW_APACHE_MAX_SGL_LENGTH 72
-#define TW_ESCALADE_MAX_SGL_LENGTH 41
-#define TW_APACHE_CMD_PKT_SIZE 5
-#else
-#define TW_APACHE_MAX_SGL_LENGTH 109
-#define TW_ESCALADE_MAX_SGL_LENGTH 62
-#define TW_APACHE_CMD_PKT_SIZE 4
-#endif
-#define TW_ATA_PASS_SGL_MAX                   60
+#define TW_FW_SRL_LUNS_SUPPORTED              28
 #define TW_Q_LENGTH			      256
 #define TW_Q_START			      0
 #define TW_MAX_SLOT			      32
 #define TW_MAX_RESET_TRIES		      2
 #define TW_MAX_CMDS_PER_LUN		      254
 #define TW_MAX_RESPONSE_DRAIN		      256
-#define TW_MAX_AEN_DRAIN		      40
-#define TW_IN_IOCTL                           2
-#define TW_IN_CHRDEV_IOCTL                    3
+#define TW_MAX_AEN_DRAIN		      255
+#define TW_IN_RESET                           2
+#define TW_USING_MSI			      3
 #define TW_IN_ATTENTION_LOOP		      4
 #define TW_MAX_SECTORS                        256
 #define TW_AEN_WAIT_TIME                      1000
@@ -424,15 +404,17 @@ static twa_message_type twa_error_table[] = {
 #define TW_DRIVER TW_MESSAGE_SOURCE_LINUX_DRIVER
 #define TW_MESSAGE_SOURCE_LINUX_OS            9
 #define TW_OS TW_MESSAGE_SOURCE_LINUX_OS
-#if BITS_PER_LONG > 32
-#define TW_COMMAND_SIZE			      5
-#define TW_DMA_MASK			      DMA_64BIT_MASK
-#else
-#define TW_COMMAND_SIZE			      4
-#define TW_DMA_MASK			      DMA_32BIT_MASK
-#endif
 #ifndef PCI_DEVICE_ID_3WARE_9000
 #define PCI_DEVICE_ID_3WARE_9000 0x1002
+#endif
+#ifndef PCI_DEVICE_ID_3WARE_9550SX
+#define PCI_DEVICE_ID_3WARE_9550SX 0x1003
+#endif
+#ifndef PCI_DEVICE_ID_3WARE_9650SE
+#define PCI_DEVICE_ID_3WARE_9650SE 0x1004
+#endif
+#ifndef PCI_DEVICE_ID_3WARE_9690SA
+#define PCI_DEVICE_ID_3WARE_9690SA 0x1005
 #endif
 
 /* Bitmask macros to eliminate bitfields */
@@ -451,15 +433,17 @@ static twa_message_type twa_error_table[] = {
 /* reserved_1: 4, response_id: 8, reserved_2: 20 */
 #define TW_RESID_OUT(x) ((x >> 4) & 0xff)
 
+/* request_id: 12, lun: 4 */
+#define TW_REQ_LUN_IN(lun, request_id) (((lun << 12) & 0xf000) | (request_id & 0xfff))
+#define TW_LUN_OUT(lun) ((lun >> 12) & 0xf)
+
 /* Macros */
 #define TW_CONTROL_REG_ADDR(x) (x->base_addr)
 #define TW_STATUS_REG_ADDR(x) ((unsigned char __iomem *)x->base_addr + 0x4)
-#if BITS_PER_LONG > 32
-#define TW_COMMAND_QUEUE_REG_ADDR(x) ((unsigned char __iomem *)x->base_addr + 0x20)
-#else
-#define TW_COMMAND_QUEUE_REG_ADDR(x) ((unsigned char __iomem *)x->base_addr + 0x8)
-#endif
+#define TW_COMMAND_QUEUE_REG_ADDR(x) (sizeof(dma_addr_t) > 4 ? ((unsigned char __iomem *)x->base_addr + 0x20) : ((unsigned char __iomem *)x->base_addr + 0x8))
+#define TW_COMMAND_QUEUE_REG_ADDR_LARGE(x) ((unsigned char __iomem *)x->base_addr + 0x20)
 #define TW_RESPONSE_QUEUE_REG_ADDR(x) ((unsigned char __iomem *)x->base_addr + 0xC)
+#define TW_RESPONSE_QUEUE_REG_ADDR_LARGE(x) ((unsigned char __iomem *)x->base_addr + 0x30)
 #define TW_CLEAR_ALL_INTERRUPTS(x) (writel(TW_STATUS_VALID_INTERRUPT, TW_CONTROL_REG_ADDR(x)))
 #define TW_CLEAR_ATTENTION_INTERRUPT(x) (writel(TW_CONTROL_CLEAR_ATTENTION_INTERRUPT, TW_CONTROL_REG_ADDR(x)))
 #define TW_CLEAR_HOST_INTERRUPT(x) (writel(TW_CONTROL_CLEAR_HOST_INTERRUPT, TW_CONTROL_REG_ADDR(x)))
@@ -480,12 +464,18 @@ printk(KERN_WARNING "3w-9xxx: scsi%d: ERROR: (0x%02X:0x%04X): %s.\n",h->host_no,
 else \
 printk(KERN_WARNING "3w-9xxx: ERROR: (0x%02X:0x%04X): %s.\n",a,b,c); \
 }
+#define TW_MAX_LUNS(srl) (srl < TW_FW_SRL_LUNS_SUPPORTED ? 1 : 16)
+#define TW_COMMAND_SIZE (sizeof(dma_addr_t) > 4 ? 5 : 4)
+#define TW_APACHE_MAX_SGL_LENGTH (sizeof(dma_addr_t) > 4 ? 72 : 109)
+#define TW_ESCALADE_MAX_SGL_LENGTH (sizeof(dma_addr_t) > 4 ? 41 : 62)
+#define TW_PADDING_LENGTH (sizeof(dma_addr_t) > 4 ? 8 : 0)
+#define TW_CPU_TO_SGL(x) (sizeof(dma_addr_t) > 4 ? cpu_to_le64(x) : cpu_to_le32(x))
 
 #pragma pack(1)
 
 /* Scatter Gather List Entry */
 typedef struct TAG_TW_SG_Entry {
-	unsigned long address;
+	dma_addr_t address;
 	u32 length;
 } TW_SG_Entry;
 
@@ -506,42 +496,27 @@ typedef struct TW_Command {
 		struct {
 			u32 lba;
 			TW_SG_Entry sgl[TW_ESCALADE_MAX_SGL_LENGTH];
-#if BITS_PER_LONG > 32
-			u32 padding[2];	/* pad to 512 bytes */
-#else
-			u32 padding;
-#endif
+			dma_addr_t padding;
 		} io;
 		struct {
 			TW_SG_Entry sgl[TW_ESCALADE_MAX_SGL_LENGTH];
-#if BITS_PER_LONG > 32
-			u32 padding[3];
-#else
-			u32 padding[2];
-#endif
+			u32 padding;
+			dma_addr_t padding2;
 		} param;
 	} byte8_offset;
 } TW_Command;
-
-/* Scatter gather element for 9000+ controllers */
-typedef struct TAG_TW_SG_Apache {
-	unsigned long address;
-	u32 length;
-} TW_SG_Apache;
 
 /* Command Packet for 9000+ controllers */
 typedef struct TAG_TW_Command_Apache {
 	unsigned char opcode__reserved;
 	unsigned char unit;
-	unsigned short request_id;
+	unsigned short request_id__lunl;
 	unsigned char status;
 	unsigned char sgl_offset;
-	unsigned short sgl_entries;
+	unsigned short sgl_entries__lunh;
 	unsigned char cdb[16];
-	TW_SG_Apache sg_list[TW_APACHE_MAX_SGL_LENGTH];
-#if BITS_PER_LONG > 32
-	unsigned char padding[8];
-#endif
+	TW_SG_Entry sg_list[TW_APACHE_MAX_SGL_LENGTH];
+	unsigned char padding[TW_PADDING_LENGTH];
 } TW_Command_Apache;
 
 /* New command packet header */
@@ -638,13 +613,6 @@ typedef union TAG_TW_Response_Queue {
 	u32 value;
 } TW_Response_Queue;
 
-typedef struct TAG_TW_Info {
-	char *buffer;
-	int length;
-	int offset;
-	int position;
-} TW_Info;
-
 /* Compatibility information structure */
 typedef struct TAG_TW_Compatibility_Info
 {
@@ -652,14 +620,25 @@ typedef struct TAG_TW_Compatibility_Info
 	unsigned short working_srl;
 	unsigned short working_branch;
 	unsigned short working_build;
+	unsigned short driver_srl_high;
+	unsigned short driver_branch_high;
+	unsigned short driver_build_high;
+	unsigned short driver_srl_low;
+	unsigned short driver_branch_low;
+	unsigned short driver_build_low;
+	unsigned short fw_on_ctlr_srl;
+	unsigned short fw_on_ctlr_branch;
+	unsigned short fw_on_ctlr_build;
 } TW_Compatibility_Info;
+
+#pragma pack()
 
 typedef struct TAG_TW_Device_Extension {
 	u32                     __iomem *base_addr;
 	unsigned long	       	*generic_buffer_virt[TW_Q_LENGTH];
-	unsigned long	       	generic_buffer_phys[TW_Q_LENGTH];
+	dma_addr_t	       	generic_buffer_phys[TW_Q_LENGTH];
 	TW_Command_Full	       	*command_packet_virt[TW_Q_LENGTH];
-	unsigned long		command_packet_phys[TW_Q_LENGTH];
+	dma_addr_t		command_packet_phys[TW_Q_LENGTH];
 	struct pci_dev		*tw_pci_dev;
 	struct scsi_cmnd	*srb[TW_Q_LENGTH];
 	unsigned char		free_queue[TW_Q_LENGTH];
@@ -675,7 +654,6 @@ typedef struct TAG_TW_Device_Extension {
 	unsigned int		max_pending_request_count;
 	unsigned int		max_sgl_entries;
 	unsigned int		sgl_entries;
-	unsigned int		num_aborts;
 	unsigned int		num_resets;
 	unsigned int		sector_count;
 	unsigned int		max_sector_count;
@@ -688,17 +666,13 @@ typedef struct TAG_TW_Device_Extension {
 	unsigned char		event_queue_wrapped;
 	unsigned int            error_sequence_id;
 	int                     ioctl_sem_lock;
-	u32                     ioctl_msec;
+	ktime_t                 ioctl_time;
 	int			chrdev_request_id;
 	wait_queue_head_t	ioctl_wqueue;
-	struct semaphore	ioctl_sem;
+	struct mutex		ioctl_lock;
 	char			aen_clobber;
-	unsigned short		working_srl;
-	unsigned short		working_branch;
-	unsigned short		working_build;
+	TW_Compatibility_Info	tw_compat_info;
 } TW_Device_Extension;
-
-#pragma pack()
 
 #endif /* _3W_9XXX_H */
 

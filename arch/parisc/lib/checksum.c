@@ -13,8 +13,6 @@
  *		modify it under the terms of the GNU General Public License
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
- *
- * $Id: checksum.c,v 1.3 1997/12/01 17:57:34 ralf Exp $
  */
 #include <linux/module.h>
 #include <linux/types.h>
@@ -22,7 +20,7 @@
 #include <net/checksum.h>
 #include <asm/byteorder.h>
 #include <asm/string.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #define addc(_t,_r)                     \
 	__asm__ __volatile__ (          \
@@ -101,11 +99,14 @@ out:
 /*
  * computes a partial checksum, e.g. for TCP/UDP fragments
  */
-unsigned int csum_partial(const unsigned char *buff, int len, unsigned int sum)
+/*
+ * why bother folding?
+ */
+__wsum csum_partial(const void *buff, int len, __wsum sum)
 {
 	unsigned int result = do_csum(buff, len);
 	addc(result, sum);
-	return from32to16(result);
+	return (__force __wsum)from32to16(result);
 }
 
 EXPORT_SYMBOL(csum_partial);
@@ -113,8 +114,8 @@ EXPORT_SYMBOL(csum_partial);
 /*
  * copy while checksumming, otherwise like csum_partial
  */
-unsigned int csum_partial_copy_nocheck(const unsigned char *src, unsigned char *dst,
-				       int len, unsigned int sum)
+__wsum csum_partial_copy_nocheck(const void *src, void *dst,
+				       int len, __wsum sum)
 {
 	/*
 	 * It's 2:30 am and I don't feel like doing it real ...
@@ -131,9 +132,9 @@ EXPORT_SYMBOL(csum_partial_copy_nocheck);
  * Copy from userspace and compute checksum.  If we catch an exception
  * then zero the rest of the buffer.
  */
-unsigned int csum_partial_copy_from_user (const unsigned char *src, unsigned char *dst,
-                                          int len, unsigned int sum,
-                                          int *err_ptr)
+__wsum csum_partial_copy_from_user(const void __user *src,
+					void *dst, int len,
+					__wsum sum, int *err_ptr)
 {
 	int missing;
 

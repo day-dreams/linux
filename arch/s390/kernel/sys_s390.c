@@ -1,8 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- *  arch/s390/kernel/sys_s390.c
- *
  *  S390 version
- *    Copyright (C) 1999,2000 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright IBM Corp. 1999, 2000
  *    Author(s): Martin Schwidefsky (schwidefsky@de.ibm.com),
  *               Thomas Spatzier (tspat@de.ibm.com)
  *
@@ -16,8 +15,8 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/fs.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/sem.h>
 #include <linux/msg.h>
 #include <linux/shm.h>
@@ -26,64 +25,19 @@
 #include <linux/mman.h>
 #include <linux/file.h>
 #include <linux/utsname.h>
-#ifdef CONFIG_ARCH_S390X
 #include <linux/personality.h>
-#endif /* CONFIG_ARCH_S390X */
-
-#include <asm/uaccess.h>
-#include <asm/ipc.h>
-
-/*
- * sys_pipe() is the normal C calling standard for creating
- * a pipe. It's not the way Unix traditionally does this, though.
- */
-asmlinkage long sys_pipe(unsigned long __user *fildes)
-{
-	int fd[2];
-	int error;
-
-	error = do_pipe(fd);
-	if (!error) {
-		if (copy_to_user(fildes, fd, 2*sizeof(int)))
-			error = -EFAULT;
-	}
-	return error;
-}
-
-/* common code for old and new mmaps */
-static inline long do_mmap2(
-	unsigned long addr, unsigned long len,
-	unsigned long prot, unsigned long flags,
-	unsigned long fd, unsigned long pgoff)
-{
-	long error = -EBADF;
-	struct file * file = NULL;
-
-	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
-	if (!(flags & MAP_ANONYMOUS)) {
-		file = fget(fd);
-		if (!file)
-			goto out;
-	}
-
-	down_write(&current->mm->mmap_sem);
-	error = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
-	up_write(&current->mm->mmap_sem);
-
-	if (file)
-		fput(file);
-out:
-	return error;
-}
+#include <linux/unistd.h>
+#include <linux/ipc.h>
+#include <linux/uaccess.h>
+#include "entry.h"
 
 /*
- * Perform the select(nd, in, out, ex, tv) and mmap() system
- * calls. Linux for S/390 isn't able to handle more than 5
- * system call parameters, so these system calls used a memory
- * block for parameter passing..
+ * Perform the mmap() system call. Linux for S/390 isn't able to handle more
+ * than 5 system call parameters, so this system call uses a memory block
+ * for parameter passing.
  */
 
-struct mmap_arg_struct {
+struct s390_mmap_arg_struct {
 	unsigned long addr;
 	unsigned long len;
 	unsigned long prot;
@@ -92,179 +46,47 @@ struct mmap_arg_struct {
 	unsigned long offset;
 };
 
-asmlinkage long sys_mmap2(struct mmap_arg_struct __user  *arg)
+SYSCALL_DEFINE1(mmap2, struct s390_mmap_arg_struct __user *, arg)
 {
-	struct mmap_arg_struct a;
+	struct s390_mmap_arg_struct a;
 	int error = -EFAULT;
 
 	if (copy_from_user(&a, arg, sizeof(a)))
 		goto out;
-	error = do_mmap2(a.addr, a.len, a.prot, a.flags, a.fd, a.offset);
+	error = sys_mmap_pgoff(a.addr, a.len, a.prot, a.flags, a.fd, a.offset);
 out:
 	return error;
 }
-
-asmlinkage long old_mmap(struct mmap_arg_struct __user *arg)
-{
-	struct mmap_arg_struct a;
-	long error = -EFAULT;
-
-	if (copy_from_user(&a, arg, sizeof(a)))
-		goto out;
-
-	error = -EINVAL;
-	if (a.offset & ~PAGE_MASK)
-		goto out;
-
-	error = do_mmap2(a.addr, a.len, a.prot, a.flags, a.fd, a.offset >> PAGE_SHIFT);
-out:
-	return error;
-}
-
-#ifndef CONFIG_ARCH_S390X
-struct sel_arg_struct {
-	unsigned long n;
-	fd_set *inp, *outp, *exp;
-	struct timeval *tvp;
-};
-
-asmlinkage long old_select(struct sel_arg_struct __user *arg)
-{
-	struct sel_arg_struct a;
-
-	if (copy_from_user(&a, arg, sizeof(a)))
-		return -EFAULT;
-	/* sys_select() does the appropriate kernel locking */
-	return sys_select(a.n, a.inp, a.outp, a.exp, a.tvp);
-
-}
-#endif /* CONFIG_ARCH_S390X */
 
 /*
- * sys_ipc() is the de-multiplexer for the SysV IPC calls..
- *
- * This is really horribly ugly.
+ * sys_ipc() is the de-multiplexer for the SysV IPC calls.
  */
-asmlinkage long sys_ipc(uint call, int first, unsigned long second,
-				  unsigned long third, void __user *ptr)
+SYSCALL_DEFINE5(s390_ipc, uint, call, int, first, unsigned long, second,
+		unsigned long, third, void __user *, ptr)
 {
-        struct ipc_kludge tmp;
-	int ret;
-
-        switch (call) {
-        case SEMOP:
-		return sys_semtimedop(first, (struct sembuf __user *)ptr,
-				       (unsigned)second, NULL);
-	case SEMTIMEDOP:
-		return sys_semtimedop(first, (struct sembuf __user *)ptr,
-				       (unsigned)second,
-				       (const struct timespec __user *) third);
-        case SEMGET:
-                return sys_semget(first, (int)second, third);
-        case SEMCTL: {
-                union semun fourth;
-                if (!ptr)
-                        return -EINVAL;
-                if (get_user(fourth.__pad, (void __user * __user *) ptr))
-                        return -EFAULT;
-                return sys_semctl(first, (int)second, third, fourth);
-        }
-        case MSGSND:
-		return sys_msgsnd (first, (struct msgbuf __user *) ptr,
-                                   (size_t)second, third);
-		break;
-        case MSGRCV:
-                if (!ptr)
-                        return -EINVAL;
-                if (copy_from_user (&tmp, (struct ipc_kludge __user *) ptr,
-                                    sizeof (struct ipc_kludge)))
-                        return -EFAULT;
-                return sys_msgrcv (first, tmp.msgp,
-                                   (size_t)second, tmp.msgtyp, third);
-        case MSGGET:
-                return sys_msgget((key_t)first, (int)second);
-        case MSGCTL:
-                return sys_msgctl(first, (int)second,
-				   (struct msqid_ds __user *)ptr);
-
-	case SHMAT: {
-		ulong raddr;
-		ret = do_shmat(first, (char __user *)ptr,
-				(int)second, &raddr);
-		if (ret)
-			return ret;
-		return put_user (raddr, (ulong __user *) third);
-		break;
-        }
-	case SHMDT:
-		return sys_shmdt ((char __user *)ptr);
-	case SHMGET:
-		return sys_shmget(first, (size_t)second, third);
-	case SHMCTL:
-		return sys_shmctl(first, (int)second,
-                                   (struct shmid_ds __user *) ptr);
-	default:
-		return -ENOSYS;
-
-	}
-
-	return -EINVAL;
+	if (call >> 16)
+		return -EINVAL;
+	/* The s390 sys_ipc variant has only five parameters instead of six
+	 * like the generic variant. The only difference is the handling of
+	 * the SEMTIMEDOP subcall where on s390 the third parameter is used
+	 * as a pointer to a struct timespec where the generic variant uses
+	 * the fifth parameter.
+	 * Therefore we can call the generic variant by simply passing the
+	 * third parameter also as fifth parameter.
+	 */
+	return sys_ipc(call, first, second, third, ptr, third);
 }
 
-#ifdef CONFIG_ARCH_S390X
-asmlinkage long s390x_newuname(struct new_utsname __user *name)
+SYSCALL_DEFINE1(s390_personality, unsigned int, personality)
 {
-	int ret = sys_newuname(name);
+	unsigned int ret;
 
-	if (current->personality == PER_LINUX32 && !ret) {
-		ret = copy_to_user(name->machine, "s390\0\0\0\0", 8);
-		if (ret) ret = -EFAULT;
-	}
-	return ret;
-}
-
-asmlinkage long s390x_personality(unsigned long personality)
-{
-	int ret;
-
-	if (current->personality == PER_LINUX32 && personality == PER_LINUX)
-		personality = PER_LINUX32;
+	if (personality(current->personality) == PER_LINUX32 &&
+	    personality(personality) == PER_LINUX)
+		personality |= PER_LINUX32;
 	ret = sys_personality(personality);
-	if (ret == PER_LINUX32)
-		ret = PER_LINUX;
+	if (personality(ret) == PER_LINUX32)
+		ret &= ~PER_LINUX32;
 
 	return ret;
 }
-#endif /* CONFIG_ARCH_S390X */
-
-/*
- * Wrapper function for sys_fadvise64/fadvise64_64
- */
-#ifndef CONFIG_ARCH_S390X
-
-asmlinkage long
-s390_fadvise64(int fd, u32 offset_high, u32 offset_low, size_t len, int advice)
-{
-	return sys_fadvise64(fd, (u64) offset_high << 32 | offset_low,
-			len, advice);
-}
-
-#endif
-
-struct fadvise64_64_args {
-	int fd;
-	long long offset;
-	long long len;
-	int advice;
-};
-
-asmlinkage long
-s390_fadvise64_64(struct fadvise64_64_args __user *args)
-{
-	struct fadvise64_64_args a;
-
-	if ( copy_from_user(&a, args, sizeof(a)) )
-		return -EFAULT;
-	return sys_fadvise64_64(a.fd, a.offset, a.len, a.advice);
-}
-

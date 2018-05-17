@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*!*****************************************************************************
 *!
-*!  Implements an interface for i2c compatible eeproms to run under linux.
-*!  Supports 2k, 8k(?) and 16k. Uses adaptive timing adjustents by
+*!  Implements an interface for i2c compatible eeproms to run under Linux.
+*!  Supports 2k, 8k(?) and 16k. Uses adaptive timing adjustments by
 *!  Johan.Adolfsson@axis.com
 *!
 *!  Probing results:
@@ -19,88 +20,23 @@
 *!  Sep  03 1999  Edgar Iglesias    Added bail-out stuff if we get interrupted
 *!                                  in the spin-lock.
 *!
-*!  $Log: eeprom.c,v $
-*!  Revision 1.10  2003/09/11 07:29:48  starvik
-*!  Merge of Linux 2.6.0-test5
-*!
-*!  Revision 1.9  2003/07/04 08:27:37  starvik
-*!  Merge of Linux 2.5.74
-*!
-*!  Revision 1.8  2003/04/09 05:20:47  starvik
-*!  Merge of Linux 2.5.67
-*!
-*!  Revision 1.6  2003/02/10 07:19:28  starvik
-*!  Removed misplaced ;
-*!
-*!  Revision 1.5  2002/12/11 13:13:57  starvik
-*!  Added arch/ to v10 specific includes
-*!  Added fix from Linux 2.4 in serial.c (flush_to_flip_buffer)
-*!
-*!  Revision 1.4  2002/11/20 11:56:10  starvik
-*!  Merge of Linux 2.5.48
-*!
-*!  Revision 1.3  2002/11/18 13:16:06  starvik
-*!  Linux 2.5 port of latest 2.4 drivers
-*!
-*!  Revision 1.8  2001/06/15 13:24:29  jonashg
-*!  * Added verification of pointers from userspace in read and write.
-*!  * Made busy counter volatile.
-*!  * Added define for inital write delay.
-*!  * Removed warnings by using loff_t instead of unsigned long.
-*!
-*!  Revision 1.7  2001/06/14 15:26:54  jonashg
-*!  Removed test because condition is always true.
-*!
-*!  Revision 1.6  2001/06/14 15:18:20  jonashg
-*!  Kb -> kB (makes quite a difference if you don't know if you have 2k or 16k).
-*!
-*!  Revision 1.5  2001/06/14 14:39:51  jonashg
-*!  Forgot to use name when registering the driver.
-*!
-*!  Revision 1.4  2001/06/14 14:35:47  jonashg
-*!  * Gave driver a name and used it in printk's.
-*!  * Cleanup.
-*!
-*!  Revision 1.3  2001/03/19 16:04:46  markusl
-*!  Fixed init of fops struct
-*!
-*!  Revision 1.2  2001/03/19 10:35:07  markusl
-*!  2.4 port of eeprom driver
-*!
-*!  Revision 1.8  2000/05/18 10:42:25  edgar
-*!  Make sure to end write cycle on _every_ write
-*!
-*!  Revision 1.7  2000/01/17 17:41:01  johana
-*!  Adjusted probing and return -ENOSPC when writing outside EEPROM
-*!
-*!  Revision 1.6  2000/01/17 15:50:36  johana
-*!  Added adaptive timing adjustments and fixed autoprobing for 2k and 16k(?)
-*!  EEPROMs
-*!
-*!  Revision 1.5  1999/09/03 15:07:37  edgar
-*!  Added bail-out check to the spinlock
-*!
-*!  Revision 1.4  1999/09/03 12:11:17  bjornw
-*!  Proper atomicity (need to use spinlocks, not if's). users -> busy.
-*!
-*!
 *!        (c) 1999 Axis Communications AB, Lund, Sweden
 *!*****************************************************************************/
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
-#include <asm/uaccess.h>
+#include <linux/wait.h>
+#include <linux/uaccess.h>
 #include "i2c.h"
 
-#define D(x) 
+#define D(x)
 
 /* If we should use adaptive timing or not: */
-//#define EEPROM_ADAPTIVE_TIMING      
+/* #define EEPROM_ADAPTIVE_TIMING */
 
 #define EEPROM_MAJOR_NR 122  /* use a LOCAL/EXPERIMENTAL major for now */
 #define EEPROM_MINOR_NR 0
@@ -137,8 +73,7 @@ struct eeprom_type
   int adapt_state; /* 1 = To high , 0 = Even, -1 = To low */
   
   /* this one is to keep the read/write operations atomic */
-  wait_queue_head_t wait_q;
-  volatile int busy;
+  struct mutex lock;
   int retry_cnt_addr; /* Used to keep track of number of retries for
                          adaptive timing adjustments */
   int retry_cnt_read;
@@ -166,7 +101,7 @@ static const char eeprom_name[] = "eeprom";
 static struct eeprom_type eeprom;
 
 /* This is the exported file-operations structure for this device. */
-struct file_operations eeprom_fops =
+const struct file_operations eeprom_fops =
 {
   .llseek  = eeprom_lseek,
   .read    = eeprom_read,
@@ -179,8 +114,7 @@ struct file_operations eeprom_fops =
 
 int __init eeprom_init(void)
 {
-  init_waitqueue_head(&eeprom.wait_q);
-  eeprom.busy = 0;
+  mutex_init(&eeprom.lock);
 
 #ifdef CONFIG_ETRAX_I2C_EEPROM_PROBE
 #define EETEXT "Found"
@@ -440,13 +374,11 @@ int __init eeprom_init(void)
 }
 
 /* Opens the device. */
-
 static int eeprom_open(struct inode * inode, struct file * file)
 {
-
-  if(MINOR(inode->i_rdev) != EEPROM_MINOR_NR)
+  if(iminor(inode) != EEPROM_MINOR_NR)
      return -ENXIO;
-  if(MAJOR(inode->i_rdev) != EEPROM_MAJOR_NR)
+  if(imajor(inode) != EEPROM_MAJOR_NR)
      return -ENXIO;
 
   if( eeprom.size > 0 )
@@ -464,7 +396,7 @@ static int eeprom_open(struct inode * inode, struct file * file)
 static loff_t eeprom_lseek(struct file * file, loff_t offset, int orig)
 {
 /*
- *  orig 0: position from begning of eeprom
+ *  orig 0: position from beginning of eeprom
  *  orig 1: relative from current position
  *  orig 2: position from last eeprom address
  */
@@ -504,10 +436,7 @@ static loff_t eeprom_lseek(struct file * file, loff_t offset, int orig)
 
 static int eeprom_read_buf(loff_t addr, char * buf, int count)
 {
-  struct file f;
-
-  f.f_pos = addr;
-  return eeprom_read(&f, buf, count, &addr);
+  return eeprom_read(NULL, buf, count, &addr);
 }
 
 
@@ -517,7 +446,7 @@ static int eeprom_read_buf(loff_t addr, char * buf, int count)
 static ssize_t eeprom_read(struct file * file, char * buf, size_t count, loff_t *off)
 {
   int read=0;
-  unsigned long p = file->f_pos;
+  unsigned long p = *off;
 
   unsigned char page;
 
@@ -526,16 +455,8 @@ static ssize_t eeprom_read(struct file * file, char * buf, size_t count, loff_t 
     return -EFAULT;
   }
   
-  while(eeprom.busy)
-  {
-    interruptible_sleep_on(&eeprom.wait_q);
-
-    /* bail out if we get interrupted */
-    if (signal_pending(current))
-      return -EINTR;
-    
-  }
-  eeprom.busy++;
+  if (mutex_lock_interruptible(&eeprom.lock))
+    return -EINTR;
 
   page = (unsigned char) (p >> 8);
   
@@ -546,8 +467,7 @@ static ssize_t eeprom_read(struct file * file, char * buf, size_t count, loff_t 
     i2c_stop();
     
     /* don't forget to wake them up */
-    eeprom.busy--;
-    wake_up_interruptible(&eeprom.wait_q);  
+    mutex_unlock(&eeprom.lock);
     return -EFAULT;
   }
 
@@ -571,11 +491,10 @@ static ssize_t eeprom_read(struct file * file, char * buf, size_t count, loff_t 
   
   if(read > 0)
   {
-    file->f_pos += read;
+    *off += read;
   }
 
-  eeprom.busy--;
-  wake_up_interruptible(&eeprom.wait_q);
+  mutex_unlock(&eeprom.lock);
   return read;
 }
 
@@ -583,11 +502,7 @@ static ssize_t eeprom_read(struct file * file, char * buf, size_t count, loff_t 
 
 static int eeprom_write_buf(loff_t addr, const char * buf, int count)
 {
-  struct file f;
-
-  f.f_pos = addr;
-  
-  return eeprom_write(&f, buf, count, &addr);
+  return eeprom_write(NULL, buf, count, &addr);
 }
 
 
@@ -599,24 +514,19 @@ static ssize_t eeprom_write(struct file * file, const char * buf, size_t count,
   int i, written, restart=1;
   unsigned long p;
 
-  if (verify_area(VERIFY_READ, buf, count))
+  if (!access_ok(VERIFY_READ, buf, count))
   {
     return -EFAULT;
   }
 
-  while(eeprom.busy)
-  {
-    interruptible_sleep_on(&eeprom.wait_q);
-    /* bail out if we get interrupted */
-    if (signal_pending(current))
-      return -EINTR;
-  }
-  eeprom.busy++;
+  /* bail out if we get interrupted */
+  if (mutex_lock_interruptible(&eeprom.lock))
+    return -EINTR;
   for(i = 0; (i < EEPROM_RETRIES) && (restart > 0); i++)
   {
     restart = 0;
     written = 0;
-    p = file->f_pos;
+    p = *off;
    
     
     while( (written < count) && (p < eeprom.size))
@@ -629,8 +539,7 @@ static ssize_t eeprom_write(struct file * file, const char * buf, size_t count,
         i2c_stop();
         
         /* don't forget to wake them up */
-        eeprom.busy--;
-        wake_up_interruptible(&eeprom.wait_q);
+        mutex_unlock(&eeprom.lock);
         return -EFAULT;
       }
 #ifdef EEPROM_ADAPTIVE_TIMING      
@@ -742,12 +651,11 @@ static ssize_t eeprom_write(struct file * file, const char * buf, size_t count,
     } /* while */
   } /* for  */
 
-  eeprom.busy--;
-  wake_up_interruptible(&eeprom.wait_q);
-  if (written == 0 && file->f_pos >= eeprom.size){
+  mutex_unlock(&eeprom.lock);
+  if (written == 0 && p >= eeprom.size){
     return -ENOSPC;
   }
-  file->f_pos += written;
+  *off = p;
   return written;
 }
 
@@ -941,5 +849,4 @@ static void eeprom_disable_write_protect(void)
     /* Write protect disabled */
   }
 }
-
-module_init(eeprom_init);
+device_initcall(eeprom_init);

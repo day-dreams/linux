@@ -4,7 +4,6 @@
 
 
 #include <linux/module.h>
-#include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/errno.h>
@@ -16,9 +15,9 @@
 #include <linux/capability.h>
 #include <linux/atm_idt77105.h>
 #include <linux/spinlock.h>
-#include <asm/system.h>
+#include <linux/slab.h>
 #include <asm/param.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include "idt77105.h"
 
@@ -46,14 +45,12 @@ static DEFINE_SPINLOCK(idt77105_priv_lock);
 #define PUT(val,reg) dev->ops->phy_put(dev,val,IDT77105_##reg)
 #define GET(reg) dev->ops->phy_get(dev,IDT77105_##reg)
 
-static void idt77105_stats_timer_func(unsigned long);
-static void idt77105_restart_timer_func(unsigned long);
+static void idt77105_stats_timer_func(struct timer_list *);
+static void idt77105_restart_timer_func(struct timer_list *);
 
 
-static struct timer_list stats_timer =
-    TIMER_INITIALIZER(idt77105_stats_timer_func, 0, 0);
-static struct timer_list restart_timer =
-    TIMER_INITIALIZER(idt77105_restart_timer_func, 0, 0);
+static DEFINE_TIMER(stats_timer, idt77105_stats_timer_func);
+static DEFINE_TIMER(restart_timer, idt77105_restart_timer_func);
 static int start_timer = 1;
 static struct idt77105_priv *idt77105_all = NULL;
 
@@ -83,7 +80,7 @@ static u16 get_counter(struct atm_dev *dev, int counter)
  * a separate copy of the stats allows implementation of
  * an ioctl which gathers the stats *without* zero'ing them.
  */
-static void idt77105_stats_timer_func(unsigned long dummy)
+static void idt77105_stats_timer_func(struct timer_list *unused)
 {
 	struct idt77105_priv *walk;
 	struct atm_dev *dev;
@@ -112,7 +109,7 @@ static void idt77105_stats_timer_func(unsigned long dummy)
  * interrupts need to be disabled when the cable is pulled out
  * to avoid lots of spurious cell error interrupts.
  */
-static void idt77105_restart_timer_func(unsigned long dummy)
+static void idt77105_restart_timer_func(struct timer_list *unused)
 {
 	struct idt77105_priv *walk;
 	struct atm_dev *dev;
@@ -128,7 +125,7 @@ static void idt77105_restart_timer_func(unsigned long dummy)
                 istat = GET(ISTAT); /* side effect: clears all interrupt status bits */
                 if (istat & IDT77105_ISTAT_GOODSIG) {
                     /* Found signal again */
-                    dev->signal = ATM_PHY_SIG_FOUND;
+                    atm_dev_signal_change(dev, ATM_PHY_SIG_FOUND);
 	            printk(KERN_NOTICE "%s(itf %d): signal detected again\n",
                         dev->type,dev->number);
                     /* flush the receive FIFO */
@@ -153,7 +150,7 @@ static int fetch_stats(struct atm_dev *dev,struct idt77105_stats __user *arg,int
 	spin_unlock_irqrestore(&idt77105_priv_lock, flags);
 	if (arg == NULL)
 		return 0;
-	return copy_to_user(arg, &PRIV(dev)->stats,
+	return copy_to_user(arg, &stats,
 		    sizeof(struct idt77105_stats)) ? -EFAULT : 0;
 }
 
@@ -224,7 +221,7 @@ static void idt77105_int(struct atm_dev *dev)
             /* Rx Signal Condition Change - line went up or down */
             if (istat & IDT77105_ISTAT_GOODSIG) {   /* signal detected again */
                 /* This should not happen (restart timer does it) but JIC */
-                dev->signal = ATM_PHY_SIG_FOUND;
+		atm_dev_signal_change(dev, ATM_PHY_SIG_FOUND);
             } else {    /* signal lost */
                 /*
                  * Disable interrupts and stop all transmission and
@@ -237,7 +234,7 @@ static void idt77105_int(struct atm_dev *dev)
                     IDT77105_MCR_DRIC|
                     IDT77105_MCR_HALTTX
                     ) & ~IDT77105_MCR_EIP, MCR);
-                dev->signal = ATM_PHY_SIG_LOST;
+		atm_dev_signal_change(dev, ATM_PHY_SIG_LOST);
 	        printk(KERN_NOTICE "%s(itf %d): signal lost\n",
                     dev->type,dev->number);
             }
@@ -274,8 +271,9 @@ static int idt77105_start(struct atm_dev *dev)
 	memset(&PRIV(dev)->stats,0,sizeof(struct idt77105_stats));
         
         /* initialise dev->signal from Good Signal Bit */
-        dev->signal = GET(ISTAT) & IDT77105_ISTAT_GOODSIG ? ATM_PHY_SIG_FOUND :
-	  ATM_PHY_SIG_LOST;
+	atm_dev_signal_change(dev,
+		GET(ISTAT) & IDT77105_ISTAT_GOODSIG ?
+		ATM_PHY_SIG_FOUND : ATM_PHY_SIG_LOST);
 	if (dev->signal == ATM_PHY_SIG_LOST)
 		printk(KERN_WARNING "%s(itf %d): no signal\n",dev->type,
 		    dev->number);
@@ -308,14 +306,10 @@ static int idt77105_start(struct atm_dev *dev)
 	if (start_timer) {
 		start_timer = 0;
                 
-		init_timer(&stats_timer);
 		stats_timer.expires = jiffies+IDT77105_STATS_TIMER_PERIOD;
-		stats_timer.function = idt77105_stats_timer_func;
 		add_timer(&stats_timer);
                 
-		init_timer(&restart_timer);
 		restart_timer.expires = jiffies+IDT77105_RESTART_TIMER_PERIOD;
-		restart_timer.function = idt77105_restart_timer_func;
 		add_timer(&restart_timer);
 	}
 	spin_unlock_irqrestore(&idt77105_priv_lock, flags);
@@ -370,9 +364,9 @@ EXPORT_SYMBOL(idt77105_init);
 
 static void __exit idt77105_exit(void)
 {
-        /* turn off timers */
-        del_timer(&stats_timer);
-        del_timer(&restart_timer);
+	/* turn off timers */
+	del_timer_sync(&stats_timer);
+	del_timer_sync(&restart_timer);
 }
 
 module_exit(idt77105_exit);

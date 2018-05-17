@@ -21,19 +21,15 @@
 #ifndef __SEQ_OSS_DEVICE_H
 #define __SEQ_OSS_DEVICE_H
 
-#include <sound/driver.h>
 #include <linux/time.h>
 #include <linux/wait.h>
 #include <linux/slab.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <sound/core.h>
 #include <sound/seq_oss.h>
 #include <sound/rawmidi.h>
 #include <sound/seq_kernel.h>
 #include <sound/info.h>
-
-/* enable debug print */
-#define SNDRV_SEQ_OSS_DEBUG
 
 /* max. applications */
 #define SNDRV_SEQ_OSS_MAX_CLIENTS	16
@@ -47,7 +43,6 @@
 #define SNDRV_SEQ_OSS_VERSION_STR	"0.1.8"
 
 /* device and proc interface name */
-#define SNDRV_SEQ_OSS_DEVNAME		"seq_oss"
 #define SNDRV_SEQ_OSS_PROCNAME		"oss"
 
 
@@ -55,32 +50,24 @@
  * type definitions
  */
 
-typedef struct seq_oss_devinfo_t seq_oss_devinfo_t;
-typedef struct seq_oss_writeq_t seq_oss_writeq_t;
-typedef struct seq_oss_readq_t seq_oss_readq_t;
-typedef struct seq_oss_timer_t seq_oss_timer_t;
-typedef struct seq_oss_synthinfo_t seq_oss_synthinfo_t;
-typedef struct seq_oss_synth_sysex_t seq_oss_synth_sysex_t;
-typedef struct seq_oss_chinfo_t seq_oss_chinfo_t;
 typedef unsigned int reltime_t;
 typedef unsigned int abstime_t;
-typedef union evrec_t evrec_t;
 
 
 /*
  * synthesizer channel information
  */
-struct seq_oss_chinfo_t {
+struct seq_oss_chinfo {
 	int note, vel;
 };
 
 /*
  * synthesizer information
  */
-struct seq_oss_synthinfo_t {
-	snd_seq_oss_arg_t arg;
-	seq_oss_chinfo_t *ch;
-	seq_oss_synth_sysex_t *sysex;
+struct seq_oss_synthinfo {
+	struct snd_seq_oss_arg arg;
+	struct seq_oss_chinfo *ch;
+	struct seq_oss_synth_sysex *sysex;
 	int nr_voices;
 	int opened;
 	int is_midi;
@@ -92,14 +79,14 @@ struct seq_oss_synthinfo_t {
  * sequencer client information
  */
 
-struct seq_oss_devinfo_t {
+struct seq_oss_devinfo {
 
 	int index;	/* application index */
 	int cseq;	/* sequencer client number */
 	int port;	/* sequencer port number */
 	int queue;	/* sequencer queue number */
 
-	snd_seq_addr_t addr;	/* address of this device */
+	struct snd_seq_addr addr;	/* address of this device */
 
 	int seq_mode;	/* sequencer mode */
 	int file_mode;	/* file access */
@@ -109,17 +96,17 @@ struct seq_oss_devinfo_t {
 
 	/* synth device table */
 	int max_synthdev;
-	seq_oss_synthinfo_t synths[SNDRV_SEQ_OSS_MAX_SYNTH_DEVS];
+	struct seq_oss_synthinfo synths[SNDRV_SEQ_OSS_MAX_SYNTH_DEVS];
 	int synth_opened;
 
 	/* output queue */
-	seq_oss_writeq_t *writeq;
+	struct seq_oss_writeq *writeq;
 
 	/* midi input queue */
-	seq_oss_readq_t *readq;
+	struct seq_oss_readq *readq;
 
 	/* timer */
-	seq_oss_timer_t *timer;
+	struct seq_oss_timer *timer;
 };
 
 
@@ -133,24 +120,23 @@ int snd_seq_oss_delete_client(void);
 
 /* device file interface */
 int snd_seq_oss_open(struct file *file, int level);
-void snd_seq_oss_release(seq_oss_devinfo_t *dp);
-int snd_seq_oss_ioctl(seq_oss_devinfo_t *dp, unsigned int cmd, unsigned long arg);
-int snd_seq_oss_read(seq_oss_devinfo_t *dev, char __user *buf, int count);
-int snd_seq_oss_write(seq_oss_devinfo_t *dp, const char __user *buf, int count, struct file *opt);
-unsigned int snd_seq_oss_poll(seq_oss_devinfo_t *dp, struct file *file, poll_table * wait);
+void snd_seq_oss_release(struct seq_oss_devinfo *dp);
+int snd_seq_oss_ioctl(struct seq_oss_devinfo *dp, unsigned int cmd, unsigned long arg);
+int snd_seq_oss_read(struct seq_oss_devinfo *dev, char __user *buf, int count);
+int snd_seq_oss_write(struct seq_oss_devinfo *dp, const char __user *buf, int count, struct file *opt);
+__poll_t snd_seq_oss_poll(struct seq_oss_devinfo *dp, struct file *file, poll_table * wait);
 
-void snd_seq_oss_reset(seq_oss_devinfo_t *dp);
-void snd_seq_oss_drain_write(seq_oss_devinfo_t *dp);
+void snd_seq_oss_reset(struct seq_oss_devinfo *dp);
 
 /* */
-void snd_seq_oss_process_queue(seq_oss_devinfo_t *dp, abstime_t time);
+void snd_seq_oss_process_queue(struct seq_oss_devinfo *dp, abstime_t time);
 
 
 /* proc interface */
-void snd_seq_oss_system_info_read(snd_info_buffer_t *buf);
-void snd_seq_oss_midi_info_read(snd_info_buffer_t *buf);
-void snd_seq_oss_synth_info_read(snd_info_buffer_t *buf);
-void snd_seq_oss_readq_info_read(seq_oss_readq_t *q, snd_info_buffer_t *buf);
+void snd_seq_oss_system_info_read(struct snd_info_buffer *buf);
+void snd_seq_oss_midi_info_read(struct snd_info_buffer *buf);
+void snd_seq_oss_synth_info_read(struct snd_info_buffer *buf);
+void snd_seq_oss_readq_info_read(struct seq_oss_readq *q, struct snd_info_buffer *buf);
 
 /* file mode macros */
 #define is_read_mode(mode)	((mode) & SNDRV_SEQ_OSS_FILE_READ)
@@ -158,22 +144,22 @@ void snd_seq_oss_readq_info_read(seq_oss_readq_t *q, snd_info_buffer_t *buf);
 #define is_nonblock_mode(mode)	((mode) & SNDRV_SEQ_OSS_FILE_NONBLOCK)
 
 /* dispatch event */
-inline static int
-snd_seq_oss_dispatch(seq_oss_devinfo_t *dp, snd_seq_event_t *ev, int atomic, int hop)
+static inline int
+snd_seq_oss_dispatch(struct seq_oss_devinfo *dp, struct snd_seq_event *ev, int atomic, int hop)
 {
 	return snd_seq_kernel_client_dispatch(dp->cseq, ev, atomic, hop);
 }
 
 /* ioctl */
-inline static int
-snd_seq_oss_control(seq_oss_devinfo_t *dp, unsigned int type, void *arg)
+static inline int
+snd_seq_oss_control(struct seq_oss_devinfo *dp, unsigned int type, void *arg)
 {
 	return snd_seq_kernel_client_ctl(dp->cseq, type, arg);
 }
 
 /* fill the addresses in header */
-inline static void
-snd_seq_oss_fill_addr(seq_oss_devinfo_t *dp, snd_seq_event_t *ev,
+static inline void
+snd_seq_oss_fill_addr(struct seq_oss_devinfo *dp, struct snd_seq_event *ev,
 		     int dest_client, int dest_port)
 {
 	ev->queue = dp->queue;
@@ -185,14 +171,5 @@ snd_seq_oss_fill_addr(seq_oss_devinfo_t *dp, snd_seq_event_t *ev,
 
 /* misc. functions for proc interface */
 char *enabled_str(int bool);
-
-
-/* for debug */
-#ifdef SNDRV_SEQ_OSS_DEBUG
-extern int seq_oss_debug;
-#define debug_printk(x)	do { if (seq_oss_debug > 0) snd_printk x; } while (0)
-#else
-#define debug_printk(x)	/**/
-#endif
 
 #endif /* __SEQ_OSS_DEVICE_H */

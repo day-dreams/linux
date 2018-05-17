@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Driver for the ADB controller in the Mac I/O (Hydra) chip.
  */
@@ -6,7 +7,6 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
-#include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/interrupt.h>
 #include <asm/prom.h>
@@ -15,8 +15,8 @@
 #include <asm/pgtable.h>
 #include <asm/hydra.h>
 #include <asm/irq.h>
-#include <asm/system.h>
 #include <linux/init.h>
+#include <linux/ioport.h>
 
 struct preg {
 	unsigned char r;
@@ -63,7 +63,7 @@ static DEFINE_SPINLOCK(macio_lock);
 
 static int macio_probe(void);
 static int macio_init(void);
-static irqreturn_t macio_adb_interrupt(int irq, void *arg, struct pt_regs *regs);
+static irqreturn_t macio_adb_interrupt(int irq, void *arg);
 static int macio_send_request(struct adb_request *req, int sync);
 static int macio_adb_autopoll(int devs);
 static void macio_adb_poll(void);
@@ -82,30 +82,31 @@ struct adb_driver macio_adb_driver = {
 
 int macio_probe(void)
 {
-	return find_compatible_devices("adb", "chrp,adb0")? 0: -ENODEV;
+	struct device_node *np;
+
+	np = of_find_compatible_node(NULL, "adb", "chrp,adb0");
+	if (np) {
+		of_node_put(np);
+		return 0;
+	}
+	return -ENODEV;
 }
 
 int macio_init(void)
 {
 	struct device_node *adbs;
+	struct resource r;
+	unsigned int irq;
 
-	adbs = find_compatible_devices("adb", "chrp,adb0");
+	adbs = of_find_compatible_node(NULL, "adb", "chrp,adb0");
 	if (adbs == 0)
 		return -ENXIO;
 
-#if 0
-	{ int i;
-
-	printk("macio_adb_init: node = %p, addrs =", adbs->node);
-	for (i = 0; i < adbs->n_addrs; ++i)
-		printk(" %x(%x)", adbs->addrs[i].address, adbs->addrs[i].size);
-	printk(", intrs =");
-	for (i = 0; i < adbs->n_intrs; ++i)
-		printk(" %x", adbs->intrs[i].line);
-	printk("\n"); }
-#endif
-	
-	adb = ioremap(adbs->addrs->address, sizeof(struct adb_regs));
+	if (of_address_to_resource(adbs, 0, &r)) {
+		of_node_put(adbs);
+		return -ENXIO;
+	}
+	adb = ioremap(r.start, sizeof(struct adb_regs));
 
 	out_8(&adb->ctrl.r, 0);
 	out_8(&adb->intr.r, 0);
@@ -114,10 +115,10 @@ int macio_init(void)
 	out_8(&adb->active_lo.r, 0xff);
 	out_8(&adb->autopoll.r, APE);
 
-	if (request_irq(adbs->intrs[0].line, macio_adb_interrupt,
-			0, "ADB", (void *)0)) {
-		printk(KERN_ERR "ADB: can't get irq %d\n",
-		       adbs->intrs[0].line);
+	irq = irq_of_parse_and_map(adbs, 0);
+	of_node_put(adbs);
+	if (request_irq(irq, macio_adb_interrupt, 0, "ADB", (void *)0)) {
+		printk(KERN_ERR "ADB: can't get irq %d\n", irq);
 		return -EAGAIN;
 	}
 	out_8(&adb->intr_enb.r, DFB | TAG);
@@ -146,7 +147,7 @@ static int macio_adb_reset_bus(void)
 
 	/* Hrm... we may want to not lock interrupts for so
 	 * long ... oh well, who uses that chip anyway ? :)
-	 * That function will be seldomly used during boot
+	 * That function will be seldom used during boot
 	 * on rare machines, so...
 	 */
 	spin_lock_irqsave(&macio_lock, flags);
@@ -154,6 +155,7 @@ static int macio_adb_reset_bus(void)
 	while ((in_8(&adb->ctrl.r) & ADB_RST) != 0) {
 		if (--timeout == 0) {
 			out_8(&adb->ctrl.r, in_8(&adb->ctrl.r) & ~ADB_RST);
+			spin_unlock_irqrestore(&macio_lock, flags);
 			return -1;
 		}
 	}
@@ -197,8 +199,7 @@ static int macio_send_request(struct adb_request *req, int sync)
 	return 0;
 }
 
-static irqreturn_t macio_adb_interrupt(int irq, void *arg,
-				       struct pt_regs *regs)
+static irqreturn_t macio_adb_interrupt(int irq, void *arg)
 {
 	int i, n, err;
 	struct adb_request *req = NULL;
@@ -268,7 +269,7 @@ static irqreturn_t macio_adb_interrupt(int irq, void *arg,
 		(*done)(req);
 	}
 	if (ibuf_len)
-		adb_input(ibuf, ibuf_len, regs, autopoll);
+		adb_input(ibuf, ibuf_len, autopoll);
 
 	return IRQ_RETVAL(handled);
 }
@@ -279,6 +280,6 @@ static void macio_adb_poll(void)
 
 	local_irq_save(flags);
 	if (in_8(&adb->intr.r) != 0)
-		macio_adb_interrupt(0, NULL, NULL);
+		macio_adb_interrupt(0, NULL);
 	local_irq_restore(flags);
 }

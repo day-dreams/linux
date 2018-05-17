@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/ia64/hp/sim/boot/bootloader.c
  *
@@ -11,7 +12,6 @@
  */
 struct task_struct;	/* forward declaration for elf.h */
 
-#include <linux/config.h>
 #include <linux/elf.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -21,7 +21,6 @@ struct task_struct;	/* forward declaration for elf.h */
 #include <asm/pal.h>
 #include <asm/pgtable.h>
 #include <asm/sal.h>
-#include <asm/system.h>
 
 #include "ssc.h"
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/arm/mach-ebsa110/isamem.c
  *
@@ -23,11 +24,12 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
+#include <mach/hardware.h>
 #include <asm/page.h>
 
-static void __iomem *__isamem_convert_addr(void __iomem *addr)
+static void __iomem *__isamem_convert_addr(const volatile void __iomem *addr)
 {
 	u32 ret, a = (u32 __force) addr;
 
@@ -62,7 +64,7 @@ static void __iomem *__isamem_convert_addr(void __iomem *addr)
 /*
  * read[bwl] and write[bwl]
  */
-u8 __readb(void __iomem *addr)
+u8 __readb(const volatile void __iomem *addr)
 {
 	void __iomem *a = __isamem_convert_addr(addr);
 	u32 ret;
@@ -74,7 +76,7 @@ u8 __readb(void __iomem *addr)
 	return ret;
 }
 
-u16 __readw(void __iomem *addr)
+u16 __readw(const volatile void __iomem *addr)
 {
 	void __iomem *a = __isamem_convert_addr(addr);
 
@@ -84,7 +86,7 @@ u16 __readw(void __iomem *addr)
 	return __raw_readw(a);
 }
 
-u32 __readl(void __iomem *addr)
+u32 __readl(const volatile void __iomem *addr)
 {
 	void __iomem *a = __isamem_convert_addr(addr);
 	u32 ret;
@@ -101,7 +103,27 @@ EXPORT_SYMBOL(__readb);
 EXPORT_SYMBOL(__readw);
 EXPORT_SYMBOL(__readl);
 
-void __writeb(u8 val, void __iomem *addr)
+void readsw(const volatile void __iomem *addr, void *data, int len)
+{
+	void __iomem *a = __isamem_convert_addr(addr);
+
+	BUG_ON((unsigned long)addr & 1);
+
+	__raw_readsw(a, data, len);
+}
+EXPORT_SYMBOL(readsw);
+
+void readsl(const volatile void __iomem *addr, void *data, int len)
+{
+	void __iomem *a = __isamem_convert_addr(addr);
+
+	BUG_ON((unsigned long)addr & 3);
+
+	__raw_readsl(a, data, len);
+}
+EXPORT_SYMBOL(readsl);
+
+void __writeb(u8 val, volatile void __iomem *addr)
 {
 	void __iomem *a = __isamem_convert_addr(addr);
 
@@ -111,7 +133,7 @@ void __writeb(u8 val, void __iomem *addr)
 		__raw_writeb(val, a);
 }
 
-void __writew(u16 val, void __iomem *addr)
+void __writew(u16 val, volatile void __iomem *addr)
 {
 	void __iomem *a = __isamem_convert_addr(addr);
 
@@ -121,7 +143,7 @@ void __writew(u16 val, void __iomem *addr)
 	__raw_writew(val, a);
 }
 
-void __writel(u32 val, void __iomem *addr)
+void __writel(u32 val, volatile void __iomem *addr)
 {
 	void __iomem *a = __isamem_convert_addr(addr);
 
@@ -136,6 +158,46 @@ EXPORT_SYMBOL(__writeb);
 EXPORT_SYMBOL(__writew);
 EXPORT_SYMBOL(__writel);
 
+void writesw(volatile void __iomem *addr, const void *data, int len)
+{
+	void __iomem *a = __isamem_convert_addr(addr);
+
+	BUG_ON((unsigned long)addr & 1);
+
+	__raw_writesw(a, data, len);
+}
+EXPORT_SYMBOL(writesw);
+
+void writesl(volatile void __iomem *addr, const void *data, int len)
+{
+	void __iomem *a = __isamem_convert_addr(addr);
+
+	BUG_ON((unsigned long)addr & 3);
+
+	__raw_writesl(a, data, len);
+}
+EXPORT_SYMBOL(writesl);
+
+/*
+ * The EBSA110 has a weird "ISA IO" region:
+ *
+ * Region 0 (addr = 0xf0000000 + io << 2)
+ * --------------------------------------------------------
+ * Physical region	IO region
+ * f0000fe0 - f0000ffc	3f8 - 3ff  ttyS0
+ * f0000e60 - f0000e64	398 - 399
+ * f0000de0 - f0000dfc	378 - 37f  lp0
+ * f0000be0 - f0000bfc	2f8 - 2ff  ttyS1
+ *
+ * Region 1 (addr = 0xf0000000 + (io & ~1) << 1 + (io & 1))
+ * --------------------------------------------------------
+ * Physical region	IO region
+ * f00014f1             a79        pnp write data
+ * f00007c0 - f00007c1	3e0 - 3e1  pcmcia
+ * f00004f1		279        pnp address
+ * f0000440 - f000046c  220 - 236  eth0
+ * f0000405		203        pnp read data
+ */
 #define SUPERIO_PORT(p) \
 	(((p) >> 3) == (0x3f8 >> 3) || \
 	 ((p) >> 3) == (0x2f8 >> 3) || \
@@ -153,9 +215,9 @@ u8 __inb8(unsigned int port)
 	 * The SuperIO registers use sane addressing techniques...
 	 */
 	if (SUPERIO_PORT(port))
-		ret = __raw_readb(ISAIO_BASE + (port << 2));
+		ret = __raw_readb((void __iomem *)ISAIO_BASE + (port << 2));
 	else {
-		void __iomem *a = ISAIO_BASE + ((port & ~1) << 1);
+		void __iomem *a = (void __iomem *)ISAIO_BASE + ((port & ~1) << 1);
 
 		/*
 		 * Shame nothing else does
@@ -174,45 +236,33 @@ u8 __inb8(unsigned int port)
  */
 u8 __inb16(unsigned int port)
 {
-	u32 ret;
+	unsigned int offset;
 
 	/*
 	 * The SuperIO registers use sane addressing techniques...
 	 */
 	if (SUPERIO_PORT(port))
-		ret = __raw_readb(ISAIO_BASE + (port << 2));
-	else {
-		void __iomem *a = ISAIO_BASE + ((port & ~1) << 1);
+		offset = port << 2;
+	else
+		offset = (port & ~1) << 1 | (port & 1);
 
-		/*
-		 * Shame nothing else does
-		 */
-		ret = __raw_readb(a + (port & 1));
-	}
-	return ret;
+	return __raw_readb((void __iomem *)ISAIO_BASE + offset);
 }
 
 u16 __inw(unsigned int port)
 {
-	u32 ret;
+	unsigned int offset;
 
 	/*
 	 * The SuperIO registers use sane addressing techniques...
 	 */
 	if (SUPERIO_PORT(port))
-		ret = __raw_readw(ISAIO_BASE + (port << 2));
+		offset = port << 2;
 	else {
-		void __iomem *a = ISAIO_BASE + ((port & ~1) << 1);
-
-		/*
-		 * Shame nothing else does
-		 */
-		if (port & 1)
-			BUG();
-
-		ret = __raw_readw(a);
+		offset = port << 1;
+		BUG_ON(port & 1);
 	}
-	return ret;
+	return __raw_readw((void __iomem *)ISAIO_BASE + offset);
 }
 
 /*
@@ -225,7 +275,7 @@ u32 __inl(unsigned int port)
 	if (SUPERIO_PORT(port) || port & 3)
 		BUG();
 
-	a = ISAIO_BASE + (port << 1);
+	a = (void __iomem *)ISAIO_BASE + ((port & ~1) << 1);
 
 	return __raw_readw(a) | __raw_readw(a + 4) << 16;
 }
@@ -241,9 +291,9 @@ void __outb8(u8 val, unsigned int port)
 	 * The SuperIO registers use sane addressing techniques...
 	 */
 	if (SUPERIO_PORT(port))
-		__raw_writeb(val, ISAIO_BASE + (port << 2));
+		__raw_writeb(val, (void __iomem *)ISAIO_BASE + (port << 2));
 	else {
-		void __iomem *a = ISAIO_BASE + ((port & ~1) << 1);
+		void __iomem *a = (void __iomem *)ISAIO_BASE + ((port & ~1) << 1);
 
 		/*
 		 * Shame nothing else does
@@ -257,37 +307,33 @@ void __outb8(u8 val, unsigned int port)
 
 void __outb16(u8 val, unsigned int port)
 {
+	unsigned int offset;
+
 	/*
 	 * The SuperIO registers use sane addressing techniques...
 	 */
 	if (SUPERIO_PORT(port))
-		__raw_writeb(val, ISAIO_BASE + (port << 2));
-	else {
-		void __iomem *a = ISAIO_BASE + ((port & ~1) << 1);
+		offset = port << 2;
+	else
+		offset = (port & ~1) << 1 | (port & 1);
 
-		/*
-		 * Shame nothing else does
-		 */
-		__raw_writeb(val, a + (port & 1));
-	}
+	__raw_writeb(val, (void __iomem *)ISAIO_BASE + offset);
 }
 
 void __outw(u16 val, unsigned int port)
 {
-	u32 off;
+	unsigned int offset;
 
 	/*
 	 * The SuperIO registers use sane addressing techniques...
 	 */
 	if (SUPERIO_PORT(port))
-		off = port << 2;
+		offset = port << 2;
 	else {
-		off = port << 1;
-		if (port & 1)
-			BUG();
-
+		offset = port << 1;
+		BUG_ON(port & 1);
 	}
-	__raw_writew(val, ISAIO_BASE + off);
+	__raw_writew(val, (void __iomem *)ISAIO_BASE + offset);
 }
 
 void __outl(u32 val, unsigned int port)
@@ -299,13 +345,6 @@ EXPORT_SYMBOL(__outb8);
 EXPORT_SYMBOL(__outb16);
 EXPORT_SYMBOL(__outw);
 EXPORT_SYMBOL(__outl);
-
-extern void __arch_writesb(unsigned long virt, const void *from, int len);
-extern void __arch_writesw(unsigned long virt, const void *from, int len);
-extern void __arch_writesl(unsigned long virt, const void *from, int len);
-extern void __arch_readsb(unsigned long virt, void *from, int len);
-extern void __arch_readsw(unsigned long virt, void *from, int len);
-extern void __arch_readsl(unsigned long virt, void *from, int len);
 
 void outsb(unsigned int port, const void *from, int len)
 {
@@ -319,7 +358,7 @@ void outsb(unsigned int port, const void *from, int len)
 			BUG();
 	}
 
-	__raw_writesb(ISAIO_BASE + off, from, len);
+	__raw_writesb((void __iomem *)ISAIO_BASE + off, from, len);
 }
 
 void insb(unsigned int port, void *from, int len)
@@ -334,7 +373,7 @@ void insb(unsigned int port, void *from, int len)
 			BUG();
 	}
 
-	__raw_readsb(ISAIO_BASE + off, from, len);
+	__raw_readsb((void __iomem *)ISAIO_BASE + off, from, len);
 }
 
 EXPORT_SYMBOL(outsb);
@@ -352,7 +391,7 @@ void outsw(unsigned int port, const void *from, int len)
 			BUG();
 	}
 
-	__raw_writesw(ISAIO_BASE + off, from, len);
+	__raw_writesw((void __iomem *)ISAIO_BASE + off, from, len);
 }
 
 void insw(unsigned int port, void *from, int len)
@@ -367,7 +406,7 @@ void insw(unsigned int port, void *from, int len)
 			BUG();
 	}
 
-	__raw_readsw(ISAIO_BASE + off, from, len);
+	__raw_readsw((void __iomem *)ISAIO_BASE + off, from, len);
 }
 
 EXPORT_SYMBOL(outsw);
@@ -384,7 +423,7 @@ void outsl(unsigned int port, const void *from, int len)
 	if (SUPERIO_PORT(port) || port & 3)
 		BUG();
 
-	__raw_writesw(ISAIO_BASE + off, from, len << 1);
+	__raw_writesw((void __iomem *)ISAIO_BASE + off, from, len << 1);
 }
 
 void insl(unsigned int port, void *from, int len)
@@ -394,7 +433,7 @@ void insl(unsigned int port, void *from, int len)
 	if (SUPERIO_PORT(port) || port & 3)
 		BUG();
 
-	__raw_readsw(ISAIO_BASE + off, from, len << 1);
+	__raw_readsw((void __iomem *)ISAIO_BASE + off, from, len << 1);
 }
 
 EXPORT_SYMBOL(outsl);

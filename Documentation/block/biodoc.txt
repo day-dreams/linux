@@ -2,12 +2,12 @@
 	=====================================================
 
 Notes Written on Jan 15, 2002:
-	Jens Axboe <axboe@suse.de>
+	Jens Axboe <jens.axboe@oracle.com>
 	Suparna Bhattacharya <suparna@in.ibm.com>
 
 Last Updated May 2, 2002
 September 2003: Updated I/O Scheduler portions
-	Nick Piggin <piggin@cyberone.com.au>
+	Nick Piggin <npiggin@kernel.dk>
 
 Introduction:
 
@@ -21,7 +21,7 @@ Credits:
 ---------
 
 2.5 bio rewrite:
-	Jens Axboe <axboe@suse.de>
+	Jens Axboe <jens.axboe@oracle.com>
 
 Many aspects of the generic block layer redesign were driven by and evolved
 over discussions, prior patches and the collective experience of several
@@ -31,7 +31,7 @@ The following people helped with review comments and inputs for this
 document:
 	Christoph Hellwig <hch@infradead.org>
 	Arjan van de Ven <arjanv@redhat.com>
-	Randy Dunlap <rddunlap@osdl.org>
+	Randy Dunlap <rdunlap@xenotime.net>
 	Andre Hedrick <andre@linux-ide.org>
 
 The following people helped with fixes/contributions to the bio patches
@@ -48,8 +48,7 @@ Description of Contents:
 	- Highmem I/O support
 	- I/O scheduler modularization
   1.2 Tuning based on high level requirements/capabilities
-	1.2.1 I/O Barriers
-	1.2.2 Request Priority/Latency
+	1.2.1 Request Priority/Latency
   1.3 Direct access/bypass to lower layers for diagnostics and special
       device operations
 	1.3.1 Pre-built commands
@@ -116,7 +115,7 @@ i. Per-queue limits/values exported to the generic layer by the driver
 
 Various parameters that the generic i/o scheduler logic uses are set at
 a per-queue level (e.g maximum request size, maximum number of segments in
-a scatter-gather list, hardsect size)
+a scatter-gather list, logical block size)
 
 Some parameters that were earlier available as global arrays indexed by
 major/minor are now directly associated with the queue. Some of these may
@@ -132,8 +131,18 @@ Some new queue property settings:
 		limit. No highmem default.
 
 	blk_queue_max_sectors(q, max_sectors)
-		Maximum size request you can handle in units of 512 byte
-		sectors. 255 default.
+		Sets two variables that limit the size of the request.
+
+		- The request queue's max_sectors, which is a soft size in
+		units of 512 byte sectors, and could be dynamically varied
+		by the core kernel.
+
+		- The request queue's max_hw_sectors, which is a hard limit
+		and reflects the maximum size request a driver can handle
+		in units of 512 byte sectors.
+
+		The default for both max_sectors and max_hw_sectors is
+		255. The upper limit of max_sectors is 1024.
 
 	blk_queue_max_phys_segments(q, max_segments)
 		Maximum physical segments you can handle in a request. 128
@@ -147,7 +156,7 @@ Some new queue property settings:
 	blk_queue_max_segment_size(q, max_seg_size)
 		Maximum size of a clustered segment, 64kB default.
 
-	blk_queue_hardsect_size(q, hardsect_size)
+	blk_queue_logical_block_size(q, logical_block_size)
 		Lowest possible sector size that the hardware can operate
 		on, 512 bytes default.
 
@@ -173,11 +182,12 @@ it, the pci dma mapping routines and associated data structures have now been
 modified to accomplish a direct page -> bus translation, without requiring
 a virtual address mapping (unlike the earlier scheme of virtual address
 -> bus translation). So this works uniformly for high-memory pages (which
-do not have a correponding kernel virtual address space mapping) and
+do not have a corresponding kernel virtual address space mapping) and
 low-memory pages.
 
-Note: Please refer to DMA-mapping.txt for a discussion on PCI high mem DMA
-aspects and mapping of scatter gather lists, and support for 64 bit PCI.
+Note: Please refer to Documentation/DMA-API-HOWTO.txt for a discussion
+on PCI high mem DMA aspects and mapping of scatter gather lists, and support
+for 64 bit PCI.
 
 Special handling is required only for cases where i/o needs to happen on
 pages at physical memory addresses beyond what the device can support. In these
@@ -206,10 +216,9 @@ may need to abort DMA operations and revert to PIO for the transfer, in
 which case a virtual mapping of the page is required. For SCSI it is also
 done in some scenarios where the low level driver cannot be trusted to
 handle a single sg entry correctly. The driver is expected to perform the
-kmaps as needed on such occasions using the __bio_kmap_atomic and bio_kmap_irq
-routines as appropriate. A driver could also use the blk_queue_bounce()
-routine on its own to bounce highmem i/o to low memory for specific requests
-if so desired.
+kmaps as needed on such occasions as appropriate. A driver could also use
+the blk_queue_bounce() routine on its own to bounce highmem i/o to low
+memory for specific requests if so desired.
 
 iii. The i/o scheduler algorithm itself can be replaced/set as appropriate
 
@@ -244,35 +253,12 @@ some control over i/o ordering.
 What kind of support exists at the generic block layer for this ?
 
 The flags and rw fields in the bio structure can be used for some tuning
-from above e.g indicating that an i/o is just a readahead request, or for
-marking  barrier requests (discussed next), or priority settings (currently
-unused). As far as user applications are concerned they would need an
-additional mechanism either via open flags or ioctls, or some other upper
-level mechanism to communicate such settings to block.
+from above e.g indicating that an i/o is just a readahead request, or priority
+settings (currently unused). As far as user applications are concerned they
+would need an additional mechanism either via open flags or ioctls, or some
+other upper level mechanism to communicate such settings to block.
 
-1.2.1 I/O Barriers
-
-There is a way to enforce strict ordering for i/os through barriers.
-All requests before a barrier point must be serviced before the barrier
-request and any other requests arriving after the barrier will not be
-serviced until after the barrier has completed. This is useful for higher
-level control on write ordering, e.g flushing a log of committed updates
-to disk before the corresponding updates themselves.
-
-A flag in the bio structure, BIO_BARRIER is used to identify a barrier i/o.
-The generic i/o scheduler would make sure that it places the barrier request and
-all other requests coming after it after all the previous requests in the
-queue. Barriers may be implemented in different ways depending on the
-driver. A SCSI driver for example could make use of ordered tags to
-preserve the necessary ordering with a lower impact on throughput. For IDE
-this might be two sync cache flush: a pre and post flush when encountering
-a barrier write.
-
-There is a provision for queues to indicate what kind of barriers they
-can provide. This is as of yet unmerged, details will be added here once it
-is in the kernel.
-
-1.2.2 Request Priority/Latency
+1.2.1 Request Priority/Latency
 
 Todo/Under discussion:
 Arjan's proposed request priority scheme allows higher levels some broad
@@ -282,7 +268,7 @@ Arjan's proposed request priority scheme allows higher levels some broad
   requests which haven't aged too much on the queue. Potentially this priority
   could even be exposed to applications in some manner, providing higher level
   tunability. Time based aging avoids starvation of lower priority
-  requests. Some bits in the bi_rw flags field in the bio structure are
+  requests. Some bits in the bi_opf flags field in the bio structure are
   intended to be used for this priority information.
 
 
@@ -361,7 +347,7 @@ Drivers can now specify a request prepare function (q->prep_rq_fn) that the
 block layer would invoke to pre-build device commands for a given request,
 or perform other preparatory processing for the request. This is routine is
 called by elv_next_request(), i.e. typically just before servicing a request.
-(The prepare function would not be called for requests that have REQ_DONTPREP
+(The prepare function would not be called for requests that have RQF_DONTPREP
 enabled)
 
 Aside:
@@ -387,7 +373,7 @@ forced such requests to be broken up into small chunks before being passed
 on to the generic block layer, only to be merged by the i/o scheduler
 when the underlying device was capable of handling the i/o in one shot.
 Also, using the buffer head as an i/o structure for i/os that didn't originate
-from the buffer cache unecessarily added to the weight of the descriptors
+from the buffer cache unnecessarily added to the weight of the descriptors
 which were generated for each such chunk.
 
 The following were some of the goals and expectations considered in the
@@ -399,14 +385,14 @@ i.  Should be appropriate as a descriptor for both raw and buffered i/o  -
     for raw i/o.
 ii. Ability to represent high-memory buffers (which do not have a virtual
     address mapping in kernel address space).
-iii.Ability to represent large i/os w/o unecessarily breaking them up (i.e
+iii.Ability to represent large i/os w/o unnecessarily breaking them up (i.e
     greater than PAGE_SIZE chunks in one shot)
 iv. At the same time, ability to retain independent identity of i/os from
     different sources or i/o units requiring individual completion (e.g. for
     latency reasons)
 v.  Ability to represent an i/o involving multiple physical memory segments
     (including non-page aligned page fragments, as specified via readv/writev)
-    without unecessarily breaking it up, if the underlying device is capable of
+    without unnecessarily breaking it up, if the underlying device is capable of
     handling it.
 vi. Preferably should be based on a memory descriptor structure that can be
     passed around different types of subsystems or layers, maybe even
@@ -442,14 +428,13 @@ struct bio_vec {
  * main unit of I/O for the block layer and lower layers (ie drivers)
  */
 struct bio {
-       sector_t            bi_sector;
        struct bio          *bi_next;    /* request queue link */
        struct block_device *bi_bdev;	/* target device */
        unsigned long       bi_flags;    /* status, command, etc */
-       unsigned long       bi_rw;       /* low bits: r/w, high: priority */
+       unsigned long       bi_opf;       /* low bits: r/w, high: priority */
 
        unsigned int	bi_vcnt;     /* how may bio_vec's */
-       unsigned int	bi_idx;		/* current index into bio_vec array */
+       struct bvec_iter	bi_iter;	/* current index into bio_vec array */
 
        unsigned int	bi_size;     /* total size in bytes */
        unsigned short 	bi_phys_segments; /* segments after physaddr coalesce*/
@@ -460,7 +445,6 @@ struct bio {
        bio_end_io_t	*bi_end_io;  /* bi_end_io (bio) */
        atomic_t		bi_cnt;	     /* pin count: free when it hits zero */
        void             *bi_private;
-       bio_destructor_t *bi_destructor; /* bi_destructor (bio) */
 };
 
 With this multipage bio design:
@@ -473,10 +457,10 @@ With this multipage bio design:
   the same bi_io_vec array, but with the index and size accordingly modified)
 - A linked list of bios is used as before for unrelated merges (*) - this
   avoids reallocs and makes independent completions easier to handle.
-- Code that traverses the req list needs to make a distinction between
-  segments of a request (bio_for_each_segment) and the distinct completion
-  units/bios (rq_for_each_bio).
-- Drivers which can't process a large bio in one shot can use the bi_idx
+- Code that traverses the req list can find all the segments of a bio
+  by using rq_for_each_segment.  This handles the fact that a request
+  has multiple bios, each of which can have multiple segments.
+- Drivers which can't process a large bio in one shot can use the bi_iter
   field to keep track of the next bio_vec entry to process.
   (e.g a 1MB bio_vec needs to be handled in max 128kB chunks for IDE)
   [TBD: Should preferably also have a bi_voffset and bi_vlen to avoid modifying
@@ -492,7 +476,7 @@ The scatter gather list is in the form of an array of <page, offset, len>
 entries with their corresponding dma address mappings filled in at the
 appropriate time. As an optimization, contiguous physical pages can be
 covered by a single entry where <page> refers to the first page and <len>
-covers the range of pages (upto 16 contiguous pages could be covered this
+covers the range of pages (up to 16 contiguous pages could be covered this
 way). There is a helper routine (blk_rq_map_sg) which drivers can use to build
 the sg list.
 
@@ -560,7 +544,7 @@ struct request {
 	.
 	int tag;	/* command tag associated with request */
 	void *special;  /* same as before */
-	char *buffer;   /* valid only for low memory buffers upto
+	char *buffer;   /* valid only for low memory buffers up to
 			 current_nr_sectors */
 	.
 	.
@@ -568,8 +552,8 @@ struct request {
 	struct request_list *rl;
 }
 	
-See the rq_flag_bits definitions for an explanation of the various flags
-available. Some bits are used by the block layer or i/o scheduler.
+See the req_ops and req_flag_bits definitions for an explanation of the various
+flags available. Some bits are used by the block layer or i/o scheduler.
 	
 The behaviour of the various sector counts are almost the same as before,
 except that since we have multi-segment bios, current_nr_sectors refers
@@ -585,7 +569,7 @@ driver should not modify these values. The block layer sets up the
 nr_sectors and current_nr_sectors fields (based on the corresponding
 hard_xxx values and the number of bytes transferred) and updates it on
 every transfer that invokes end_that_request_first. It does the same for the
-buffer, bio, bio->bi_idx fields too.
+buffer, bio, bio->bi_iter fields too.
 
 The buffer field is just a virtual address mapping of the current segment
 of the i/o buffer in cases where the buffer resides in low-memory. For high
@@ -642,16 +626,12 @@ for a non-clone bio. There are the 6 pools setup for different size biovecs,
 so bio_alloc(gfp_mask, nr_iovecs) will allocate a vec_list of the
 given size from these slabs.
 
-The bi_destructor() routine takes into account the possibility of the bio
-having originated from a different source (see later discussions on
-n/w to block transfers and kvec_cb)
-
 The bio_get() routine may be used to hold an extra reference on a bio prior
 to i/o submission, if the bio fields are likely to be accessed after the
 i/o is issued (since the bio may otherwise get freed in case i/o completion
 happens in the meantime).
 
-The bio_clone() routine may be used to duplicate a bio, where the clone
+The bio_clone_fast() routine may be used to duplicate a bio, where the clone
 shares the bio_vec_list with the original bio (i.e. both point to the
 same bio_vec_list). This would typically be used for splitting i/o requests
 in lvm or md.
@@ -660,14 +640,14 @@ in lvm or md.
 
 3.2.1 Traversing segments and completion units in a request
 
-The macros bio_for_each_segment() and rq_for_each_bio() should be used for
-traversing the bios in the request list (drivers should avoid directly
-trying to do it themselves). Using these helpers should also make it easier
-to cope with block changes in the future.
+The macro rq_for_each_segment() should be used for traversing the bios
+in the request list (drivers should avoid directly trying to do it
+themselves). Using these helpers should also make it easier to cope
+with block changes in the future.
 
-	rq_for_each_bio(bio, rq)
-		bio_for_each_segment(bio_vec, bio, i)
-			/* bio_vec is now current segment */
+	struct req_iterator iter;
+	rq_for_each_segment(bio_vec, rq, iter)
+		/* bio_vec is now current segment */
 
 I/O completion callbacks are per-bio rather than per-segment, so drivers
 that traverse bio chains on completion need to keep that in mind. Drivers
@@ -736,12 +716,12 @@ Block now offers some simple generic functionality to help support command
 queueing (typically known as tagged command queueing), ie manage more than
 one outstanding command on a queue at any given time.
 
-	blk_queue_init_tags(request_queue_t *q, int depth)
+	blk_queue_init_tags(struct request_queue *q, int depth)
 
 	Initialize internal command tagging structures for a maximum
 	depth of 'depth'.
 
-	blk_queue_free_tags((request_queue_t *q)
+	blk_queue_free_tags((struct request_queue *q)
 
 	Teardown tag info associated with the queue. This will be done
 	automatically by block if blk_queue_cleanup() is called on a queue
@@ -750,7 +730,7 @@ one outstanding command on a queue at any given time.
 The above are initialization and exit management, the main helpers during
 normal operations are:
 
-	blk_queue_start_tag(request_queue_t *q, struct request *rq)
+	blk_queue_start_tag(struct request_queue *q, struct request *rq)
 
 	Start tagged operation for this request. A free tag number between
 	0 and 'depth' is assigned to the request (rq->tag holds this number),
@@ -758,7 +738,7 @@ normal operations are:
 	for this queue is already achieved (or if the tag wasn't started for
 	some other reason), 1 is returned. Otherwise 0 is returned.
 
-	blk_queue_end_tag(request_queue_t *q, struct request *rq)
+	blk_queue_end_tag(struct request_queue *q, struct request *rq)
 
 	End tagged operation on this request. 'rq' is removed from the internal
 	book keeping structures.
@@ -777,9 +757,9 @@ queue. For instance, on IDE any tagged request error needs to clear both
 the hardware and software block queue and enable the driver to sanely restart
 all the outstanding requests. There's a third helper to do that:
 
-	blk_queue_invalidate_tags(request_queue_t *q)
+	blk_queue_invalidate_tags(struct request_queue *q)
 
-	Clear the internal block tag queue and readd all the pending requests
+	Clear the internal block tag queue and re-add all the pending requests
 	to the request queue. The driver will receive them again on the
 	next request_fn run, just like it did the first time it encountered
 	them.
@@ -827,10 +807,6 @@ a bit of explaining. Normally we don't care too much about request ordering,
 but in the event of any barrier requests in the tag queue we need to ensure
 that requests are restarted in the order they were queue. This may happen
 if the driver needs to use blk_queue_invalidate_tags().
-
-Tagging also defines a new request flag, REQ_QUEUED. This is set whenever
-a request is currently tagged. You should not use this flag directly,
-blk_rq_tagged(rq) is the portable way to do so.
 
 3.3 I/O Submission
 
@@ -886,7 +862,7 @@ Aside:
 
   Kvec i/o:
 
-  Ben LaHaise's aio code uses a slighly different structure instead
+  Ben LaHaise's aio code uses a slightly different structure instead
   of kiobufs, called a kvec_cb. This contains an array of <page, offset, len>
   tuples (very much like the networking code), together with a callback function
   and data pointer. This is embedded into a brw_cb structure when passed
@@ -906,13 +882,24 @@ Aside:
 
 
 4. The I/O scheduler
-I/O schedulers are now per queue. They should be runtime switchable and modular
-but aren't yet. Jens has most bits to do this, but the sysfs implementation is
-missing.
+I/O scheduler, a.k.a. elevator, is implemented in two layers.  Generic dispatch
+queue and specific I/O schedulers.  Unless stated otherwise, elevator is used
+to refer to both parts and I/O scheduler to specific I/O schedulers.
+
+Block layer implements generic dispatch queue in block/*.c.
+The generic dispatch queue is responsible for requeueing, handling non-fs
+requests and all other subtleties.
+
+Specific I/O schedulers are responsible for ordering normal filesystem
+requests.  They can also choose to delay certain requests to improve
+throughput or whatever purpose.  As the plural form indicates, there are
+multiple I/O schedulers.  They can be built as modules but at least one should
+be built inside the kernel.  Each queue can choose different one and can also
+change to another one dynamically.
 
 A block layer call to the i/o scheduler follows the convention elv_xxx(). This
-calls elevator_xxx_fn in the elevator switch (drivers/block/elevator.c). Oh,
-xxx and xxx might not match exactly, but use your imagination. If an elevator
+calls elevator_xxx_fn in the elevator switch (block/elevator.c). Oh, xxx
+and xxx might not match exactly, but use your imagination. If an elevator
 doesn't implement a function, the switch does nothing or some minimal house
 keeping work.
 
@@ -921,44 +908,42 @@ keeping work.
 The functions an elevator may implement are: (* are mandatory)
 elevator_merge_fn		called to query requests for merge with a bio
 
-elevator_merge_req_fn		" " "  with another request
+elevator_merge_req_fn		called when two requests get merged. the one
+				which gets merged into the other one will be
+				never seen by I/O scheduler again. IOW, after
+				being merged, the request is gone.
 
 elevator_merged_fn		called when a request in the scheduler has been
 				involved in a merge. It is used in the deadline
 				scheduler for example, to reposition the request
 				if its sorting order has changed.
 
-*elevator_next_req_fn		returns the next scheduled request, or NULL
-				if there are none (or none are ready).
+elevator_allow_merge_fn		called whenever the block layer determines
+				that a bio can be merged into an existing
+				request safely. The io scheduler may still
+				want to stop a merge at this point if it
+				results in some sort of conflict internally,
+				this hook allows it to do that. Note however
+				that two *requests* can still be merged at later
+				time. Currently the io scheduler has no way to
+				prevent that. It can only learn about the fact
+				from elevator_merge_req_fn callback.
 
-*elevator_add_req_fn		called to add a new request into the scheduler
+elevator_dispatch_fn*		fills the dispatch queue with ready requests.
+				I/O schedulers are free to postpone requests by
+				not filling the dispatch queue unless @force
+				is non-zero.  Once dispatched, I/O schedulers
+				are not allowed to manipulate the requests -
+				they belong to generic dispatch queue.
 
-elevator_queue_empty_fn		returns true if the merge queue is empty.
-				Drivers shouldn't use this, but rather check
-				if elv_next_request is NULL (without losing the
-				request if one exists!)
-
-elevator_remove_req_fn		This is called when a driver claims ownership of
-				the target request - it now belongs to the
-				driver. It must not be modified or merged.
-				Drivers must not lose the request! A subsequent
-				call of elevator_next_req_fn must  return the
-				_next_ request.
-
-elevator_requeue_req_fn		called to add a request to the scheduler. This
-				is used when the request has alrnadebeen
-				returned by elv_next_request, but hasn't
-				completed. If this is not implemented then
-				elevator_add_req_fn is called instead.
+elevator_add_req_fn*		called to add a new request into the scheduler
 
 elevator_former_req_fn
 elevator_latter_req_fn		These return the request before or after the
 				one specified in disk sort order. Used by the
 				block layer to find merge possibilities.
 
-elevator_completed_req_fn	called when a request is completed. This might
-				come about due to being merged with another or
-				when the device completes the request.
+elevator_completed_req_fn	called when a request is completed.
 
 elevator_may_queue_fn		returns true if the scheduler wants to allow the
 				current context to queue a new request even if
@@ -967,13 +952,33 @@ elevator_may_queue_fn		returns true if the scheduler wants to allow the
 
 elevator_set_req_fn
 elevator_put_req_fn		Must be used to allocate and free any elevator
-				specific storate for a request.
+				specific storage for a request.
 
-elevator_init_fn
+elevator_activate_req_fn	Called when device driver first sees a request.
+				I/O schedulers can use this callback to
+				determine when actual execution of a request
+				starts.
+elevator_deactivate_req_fn	Called when device driver decides to delay
+				a request by requeueing it.
+
+elevator_init_fn*
 elevator_exit_fn		Allocate and free any elevator specific storage
 				for a queue.
 
-4.2 I/O scheduler implementation
+4.2 Request flows seen by I/O schedulers
+All requests seen by I/O schedulers strictly follow one of the following three
+flows.
+
+ set_req_fn ->
+
+ i.   add_req_fn -> (merged_fn ->)* -> dispatch_fn -> activate_req_fn ->
+      (deactivate_req_fn -> activate_req_fn ->)* -> completed_req_fn
+ ii.  add_req_fn -> (merged_fn ->)* -> merge_req_fn
+ iii. [none]
+
+ -> put_req_fn
+
+4.3 I/O scheduler implementation
 The generic i/o scheduler algorithm attempts to sort/merge/batch requests for
 optimal disk scan and request servicing performance (based on generic
 principles and device capabilities), optimized for:
@@ -986,25 +991,14 @@ Characteristics:
 i. Binary tree
 AS and deadline i/o schedulers use red black binary trees for disk position
 sorting and searching, and a fifo linked list for time-based searching. This
-gives good scalability and good availablility of information. Requests are
+gives good scalability and good availability of information. Requests are
 almost always dispatched in disk sort order, so a cache is kept of the next
 request in sort order to prevent binary tree lookups.
 
 This arrangement is not a generic block layer characteristic however, so
 elevators may implement queues as they please.
 
-ii. Last merge hint
-The last merge hint is part of the generic queue layer. I/O schedulers must do
-some management on it. For the most part, the most important thing is to make
-sure q->last_merge is cleared (set to NULL) when the request on it is no longer
-a candidate for merging (for example if it has been sent to the driver).
-
-The last merge performed is cached as a hint for the subsequent request. If
-sequential data is being submitted, the hint is used to perform merges without
-any scanning. This is not sufficient when there are multiple processes doing
-I/O though, so a "merge hash" is used by some schedulers.
-
-iii. Merge hash
+ii. Merge hash
 AS and deadline use a hash table indexed by the last sector of a request. This
 enables merging code to quickly look up "back merge" candidates, even when
 multiple I/O streams are being performed at once on one disk.
@@ -1013,47 +1007,23 @@ multiple I/O streams are being performed at once on one disk.
 are far less common than "back merges" due to the nature of most I/O patterns.
 Front merges are handled by the binary trees in AS and deadline schedulers.
 
-iv. Handling barrier cases
-A request with flags REQ_HARDBARRIER or REQ_SOFTBARRIER must not be ordered
-around. That is, they must be processed after all older requests, and before
-any newer ones. This includes merges!
-
-In AS and deadline schedulers, barriers have the effect of flushing the reorder
-queue. The performance cost of this will vary from nothing to a lot depending
-on i/o patterns and device characteristics. Obviously they won't improve
-performance, so their use should be kept to a minimum.
-
-v. Handling insertion position directives
-A request may be inserted with a position directive. The directives are one of
-ELEVATOR_INSERT_BACK, ELEVATOR_INSERT_FRONT, ELEVATOR_INSERT_SORT.
-
-ELEVATOR_INSERT_SORT is a general directive for non-barrier requests.
-ELEVATOR_INSERT_BACK is used to insert a barrier to the back of the queue.
-ELEVATOR_INSERT_FRONT is used to insert a barrier to the front of the queue, and
-overrides the ordering requested by any previous barriers. In practice this is
-harmless and required, because it is used for SCSI requeueing. This does not
-require flushing the reorder queue, so does not impose a performance penalty.
-
-vi. Plugging the queue to batch requests in anticipation of opportunities for
-  merge/sort optimizations
-
-This is just the same as in 2.4 so far, though per-device unplugging
-support is anticipated for 2.5. Also with a priority-based i/o scheduler,
-such decisions could be based on request priorities.
+iii. Plugging the queue to batch requests in anticipation of opportunities for
+     merge/sort optimizations
 
 Plugging is an approach that the current i/o scheduling algorithm resorts to so
 that it collects up enough requests in the queue to be able to take
 advantage of the sorting/merging logic in the elevator. If the
 queue is empty when a request comes in, then it plugs the request queue
-(sort of like plugging the bottom of a vessel to get fluid to build up)
+(sort of like plugging the bath tub of a vessel to get fluid to build up)
 till it fills up with a few more requests, before starting to service
 the requests. This provides an opportunity to merge/sort the requests before
 passing them down to the device. There are various conditions when the queue is
 unplugged (to open up the flow again), either through a scheduled task or
 could be on demand. For example wait_on_buffer sets the unplugging going
-(by running tq_disk) so the read gets satisfied soon. So in the read case,
-the queue gets explicitly unplugged as part of waiting for completion,
-in fact all queues get unplugged as a side-effect.
+through sync_buffer() running blk_run_address_space(mapping). Or the caller
+can do it explicity through blk_unplug(bdev). So in the read case,
+the queue gets explicitly unplugged as part of waiting for completion on that
+buffer.
 
 Aside:
   This is kind of controversial territory, as it's not clear if plugging is
@@ -1064,16 +1034,11 @@ Aside:
   multi-page bios being queued in one shot, we may not need to wait to merge
   a big request from the broken up pieces coming by.
 
-  Per-queue granularity unplugging (still a Todo) may help reduce some of the
-  concerns with just a single tq_disk flush approach. Something like
-  blk_kick_queue() to unplug a specific queue (right away ?)
-  or optionally, all queues, is in the plan.
-
-4.3 I/O contexts
+4.4 I/O contexts
 I/O contexts provide a dynamically allocated per process data area. They may
 be used in I/O schedulers, and in the block layer (could be used for IO statis,
-priorities for example). See *io_context in drivers/block/ll_rw_blk.c, and
-as-iosched.c for an example of usage in an i/o scheduler.
+priorities for example). See *io_context in block/ll_rw_blk.c, and as-iosched.c
+for an example of usage in an i/o scheduler.
 
 
 5. Scalability related changes
@@ -1095,7 +1060,7 @@ lock themselves, if required. Drivers that explicitly used the
 io_request_lock for serialization need to be modified accordingly.
 Usually it's as easy as adding a global lock:
 
-	static spinlock_t my_driver_lock = SPIN_LOCK_UNLOCKED;
+	static DEFINE_SPINLOCK(my_driver_lock);
 
 and passing the address to that lock to blk_init_queue().
 
@@ -1142,7 +1107,7 @@ it will loop and handle as many sectors (on a bio-segment granularity)
 as specified.
 
 Now bh->b_end_io is replaced by bio->bi_end_io, but most of the time the
-right thing to use is bio_endio(bio, uptodate) instead.
+right thing to use is bio_endio(bio) instead.
 
 If the driver is dropping the io_request_lock from its request_fn strategy,
 then it just needs to replace that with q->queue_lock instead.
@@ -1166,13 +1131,13 @@ where a driver received a request ala this before:
 
 As mentioned, there is no virtual mapping of a bio. For DMA, this is
 not a problem as the driver probably never will need a virtual mapping.
-Instead it needs a bus mapping (pci_map_page for a single segment or
-use blk_rq_map_sg for scatter gather) to be able to ship it to the driver. For
+Instead it needs a bus mapping (dma_map_page for a single segment or
+use dma_map_sg for scatter gather) to be able to ship it to the driver. For
 PIO drivers (or drivers that need to revert to PIO transfer once in a
 while (IDE for example)), where the CPU is doing the actual data
 transfer a virtual mapping is needed. If the driver supports highmem I/O,
-(Sec 1.1, (ii) ) it needs to use __bio_kmap_atomic and bio_kmap_irq to
-temporarily map a bio into the virtual address space.
+(Sec 1.1, (ii) ) it needs to use kmap_atomic or similar to temporarily map
+a bio into the virtual address space.
 
 
 8. Prior/Related/Impacted patches
@@ -1208,6 +1173,6 @@ temporarily map a bio into the virtual address space.
 and Linus' comments - Jan 2001)
 9.2 Discussions about kiobuf and bh design on lkml between sct, linus, alan
 et al - Feb-March 2001 (many of the initial thoughts that led to bio were
-brought up in this discusion thread)
+brought up in this discussion thread)
 9.3 Discussions on mempool on lkml - Dec 2001.
 

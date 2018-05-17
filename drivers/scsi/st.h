@@ -1,37 +1,59 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 
 #ifndef _ST_H
 #define _ST_H
 
 #include <linux/completion.h>
+#include <linux/mutex.h>
+#include <linux/kref.h>
+#include <scsi/scsi_cmnd.h>
 
+/* Descriptor for analyzed sense data */
+struct st_cmdstatus {
+	int midlevel_result;
+	struct scsi_sense_hdr sense_hdr;
+	int have_sense;
+	int residual;
+	u64 uremainder64;
+	u8 flags;
+	u8 remainder_valid;
+	u8 fixed_format;
+	u8 deferred;
+};
+
+struct scsi_tape;
+
+/* scsi tape command */
+struct st_request {
+	unsigned char cmd[MAX_COMMAND_SIZE];
+	unsigned char sense[SCSI_SENSE_BUFFERSIZE];
+	int result;
+	struct scsi_tape *stp;
+	struct completion *waiting;
+	struct bio *bio;
+};
 
 /* The tape buffer descriptor. */
 struct st_buffer {
-	unsigned char in_use;
 	unsigned char dma;	/* DMA-able buffer */
-	unsigned char do_dio;   /* direct i/o set up? */
+	unsigned char cleared;  /* internal buffer cleared after open? */
+	unsigned short do_dio;  /* direct i/o set up? */
 	int buffer_size;
 	int buffer_blocks;
 	int buffer_bytes;
 	int read_pointer;
 	int writing;
-	int midlevel_result;
 	int syscall_result;
-	struct scsi_request *last_SRpnt;
+	struct st_request *last_SRpnt;
+	struct st_cmdstatus cmdstat;
+	struct page **reserved_pages;
+	int reserved_page_order;
+	struct page **mapped_pages;
+	struct rq_map_data map_data;
 	unsigned char *b_data;
 	unsigned short use_sg;	/* zero or max number of s/g segments for this adapter */
 	unsigned short sg_segs;		/* number of segments in s/g list */
-	unsigned short orig_frp_segs;	/* number of segments allocated at first try */
 	unsigned short frp_segs;	/* number of buffer segments */
-	unsigned int frp_sg_current;	/* driver buffer length currently in s/g list */
-	struct st_buf_fragment *frp;	/* the allocated buffer fragment list */
-	struct scatterlist sg[1];	/* MUST BE last item */
-};
-
-/* The tape buffer fragment descriptor */
-struct st_buf_fragment {
-	struct page *page;
-	unsigned int length;
 };
 
 /* The tape mode definition */
@@ -45,6 +67,8 @@ struct st_modedef {
 	unsigned char default_compression;	/* 0 = don't touch, etc */
 	short default_density;	/* Forced density, -1 = no value */
 	int default_blksize;	/* Forced blocksize, -1 = no value */
+	struct scsi_tape *tape;
+	struct device *devs[2];  /* Auto-rewind and non-rewind devices */
 	struct cdev *cdevs[2];  /* Auto-rewind and non-rewind devices */
 };
 
@@ -55,7 +79,7 @@ struct st_modedef {
 #define ST_MODE_SHIFT (7 - ST_NBR_MODE_BITS)
 #define ST_MODE_MASK ((ST_NBR_MODES - 1) << ST_MODE_SHIFT)
 
-#define ST_MAX_TAPES 128
+#define ST_MAX_TAPES (1 << (20 - (ST_NBR_MODE_BITS + 1)))
 #define ST_MAX_TAPE_ENTRIES  (ST_MAX_TAPES << (ST_NBR_MODE_BITS + 1))
 
 /* The status related to each partition */
@@ -69,15 +93,37 @@ struct st_partstat {
 	int drv_file;
 };
 
+/* Tape statistics */
+struct scsi_tape_stats {
+	atomic64_t read_byte_cnt;  /* bytes read */
+	atomic64_t write_byte_cnt; /* bytes written */
+	atomic64_t in_flight;      /* Number of I/Os in flight */
+	atomic64_t read_cnt;       /* Count of read requests */
+	atomic64_t write_cnt;      /* Count of write requests */
+	atomic64_t other_cnt;      /* Count of other requests either
+				    * implicit or from user space
+				    * ioctl. */
+	atomic64_t resid_cnt;      /* Count of resid_len > 0 */
+	atomic64_t tot_read_time;  /* ktime spent completing reads */
+	atomic64_t tot_write_time; /* ktime spent completing writes */
+	atomic64_t tot_io_time;    /* ktime spent doing any I/O */
+	ktime_t read_time;         /* holds ktime request was queued */
+	ktime_t write_time;        /* holds ktime request was queued */
+	ktime_t other_time;        /* holds ktime request was queued */
+	atomic_t last_read_size;   /* Number of bytes issued for last read */
+	atomic_t last_write_size;  /* Number of bytes issued for last write */
+};
+
 #define ST_NBR_PARTITIONS 4
 
 /* The tape drive descriptor */
 struct scsi_tape {
 	struct scsi_driver *driver;
 	struct scsi_device *device;
-	struct semaphore lock;	/* For serialization */
+	struct mutex lock;	/* For serialization */
 	struct completion wait;	/* For SCSI commands */
 	struct st_buffer *buffer;
+	int index;
 
 	/* Drive characteristics */
 	unsigned char omit_blklims;
@@ -94,13 +140,14 @@ struct scsi_tape {
 	unsigned char cln_sense_value;
 	unsigned char cln_sense_mask;
 	unsigned char use_pf;			/* Set Page Format bit in all mode selects? */
-	unsigned char try_dio;			/* try direct i/o? */
+	unsigned char try_dio;			/* try direct i/o in general? */
+	unsigned char try_dio_now;		/* try direct i/o before next close? */
 	unsigned char c_algo;			/* compression algorithm */
 	unsigned char pos_unknown;			/* after reset position unknown */
+	unsigned char sili;			/* use SILI when reading in variable b mode */
+	unsigned char immediate_filemark;	/* write filemark immediately */
 	int tape_type;
 	int long_timeout;	/* timeout for commands known to take long time */
-
-	unsigned long max_pfn;	/* the maximum page number reachable by the HBA */
 
 	/* Mode characteristics */
 	struct st_modedef modes[ST_NBR_MODES];
@@ -139,11 +186,12 @@ struct scsi_tape {
 	int nbr_requests;
 	int nbr_dio;
 	int nbr_pages;
-	int nbr_combinable;
 	unsigned char last_cmnd[6];
 	unsigned char last_sense[16];
 #endif
 	struct gendisk *disk;
+	struct kref     kref;
+	struct scsi_tape_stats *stats;
 };
 
 /* Bit masks for use_pf */
@@ -191,5 +239,10 @@ struct scsi_tape {
 #define ST_YES         2
 
 #define EXTENDED_SENSE_START  18
+
+/* Masks for some conditions in the sense data */
+#define SENSE_FMK   0x80
+#define SENSE_EOM   0x40
+#define SENSE_ILI   0x20
 
 #endif

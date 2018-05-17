@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * I/O Processor (IOP) ADB Driver
  * Written and (C) 1999 by Joshua M. Thompson (funaho@jurai.org)
@@ -19,7 +20,6 @@
 #include <linux/init.h>
 #include <linux/proc_fs.h>
 
-#include <asm/bootinfo.h> 
 #include <asm/macintosh.h> 
 #include <asm/macints.h> 
 #include <asm/mac_iop.h>
@@ -29,8 +29,6 @@
 #include <linux/adb.h> 
 
 /*#define DEBUG_ADB_IOP*/
-
-extern void iop_ism_irq(int, void *, struct pt_regs *);
 
 static struct adb_request *current_req;
 static struct adb_request *last_req;
@@ -78,10 +76,10 @@ static void adb_iop_end_req(struct adb_request *req, int state)
  * This will be called when a packet has been successfully sent.
  */
 
-static void adb_iop_complete(struct iop_msg *msg, struct pt_regs *regs)
+static void adb_iop_complete(struct iop_msg *msg)
 {
 	struct adb_request *req;
-	uint flags;
+	unsigned long flags;
 
 	local_irq_save(flags);
 
@@ -100,11 +98,11 @@ static void adb_iop_complete(struct iop_msg *msg, struct pt_regs *regs)
  * commands or autopoll packets) are received.
  */
 
-static void adb_iop_listen(struct iop_msg *msg, struct pt_regs *regs)
+static void adb_iop_listen(struct iop_msg *msg)
 {
 	struct adb_iopmsg *amsg = (struct adb_iopmsg *) msg->message;
 	struct adb_request *req;
-	uint flags;
+	unsigned long flags;
 #ifdef DEBUG_ADB_IOP
 	int i;
 #endif
@@ -143,7 +141,7 @@ static void adb_iop_listen(struct iop_msg *msg, struct pt_regs *regs)
 			req->reply_len = amsg->count + 1;
 			memcpy(req->reply, &amsg->cmd, req->reply_len);
 		} else {
-			adb_input(&amsg->cmd, amsg->count + 1, regs,
+			adb_input(&amsg->cmd, amsg->count + 1,
 				  amsg->flags & ADB_IOP_AUTOPOLL);
 		}
 		memcpy(msg->reply, msg->message, IOP_MSG_LEN);
@@ -239,7 +237,7 @@ static int adb_iop_write(struct adb_request *req)
 
 	local_irq_save(flags);
 
-	req->next = 0;
+	req->next = NULL;
 	req->sent = 0;
 	req->complete = 0;
 	req->reply_len = 0;
@@ -266,7 +264,7 @@ int adb_iop_autopoll(int devs)
 void adb_iop_poll(void)
 {
 	if (adb_iop_state == idle) adb_iop_start();
-	iop_ism_irq(0, (void *) ADB_IOP, NULL);
+	iop_ism_irq_poll(ADB_IOP);
 }
 
 int adb_iop_reset_bus(void)

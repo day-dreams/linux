@@ -1,9 +1,9 @@
 /*
  * sysctl.c - Code for sysctl handling in NTFS Linux kernel driver. Part of
  *	      the Linux-NTFS project. Adapted from the old NTFS driver,
- *	      Copyright (C) 1997 Martin von Löwis, Régis Duchesne
+ *	      Copyright (C) 1997 Martin von LÃ¶wis, RÃ©gis Duchesne
  *
- * Copyright (c) 2002-2004 Anton Altaparmakov
+ * Copyright (c) 2002-2005 Anton Altaparmakov
  *
  * This program/include file is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as published
@@ -33,24 +33,30 @@
 #include "sysctl.h"
 #include "debug.h"
 
-#define FS_NTFS	1
-
 /* Definition of the ntfs sysctl. */
-static ctl_table ntfs_sysctls[] = {
-	{ FS_NTFS, "ntfs-debug",		/* Binary and text IDs. */
-	  &debug_msgs,sizeof(debug_msgs),	/* Data pointer and size. */
-	  0644,	NULL, &proc_dointvec },		/* Mode, child, proc handler. */
-	{ 0 }
+static struct ctl_table ntfs_sysctls[] = {
+	{
+		.procname	= "ntfs-debug",
+		.data		= &debug_msgs,		/* Data pointer and size. */
+		.maxlen		= sizeof(debug_msgs),
+		.mode		= 0644,			/* Mode, proc handler. */
+		.proc_handler	= proc_dointvec
+	},
+	{}
 };
 
 /* Define the parent directory /proc/sys/fs. */
-static ctl_table sysctls_root[] = {
-	{ CTL_FS, "fs", NULL, 0, 0555, ntfs_sysctls },
-	{ 0 }
+static struct ctl_table sysctls_root[] = {
+	{
+		.procname	= "fs",
+		.mode		= 0555,
+		.child		= ntfs_sysctls
+	},
+	{}
 };
 
 /* Storage for the sysctls header. */
-static struct ctl_table_header *sysctls_root_table = NULL;
+static struct ctl_table_header *sysctls_root_table;
 
 /**
  * ntfs_sysctl - add or remove the debug sysctl
@@ -62,17 +68,9 @@ int ntfs_sysctl(int add)
 {
 	if (add) {
 		BUG_ON(sysctls_root_table);
-		sysctls_root_table = register_sysctl_table(sysctls_root, 0);
+		sysctls_root_table = register_sysctl_table(sysctls_root);
 		if (!sysctls_root_table)
 			return -ENOMEM;
-#ifdef CONFIG_PROC_FS
-		/*
-		 * If the proc file system is in use and we are a module, need
-		 * to set the owner of our proc entry to our module. In the
-		 * non-modular case, THIS_MODULE is NULL, so this is ok.
-		 */
-		ntfs_sysctls[0].de->owner = THIS_MODULE;
-#endif
 	} else {
 		BUG_ON(!sysctls_root_table);
 		unregister_sysctl_table(sysctls_root_table);

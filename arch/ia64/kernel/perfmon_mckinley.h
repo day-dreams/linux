@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * This file contains the McKinley PMU register description tables
  * and pmc checker used by perfmon.c.
@@ -181,7 +182,7 @@ static pmu_config_t pmu_conf_mck={
 	.pmc_desc      = pfm_mck_pmc_desc,
 	.num_ibrs       = 8,
 	.num_dbrs       = 8,
-	.use_rr_dbregs = 1 /* debug register are use for range retrictions */
+	.use_rr_dbregs = 1 /* debug register are use for range restrictions */
 };
 
 

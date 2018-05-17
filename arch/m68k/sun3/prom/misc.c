@@ -1,4 +1,5 @@
-/* $Id: misc.c,v 1.15 1997/05/14 20:45:00 davem Exp $
+// SPDX-License-Identifier: GPL-2.0
+/*
  * misc.c:  Miscellaneous prom functions that don't belong
  *          anywhere else.
  *

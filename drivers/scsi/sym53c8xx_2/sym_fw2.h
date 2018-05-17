@@ -191,13 +191,6 @@ struct SYM_FWB_SCR {
 	u32 pm_wsr_handle	[ 38];
 	u32 wsr_ma_helper	[  4];
 
-#ifdef SYM_OPT_HANDLE_DIR_UNKNOWN
-	/* Unknown direction handling */
-	u32 data_io		[  2];
-	u32 data_io_in		[  2];
-	u32 data_io_com		[  6];
-	u32 data_io_out		[  8];
-#endif
 	/* Data area */
 	u32 zero		[  1];
 	u32 scratch		[  1];
@@ -963,7 +956,7 @@ static struct SYM_FWA_SCR SYM_FWA_SCR = {
 	 *  It shall be a tagged command.
 	 *  Read SIMPLE+TAG.
 	 *  The C code will deal with errors.
-	 *  Agressive optimization, is'nt it? :)
+	 *  Aggressive optimization, isn't it? :)
 	 */
 	SCR_MOVE_ABS (2) ^ SCR_MSG_IN,
 		HADDR_1 (msgin),
@@ -975,7 +968,7 @@ static struct SYM_FWA_SCR SYM_FWA_SCR = {
 		offsetof(struct sym_lcb, head.itlq_tbl_sa),
 	/*
 	 *  The SIDL still contains the TAG value.
-	 *  Agressive optimization, isn't it? :):)
+	 *  Aggressive optimization, isn't it? :):)
 	 */
 	SCR_REG_SFBR (sidl, SCR_SHL, 0),
 		0,
@@ -1333,7 +1326,7 @@ static struct SYM_FWB_SCR SYM_FWB_SCR = {
 		PADDR_B (msg_weird_seen),
 	/*
 	 *  We donnot handle extended messages from SCRIPTS.
-	 *  Read the amount of data correponding to the 
+	 *  Read the amount of data corresponding to the 
 	 *  message length and call the C code.
 	 */
 	SCR_STORE_REL (scratcha, 1),
@@ -1788,7 +1781,7 @@ static struct SYM_FWB_SCR SYM_FWB_SCR = {
 	 *  While testing with bogus QUANTUM drives, the C1010 
 	 *  sometimes raised a spurious phase mismatch with 
 	 *  WSR and the CHMOV(1) triggered another PM.
-	 *  Waiting explicitely for the PHASE seemed to avoid 
+	 *  Waiting explicitly for the PHASE seemed to avoid
 	 *  the nested phase mismatch. Btw, this didn't happen 
 	 *  using my IBM drives.
 	 */
@@ -1837,51 +1830,6 @@ static struct SYM_FWB_SCR SYM_FWB_SCR = {
 		offsetof (struct sym_ccb, phys.wresid),
 	SCR_JUMP,
 		PADDR_A (dispatch),
-
-#ifdef SYM_OPT_HANDLE_DIR_UNKNOWN
-}/*-------------------------< DATA_IO >--------------------------*/,{
-	/*
-	 *  We jump here if the data direction was unknown at the 
-	 *  time we had to queue the command to the scripts processor.
-	 *  Pointers had been set as follow in this situation:
-	 *    savep   -->   DATA_IO
-	 *    lastp   -->   start pointer when DATA_IN
-	 *    wlastp  -->   start pointer when DATA_OUT
-	 *  This script sets savep and lastp according to the 
-	 *  direction chosen by the target.
-	 */
-	SCR_JUMP ^ IFTRUE (WHEN (SCR_DATA_OUT)),
-		PADDR_B (data_io_out),
-}/*-------------------------< DATA_IO_IN >-----------------------*/,{
-	/*
-	 *  Direction is DATA IN.
-	 */
-	SCR_LOAD_REL  (scratcha, 4),
-		offsetof (struct sym_ccb, phys.head.lastp),
-}/*-------------------------< DATA_IO_COM >----------------------*/,{
-	SCR_STORE_REL (scratcha, 4),
-		offsetof (struct sym_ccb, phys.head.savep),
-
-	/*
-	 *  Jump to the SCRIPTS according to actual direction.
-	 */
-	SCR_LOAD_REL  (temp, 4),
-		offsetof (struct sym_ccb, phys.head.savep),
-	SCR_RETURN,
-		0,
-}/*-------------------------< DATA_IO_OUT >----------------------*/,{
-	/*
-	 *  Direction is DATA OUT.
-	 */
-	SCR_REG_REG (HF_REG, SCR_AND, (~HF_DATA_IN)),
-		0,
-	SCR_LOAD_REL  (scratcha, 4),
-		offsetof (struct sym_ccb, phys.head.wlastp),
-	SCR_STORE_REL (scratcha, 4),
-		offsetof (struct sym_ccb, phys.head.lastp),
-	SCR_JUMP,
-		PADDR_B(data_io_com),
-#endif /* SYM_OPT_HANDLE_DIR_UNKNOWN */
 
 }/*-------------------------< ZERO >-----------------------------*/,{
 	SCR_DATA_ZERO,

@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2004 Topspin Corporation.  All rights reserved.
+ * Copyright (c) 2005 Sun Microsystems, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -28,11 +29,12 @@
  * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
- *
- * $Id: packer.c 1349 2004-12-16 21:09:43Z roland $
  */
 
-#include <ib_pack.h>
+#include <linux/export.h>
+#include <linux/string.h>
+
+#include <rdma/ib_pack.h>
 
 static u64 value_read(int offset, int size, void *structure)
 {
@@ -42,7 +44,7 @@ static u64 value_read(int offset, int size, void *structure)
 	case 4: return be32_to_cpup((__be32 *) (structure + offset));
 	case 8: return be64_to_cpup((__be64 *) (structure + offset));
 	default:
-		printk(KERN_WARNING "Field size %d bits not handled\n", size * 8);
+		pr_warn("Field size %d bits not handled\n", size * 8);
 		return 0;
 	}
 }
@@ -96,15 +98,14 @@ void ib_pack(const struct ib_field        *desc,
 			else
 				val = 0;
 
-			mask = cpu_to_be64(((1ull << desc[i].size_bits) - 1) << shift);
+			mask = cpu_to_be64((~0ull >> (64 - desc[i].size_bits)) << shift);
 			addr = (__be64 *) ((__be32 *) buf + desc[i].offset_words);
 			*addr = (*addr & ~mask) | (cpu_to_be64(val) & mask);
 		} else {
 			if (desc[i].offset_bits % 8 ||
 			    desc[i].size_bits   % 8) {
-				printk(KERN_WARNING "Structure field %s of size %d "
-				       "bits is not byte-aligned\n",
-				       desc[i].field_name, desc[i].size_bits);
+				pr_warn("Structure field %s of size %d bits is not byte-aligned\n",
+					desc[i].field_name, desc[i].size_bits);
 			}
 
 			if (desc[i].struct_size_bytes)
@@ -130,7 +131,7 @@ static void value_write(int offset, int size, u64 val, void *structure)
 	case 32: *(__be32 *) (structure + offset) = cpu_to_be32(val); break;
 	case 64: *(__be64 *) (structure + offset) = cpu_to_be64(val); break;
 	default:
-		printk(KERN_WARNING "Field size %d bits not handled\n", size * 8);
+		pr_warn("Field size %d bits not handled\n", size * 8);
 	}
 }
 
@@ -176,7 +177,7 @@ void ib_unpack(const struct ib_field        *desc,
 			__be64 *addr;
 
 			shift = 64 - desc[i].offset_bits - desc[i].size_bits;
-			mask = ((1ull << desc[i].size_bits) - 1) << shift;
+			mask = (~0ull >> (64 - desc[i].size_bits)) << shift;
 			addr = (__be64 *) buf + desc[i].offset_words;
 			val = (be64_to_cpup(addr) & mask) >> shift;
 			value_write(desc[i].struct_offset_bytes,
@@ -186,9 +187,8 @@ void ib_unpack(const struct ib_field        *desc,
 		} else {
 			if (desc[i].offset_bits % 8 ||
 			    desc[i].size_bits   % 8) {
-				printk(KERN_WARNING "Structure field %s of size %d "
-				       "bits is not byte-aligned\n",
-				       desc[i].field_name, desc[i].size_bits);
+				pr_warn("Structure field %s of size %d bits is not byte-aligned\n",
+					desc[i].field_name, desc[i].size_bits);
 			}
 
 			memcpy(structure + desc[i].struct_offset_bytes,

@@ -9,12 +9,11 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/sys.h>
-#include <linux/config.h>
 #include <linux/linkage.h>
 #include <asm/setup.h>
 #include <asm/segment.h>
 #include <asm/ptrace.h>
+#include <asm/thread_info.h>
 #include <asm/spr-regs.h>
 
 #include <asm/errno.h>
@@ -22,15 +21,13 @@
 #
 # the break handler has its own stack
 #
-	.section	.bss.stack
+	.section	.bss..stack
 	.globl		__break_user_context
-	.balign		8192
+	.balign		THREAD_SIZE
 __break_stack:
-	.space		(8192 - (USER_CONTEXT_SIZE + REG__DEBUG_XTRA)) & ~7
-__break_stack_tos:
-	.space		REG__DEBUG_XTRA
-__break_user_context:
-	.space		USER_CONTEXT_SIZE
+	.space		THREAD_SIZE - FRV_FRAME0_SIZE
+__break_frame_0:
+	.space		FRV_FRAME0_SIZE
 
 #
 # miscellaneous variables
@@ -66,7 +63,7 @@ __break_trace_through_exceptions:
 # entry point for Break Exceptions/Interrupts
 #
 ###############################################################################
-	.text
+	.section	.text..break
 	.balign		4
 	.globl		__entry_break
 __entry_break:
@@ -75,8 +72,8 @@ __entry_break:
 #endif
 	LEDS		0x1001,gr31
 
-	sethi.p		%hi(__break_user_context),gr31
-	setlo		%lo(__break_user_context),gr31
+	sethi.p		%hi(__break_frame_0),gr31
+	setlo		%lo(__break_frame_0),gr31
 
 	stdi		gr2,@(gr31,#REG_GR(2))
 	movsg		ccr,gr3
@@ -200,12 +197,20 @@ __break_step:
 	movsg		bpcsr,gr2
 	sethi.p		%hi(__entry_kernel_external_interrupt),gr3
 	setlo		%lo(__entry_kernel_external_interrupt),gr3
-	subcc		gr2,gr3,gr0,icc0
+	subcc.p		gr2,gr3,gr0,icc0
+	sethi		%hi(__entry_uspace_external_interrupt),gr3
+	setlo.p		%lo(__entry_uspace_external_interrupt),gr3
 	beq		icc0,#2,__break_step_kernel_external_interrupt
-	sethi.p		%hi(__entry_uspace_external_interrupt),gr3
-	setlo		%lo(__entry_uspace_external_interrupt),gr3
-	subcc		gr2,gr3,gr0,icc0
+	subcc.p		gr2,gr3,gr0,icc0
+	sethi		%hi(__entry_kernel_external_interrupt_virtually_disabled),gr3
+	setlo.p		%lo(__entry_kernel_external_interrupt_virtually_disabled),gr3
 	beq		icc0,#2,__break_step_uspace_external_interrupt
+	subcc.p		gr2,gr3,gr0,icc0
+	sethi		%hi(__entry_kernel_external_interrupt_virtual_reenable),gr3
+	setlo.p		%lo(__entry_kernel_external_interrupt_virtual_reenable),gr3
+	beq		icc0,#2,__break_step_kernel_external_interrupt_virtually_disabled
+	subcc		gr2,gr3,gr0,icc0
+	beq		icc0,#2,__break_step_kernel_external_interrupt_virtual_reenable
 
 	LEDS		0x2007,gr2
 
@@ -254,6 +259,9 @@ __break_step_kernel_softprog_interrupt:
 # step through an external interrupt from kernel mode
 	.globl		__break_step_kernel_external_interrupt
 __break_step_kernel_external_interrupt:
+	# deal with virtual interrupt disablement
+	beq		icc2,#0,__break_step_kernel_external_interrupt_virtually_disabled
+
 	sethi.p		%hi(__entry_kernel_external_interrupt_reentry),gr3
 	setlo		%lo(__entry_kernel_external_interrupt_reentry),gr3
 
@@ -293,6 +301,64 @@ __break_return_as_kernel_prologue:
 	movsg		scr3,gr31
 #endif
 	rett		#1
+
+# we single-stepped into an interrupt handler whilst interrupts were merely virtually disabled
+# need to really disable interrupts, set flag, fix up and return
+__break_step_kernel_external_interrupt_virtually_disabled:
+	movsg		psr,gr2
+	andi		gr2,#~PSR_PIL,gr2
+	ori		gr2,#PSR_PIL_14,gr2	/* debugging interrupts only */
+	movgs		gr2,psr
+
+	ldi		@(gr31,#REG_CCR),gr3
+	movgs		gr3,ccr
+	subcc.p		gr0,gr0,gr0,icc2	/* leave Z set, clear C */
+
+	# exceptions must've been enabled and we must've been in supervisor mode
+	setlos		BPSR_BET|BPSR_BS,gr3
+	movgs		gr3,bpsr
+
+	# return to where the interrupt happened
+	movsg		pcsr,gr2
+	movgs		gr2,bpcsr
+
+	lddi.p		@(gr31,#REG_GR(2)),gr2
+
+	xor		gr31,gr31,gr31
+	movgs		gr0,brr
+#ifdef CONFIG_MMU
+	movsg		scr3,gr31
+#endif
+	rett		#1
+
+# we stepped through into the virtual interrupt reenablement trap
+#
+# we also want to single step anyway, but after fixing up so that we get an event on the
+# instruction after the broken-into exception returns
+	.globl		__break_step_kernel_external_interrupt_virtual_reenable
+__break_step_kernel_external_interrupt_virtual_reenable:
+	movsg		psr,gr2
+	andi		gr2,#~PSR_PIL,gr2
+	movgs		gr2,psr
+
+	ldi		@(gr31,#REG_CCR),gr3
+	movgs		gr3,ccr
+	subicc		gr0,#1,gr0,icc2		/* clear Z, set C */
+
+	# save the adjusted ICC2
+	movsg		ccr,gr3
+	sti		gr3,@(gr31,#REG_CCR)
+
+	# exceptions must've been enabled and we must've been in supervisor mode
+	setlos		BPSR_BET|BPSR_BS,gr3
+	movgs		gr3,bpsr
+
+	# return to where the trap happened
+	movsg		pcsr,gr2
+	movgs		gr2,bpcsr
+
+	# and then process the single step
+	bra		__break_continue
 
 # step through an internal exception from uspace mode
 	.globl		__break_step_uspace_softprog_interrupt
@@ -517,8 +583,8 @@ __break_continue:
 	# set up the kernel stack pointer
 	sti		sp,@(gr31,#REG_SP)
 
-	sethi.p		%hi(__break_stack_tos),sp
-	setlo		%lo(__break_stack_tos),sp
+	sethi.p		%hi(__break_frame_0),sp
+	setlo		%lo(__break_frame_0),sp
 
 	# finish building the exception frame
 	stdi		gr4 ,@(gr31,#REG_GR(4))
@@ -583,9 +649,12 @@ __break_continue:
 	movsg		nmar,gr5
 	movsg		dcr,gr6
 
-	stdi		gr4 ,@(gr31,#REG_BRR)
-	sti		gr19,@(gr31,#REG_BPSR)
-	sti.p		gr6 ,@(gr31,#REG_DCR)
+	sethi.p		%hi(__debug_status),gr7
+	setlo		%lo(__debug_status),gr7
+
+	stdi		gr4 ,@(gr7,#DEBUG_BRR)
+	sti		gr19,@(gr7,#DEBUG_BPSR)
+	sti.p		gr6 ,@(gr7,#DEBUG_DCR)
 
 	# trap exceptions during break handling and disable h/w breakpoints/watchpoints
 	sethi		%hi(DCR_EBE),gr5
@@ -630,7 +699,10 @@ __break_continue:
 	lddi		@(gr31,#REG_PSR) ,gr22
 	ldi		@(gr31,#REG_PC)  ,gr21
 	ldi		@(gr31,#REG_TBR) ,gr20
-	ldi.p		@(gr31,#REG_DCR) ,gr6
+
+	sethi.p		%hi(__debug_status),gr6
+	setlo		%lo(__debug_status),gr6
+	ldi.p		@(gr6,#DEBUG_DCR) ,gr6
 
 	andi		gr22,#PSR_S,gr19		/* rebuild BPSR */
 	andi.p		gr22,#PSR_ET,gr5

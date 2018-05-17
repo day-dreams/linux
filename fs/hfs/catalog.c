@@ -20,12 +20,12 @@
  *
  * Given the ID of the parent and the name build a search key.
  */
-void hfs_cat_build_key(btree_key *key, u32 parent, struct qstr *name)
+void hfs_cat_build_key(struct super_block *sb, btree_key *key, u32 parent, const struct qstr *name)
 {
 	key->cat.reserved = 0;
 	key->cat.ParID = cpu_to_be32(parent);
 	if (name) {
-		hfs_triv2mac(&key->cat.CName, name);
+		hfs_asc2mac(sb, &key->cat.CName, name);
 		key->key_len = 6 + key->cat.CName.len;
 	} else {
 		memset(&key->cat.CName, 0, sizeof(struct hfs_name));
@@ -33,7 +33,7 @@ void hfs_cat_build_key(btree_key *key, u32 parent, struct qstr *name)
 	}
 }
 
-int hfs_cat_build_record(hfs_cat_rec *rec, u32 cnid, struct inode *inode)
+static int hfs_cat_build_record(hfs_cat_rec *rec, u32 cnid, struct inode *inode)
 {
 	__be32 mtime = hfs_mtime();
 
@@ -62,13 +62,14 @@ int hfs_cat_build_record(hfs_cat_rec *rec, u32 cnid, struct inode *inode)
 	}
 }
 
-static int hfs_cat_build_thread(hfs_cat_rec *rec, int type,
-				u32 parentid, struct qstr *name)
+static int hfs_cat_build_thread(struct super_block *sb,
+				hfs_cat_rec *rec, int type,
+				u32 parentid, const struct qstr *name)
 {
 	rec->type = type;
 	memset(rec->thread.reserved, 0, sizeof(rec->thread.reserved));
 	rec->thread.ParID = cpu_to_be32(parentid);
-	hfs_triv2mac(&rec->thread.CName, name);
+	hfs_asc2mac(sb, &rec->thread.CName, name);
 	return sizeof(struct hfs_cat_thread);
 }
 
@@ -78,7 +79,7 @@ static int hfs_cat_build_thread(hfs_cat_rec *rec, int type,
  * Add a new file or directory to the catalog B-tree and
  * return a (struct hfs_cat_entry) for it in '*result'.
  */
-int hfs_cat_create(u32 cnid, struct inode *dir, struct qstr *str, struct inode *inode)
+int hfs_cat_create(u32 cnid, struct inode *dir, const struct qstr *str, struct inode *inode)
 {
 	struct hfs_find_data fd;
 	struct super_block *sb;
@@ -86,15 +87,18 @@ int hfs_cat_create(u32 cnid, struct inode *dir, struct qstr *str, struct inode *
 	int entry_size;
 	int err;
 
-	dprint(DBG_CAT_MOD, "create_cat: %s,%u(%d)\n", str->name, cnid, inode->i_nlink);
+	hfs_dbg(CAT_MOD, "create_cat: %s,%u(%d)\n",
+		str->name, cnid, inode->i_nlink);
 	if (dir->i_size >= HFS_MAX_VALENCE)
 		return -ENOSPC;
 
 	sb = dir->i_sb;
-	hfs_find_init(HFS_SB(sb)->cat_tree, &fd);
+	err = hfs_find_init(HFS_SB(sb)->cat_tree, &fd);
+	if (err)
+		return err;
 
-	hfs_cat_build_key(fd.search_key, cnid, NULL);
-	entry_size = hfs_cat_build_thread(&entry, S_ISDIR(inode->i_mode) ?
+	hfs_cat_build_key(sb, fd.search_key, cnid, NULL);
+	entry_size = hfs_cat_build_thread(sb, &entry, S_ISDIR(inode->i_mode) ?
 			HFS_CDR_THD : HFS_CDR_FTH,
 			dir->i_ino, str);
 	err = hfs_brec_find(&fd);
@@ -107,7 +111,7 @@ int hfs_cat_create(u32 cnid, struct inode *dir, struct qstr *str, struct inode *
 	if (err)
 		goto err2;
 
-	hfs_cat_build_key(fd.search_key, dir->i_ino, str);
+	hfs_cat_build_key(sb, fd.search_key, dir->i_ino, str);
 	entry_size = hfs_cat_build_record(&entry, cnid, inode);
 	err = hfs_brec_find(&fd);
 	if (err != -ENOENT) {
@@ -121,13 +125,13 @@ int hfs_cat_create(u32 cnid, struct inode *dir, struct qstr *str, struct inode *
 		goto err1;
 
 	dir->i_size++;
-	dir->i_mtime = dir->i_ctime = CURRENT_TIME_SEC;
+	dir->i_mtime = dir->i_ctime = current_time(dir);
 	mark_inode_dirty(dir);
 	hfs_find_exit(&fd);
 	return 0;
 
 err1:
-	hfs_cat_build_key(fd.search_key, cnid, NULL);
+	hfs_cat_build_key(sb, fd.search_key, cnid, NULL);
 	if (!hfs_brec_find(&fd))
 		hfs_brec_remove(&fd);
 err2:
@@ -158,14 +162,16 @@ err2:
  */
 int hfs_cat_keycmp(const btree_key *key1, const btree_key *key2)
 {
-	int retval;
+	__be32 k1p, k2p;
 
-	retval = be32_to_cpu(key1->cat.ParID) - be32_to_cpu(key2->cat.ParID);
-	if (!retval)
-		retval = hfs_strcmp(key1->cat.CName.name, key1->cat.CName.len,
-				    key2->cat.CName.name, key2->cat.CName.len);
+	k1p = key1->cat.ParID;
+	k2p = key2->cat.ParID;
 
-	return retval;
+	if (k1p != k2p)
+		return be32_to_cpu(k1p) < be32_to_cpu(k2p) ? -1 : 1;
+
+	return hfs_strcmp(key1->cat.CName.name, key1->cat.CName.len,
+			  key2->cat.CName.name, key2->cat.CName.len);
 }
 
 /* Try to get a catalog entry for given catalog id */
@@ -176,19 +182,23 @@ int hfs_cat_find_brec(struct super_block *sb, u32 cnid,
 	hfs_cat_rec rec;
 	int res, len, type;
 
-	hfs_cat_build_key(fd->search_key, cnid, NULL);
+	hfs_cat_build_key(sb, fd->search_key, cnid, NULL);
 	res = hfs_brec_read(fd, &rec, sizeof(rec));
 	if (res)
 		return res;
 
 	type = rec.type;
 	if (type != HFS_CDR_THD && type != HFS_CDR_FTH) {
-		printk("HFS-fs: Found bad thread record in catalog\n");
+		pr_err("found bad thread record in catalog\n");
 		return -EIO;
 	}
 
 	fd->search_key->cat.ParID = rec.thread.ParID;
 	len = fd->search_key->cat.CName.len = rec.thread.CName.len;
+	if (len > HFS_NAMELEN) {
+		pr_err("bad catalog namelength\n");
+		return -EIO;
+	}
 	memcpy(fd->search_key->cat.CName.name, rec.thread.CName.name, len);
 	return hfs_brec_find(fd);
 }
@@ -200,18 +210,20 @@ int hfs_cat_find_brec(struct super_block *sb, u32 cnid,
  * Delete the indicated file or directory.
  * The associated thread is also removed unless ('with_thread'==0).
  */
-int hfs_cat_delete(u32 cnid, struct inode *dir, struct qstr *str)
+int hfs_cat_delete(u32 cnid, struct inode *dir, const struct qstr *str)
 {
 	struct super_block *sb;
 	struct hfs_find_data fd;
-	struct list_head *pos;
+	struct hfs_readdir_data *rd;
 	int res, type;
 
-	dprint(DBG_CAT_MOD, "delete_cat: %s,%u\n", str ? str->name : NULL, cnid);
+	hfs_dbg(CAT_MOD, "delete_cat: %s,%u\n", str ? str->name : NULL, cnid);
 	sb = dir->i_sb;
-	hfs_find_init(HFS_SB(sb)->cat_tree, &fd);
+	res = hfs_find_init(HFS_SB(sb)->cat_tree, &fd);
+	if (res)
+		return res;
 
-	hfs_cat_build_key(fd.search_key, dir->i_ino, str);
+	hfs_cat_build_key(sb, fd.search_key, dir->i_ino, str);
 	res = hfs_brec_find(&fd);
 	if (res)
 		goto out;
@@ -228,18 +240,19 @@ int hfs_cat_delete(u32 cnid, struct inode *dir, struct qstr *str)
 		}
 	}
 
-	list_for_each(pos, &HFS_I(dir)->open_dir_list) {
-		struct hfs_readdir_data *rd =
-			list_entry(pos, struct hfs_readdir_data, list);
+	/* we only need to take spinlock for exclusion with ->release() */
+	spin_lock(&HFS_I(dir)->open_dir_lock);
+	list_for_each_entry(rd, &HFS_I(dir)->open_dir_list, list) {
 		if (fd.tree->keycmp(fd.search_key, (void *)&rd->key) < 0)
 			rd->file->f_pos--;
 	}
+	spin_unlock(&HFS_I(dir)->open_dir_lock);
 
 	res = hfs_brec_remove(&fd);
 	if (res)
 		goto out;
 
-	hfs_cat_build_key(fd.search_key, cnid, NULL);
+	hfs_cat_build_key(sb, fd.search_key, cnid, NULL);
 	res = hfs_brec_find(&fd);
 	if (!res) {
 		res = hfs_brec_remove(&fd);
@@ -248,7 +261,7 @@ int hfs_cat_delete(u32 cnid, struct inode *dir, struct qstr *str)
 	}
 
 	dir->i_size--;
-	dir->i_mtime = dir->i_ctime = CURRENT_TIME_SEC;
+	dir->i_mtime = dir->i_ctime = current_time(dir);
 	mark_inode_dirty(dir);
 	res = 0;
 out:
@@ -264,8 +277,8 @@ out:
  * If the destination exists it is removed and a
  * (struct hfs_cat_entry) for it is returned in '*result'.
  */
-int hfs_cat_move(u32 cnid, struct inode *src_dir, struct qstr *src_name,
-		 struct inode *dst_dir, struct qstr *dst_name)
+int hfs_cat_move(u32 cnid, struct inode *src_dir, const struct qstr *src_name,
+		 struct inode *dst_dir, const struct qstr *dst_name)
 {
 	struct super_block *sb;
 	struct hfs_find_data src_fd, dst_fd;
@@ -273,23 +286,30 @@ int hfs_cat_move(u32 cnid, struct inode *src_dir, struct qstr *src_name,
 	int entry_size, type;
 	int err;
 
-	dprint(DBG_CAT_MOD, "rename_cat: %u - %lu,%s - %lu,%s\n", cnid, src_dir->i_ino, src_name->name,
+	hfs_dbg(CAT_MOD, "rename_cat: %u - %lu,%s - %lu,%s\n",
+		cnid, src_dir->i_ino, src_name->name,
 		dst_dir->i_ino, dst_name->name);
 	sb = src_dir->i_sb;
-	hfs_find_init(HFS_SB(sb)->cat_tree, &src_fd);
+	err = hfs_find_init(HFS_SB(sb)->cat_tree, &src_fd);
+	if (err)
+		return err;
 	dst_fd = src_fd;
 
 	/* find the old dir entry and read the data */
-	hfs_cat_build_key(src_fd.search_key, src_dir->i_ino, src_name);
+	hfs_cat_build_key(sb, src_fd.search_key, src_dir->i_ino, src_name);
 	err = hfs_brec_find(&src_fd);
 	if (err)
 		goto out;
+	if (src_fd.entrylength > sizeof(entry) || src_fd.entrylength < 0) {
+		err = -EIO;
+		goto out;
+	}
 
 	hfs_bnode_read(src_fd.bnode, &entry, src_fd.entryoffset,
 			    src_fd.entrylength);
 
 	/* create new dir entry with the data from the old entry */
-	hfs_cat_build_key(dst_fd.search_key, dst_dir->i_ino, dst_name);
+	hfs_cat_build_key(sb, dst_fd.search_key, dst_dir->i_ino, dst_name);
 	err = hfs_brec_find(&dst_fd);
 	if (err != -ENOENT) {
 		if (!err)
@@ -301,11 +321,11 @@ int hfs_cat_move(u32 cnid, struct inode *src_dir, struct qstr *src_name,
 	if (err)
 		goto out;
 	dst_dir->i_size++;
-	dst_dir->i_mtime = dst_dir->i_ctime = CURRENT_TIME_SEC;
+	dst_dir->i_mtime = dst_dir->i_ctime = current_time(dst_dir);
 	mark_inode_dirty(dst_dir);
 
 	/* finally remove the old entry */
-	hfs_cat_build_key(src_fd.search_key, src_dir->i_ino, src_name);
+	hfs_cat_build_key(sb, src_fd.search_key, src_dir->i_ino, src_name);
 	err = hfs_brec_find(&src_fd);
 	if (err)
 		goto out;
@@ -313,7 +333,7 @@ int hfs_cat_move(u32 cnid, struct inode *src_dir, struct qstr *src_name,
 	if (err)
 		goto out;
 	src_dir->i_size--;
-	src_dir->i_mtime = src_dir->i_ctime = CURRENT_TIME_SEC;
+	src_dir->i_mtime = src_dir->i_ctime = current_time(src_dir);
 	mark_inode_dirty(src_dir);
 
 	type = entry.type;
@@ -321,7 +341,7 @@ int hfs_cat_move(u32 cnid, struct inode *src_dir, struct qstr *src_name,
 		goto out;
 
 	/* remove old thread entry */
-	hfs_cat_build_key(src_fd.search_key, cnid, NULL);
+	hfs_cat_build_key(sb, src_fd.search_key, cnid, NULL);
 	err = hfs_brec_find(&src_fd);
 	if (err)
 		goto out;
@@ -330,8 +350,8 @@ int hfs_cat_move(u32 cnid, struct inode *src_dir, struct qstr *src_name,
 		goto out;
 
 	/* create new thread entry */
-	hfs_cat_build_key(dst_fd.search_key, cnid, NULL);
-	entry_size = hfs_cat_build_thread(&entry, type == HFS_CDR_FIL ? HFS_CDR_FTH : HFS_CDR_THD,
+	hfs_cat_build_key(sb, dst_fd.search_key, cnid, NULL);
+	entry_size = hfs_cat_build_thread(sb, &entry, type == HFS_CDR_FIL ? HFS_CDR_FTH : HFS_CDR_THD,
 					dst_dir->i_ino, dst_name);
 	err = hfs_brec_find(&dst_fd);
 	if (err != -ENOENT) {

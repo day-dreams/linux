@@ -14,6 +14,7 @@
     along with this program; if not, write to the Free Software
     Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
+
 #include <linux/moduleloader.h>
 #include <linux/elf.h>
 #include <linux/vmalloc.h>
@@ -26,31 +27,6 @@
 #else
 #define DEBUGP(fmt...)
 #endif
-
-void *module_alloc(unsigned long size)
-{
-	if (size == 0)
-		return NULL;
-	return vmalloc_exec(size);
-}
-
-
-/* Free memory returned from module_alloc */
-void module_free(struct module *mod, void *module_region)
-{
-	vfree(module_region);
-	/* FIXME: If module_region == mod->init_region, trim exception
-           table entries. */
-}
-
-/* We don't need anything special. */
-int module_frob_arch_sections(Elf_Ehdr *hdr,
-			      Elf_Shdr *sechdrs,
-			      char *secstrings,
-			      struct module *mod)
-{
-	return 0;
-}
 
 #define COPY_UNALIGNED_WORD(sw, tw, align) \
 { \
@@ -224,30 +200,4 @@ int apply_relocate_add(Elf32_Shdr *sechdrs,
 		}
 	}
 	return 0;
-}
-
-int apply_relocate(Elf32_Shdr *sechdrs,
-		       const char *strtab,
-		       unsigned int symindex,
-		       unsigned int relsec,
-		       struct module *me)
-{
-#if 0
-	printk(KERN_ERR "module %s: REL RELOCATION unsupported\n",
-	       me->name);
-	return -ENOEXEC;
-#endif
-	return 0;
-
-}
-
-int module_finalize(const Elf_Ehdr *hdr,
-		    const Elf_Shdr *sechdrs,
-		    struct module *me)
-{
-	return 0;
-}
-
-void module_arch_cleanup(struct module *mod)
-{
 }

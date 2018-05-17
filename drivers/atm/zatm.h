@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* drivers/atm/zatm.h - ZeitNet ZN122x device driver declarations */
 
 /* Written 1995-1998 by Werner Almesberger, EPFL LRC/ICA */
@@ -6,7 +7,6 @@
 #ifndef DRIVER_ATM_ZATM_H
 #define DRIVER_ATM_ZATM_H
 
-#include <linux/config.h>
 #include <linux/skbuff.h>
 #include <linux/atm.h>
 #include <linux/atmdev.h>
@@ -73,6 +73,7 @@ struct zatm_dev {
 	int chans;			/* map size, must be 2^n */
 	/*-------------------------------- mailboxes */
 	unsigned long mbx_start[NR_MBX];/* start addresses */
+	dma_addr_t mbx_dma[NR_MBX];
 	u16 mbx_end[NR_MBX];		/* end offset (in bytes) */
 	/*-------------------------------- other pointers */
 	u32 pool_base;			/* Free buffer pool dsc (word addr) */

@@ -14,19 +14,18 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
 #include <linux/net.h>
+#include <linux/slab.h>
 #include <net/ax25.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <net/tcp.h>
-#include <asm/uaccess.h>
-#include <asm/system.h>
+#include <net/tcp_states.h>
+#include <linux/uaccess.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -56,7 +55,7 @@ void ax25_frames_acked(ax25_cb *ax25, unsigned short nr)
 	 */
 	if (ax25->va != nr) {
 		while (skb_peek(&ax25->ack_queue) != NULL && ax25->va != nr) {
-		        skb = skb_dequeue(&ax25->ack_queue);
+			skb = skb_dequeue(&ax25->ack_queue);
 			kfree_skb(skb);
 			ax25->va = (ax25->va + 1) % ax25->modulus;
 		}
@@ -65,20 +64,15 @@ void ax25_frames_acked(ax25_cb *ax25, unsigned short nr)
 
 void ax25_requeue_frames(ax25_cb *ax25)
 {
-        struct sk_buff *skb, *skb_prev = NULL;
+	struct sk_buff *skb;
 
 	/*
 	 * Requeue all the un-ack-ed frames on the output queue to be picked
 	 * up by ax25_kick called from the timer. This arrangement handles the
 	 * possibility of an empty output queue.
 	 */
-	while ((skb = skb_dequeue(&ax25->ack_queue)) != NULL) {
-		if (skb_prev == NULL)
-			skb_queue_head(&ax25->write_queue, skb);
-		else
-			skb_append(skb_prev, skb);
-		skb_prev = skb;
-	}
+	while ((skb = skb_dequeue_tail(&ax25->ack_queue)) != NULL)
+		skb_queue_head(&ax25->write_queue, skb);
 }
 
 /*
@@ -163,7 +157,7 @@ void ax25_send_control(ax25_cb *ax25, int frametype, int poll_bit, int type)
 
 	skb_reserve(skb, ax25->ax25_dev->dev->hard_header_len);
 
-	skb->nh.raw = skb->data;
+	skb_reset_network_header(skb);
 
 	/* Assume a response - address structure for DTE */
 	if (ax25->modulus == AX25_MODULUS) {
@@ -206,7 +200,7 @@ void ax25_return_dm(struct net_device *dev, ax25_address *src, ax25_address *des
 		return;	/* Next SABM will get DM'd */
 
 	skb_reserve(skb, dev->hard_header_len);
-	skb->nh.raw = skb->data;
+	skb_reset_network_header(skb);
 
 	ax25_digi_invert(digi, &retdigi);
 
@@ -220,9 +214,7 @@ void ax25_return_dm(struct net_device *dev, ax25_address *src, ax25_address *des
 	dptr  = skb_push(skb, ax25_addr_size(digi));
 	dptr += ax25_addr_build(dptr, dest, src, &retdigi, AX25_RESPONSE, AX25_MODULUS);
 
-	skb->dev      = dev;
-
-	ax25_queue_xmit(skb);
+	ax25_queue_xmit(skb, dev);
 }
 
 /*
@@ -272,6 +264,8 @@ void ax25_disconnect(ax25_cb *ax25, int reason)
 {
 	ax25_clear_queues(ax25);
 
+	if (!ax25->sk || !sock_flag(ax25->sk, SOCK_DESTROY))
+		ax25_stop_heartbeat(ax25);
 	ax25_stop_t1timer(ax25);
 	ax25_stop_t2timer(ax25);
 	ax25_stop_t3timer(ax25);
@@ -282,6 +276,7 @@ void ax25_disconnect(ax25_cb *ax25, int reason)
 	ax25_link_failed(ax25, reason);
 
 	if (ax25->sk != NULL) {
+		local_bh_disable();
 		bh_lock_sock(ax25->sk);
 		ax25->sk->sk_state     = TCP_CLOSE;
 		ax25->sk->sk_err       = reason;
@@ -291,5 +286,6 @@ void ax25_disconnect(ax25_cb *ax25, int reason)
 			sock_set_flag(ax25->sk, SOCK_DEAD);
 		}
 		bh_unlock_sock(ax25->sk);
+		local_bh_enable();
 	}
 }

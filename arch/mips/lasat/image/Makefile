@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # MAKEFILE FOR THE MIPS LINUX BOOTLOADER AND ROM DEBUGGER
 #
@@ -12,23 +13,22 @@ endif
 
 MKLASATIMG = mklasatimg
 MKLASATIMG_ARCH = mq2,mqpro,sp100,sp200
-KERNEL_IMAGE = $(TOPDIR)/vmlinux
-KERNEL_START = $(shell $(NM) $(KERNEL_IMAGE) | grep " _text" | cut -f1 -d\ )
-KERNEL_ENTRY = $(shell $(NM) $(KERNEL_IMAGE) | grep kernel_entry | cut -f1 -d\ )
+KERNEL_IMAGE = vmlinux
 
-LDSCRIPT= -L$(obj) -Tromscript.normal
+LDSCRIPT= -L$(srctree)/$(src) -Tromscript.normal
 
-HEAD_DEFINES := -D_kernel_start=0x$(KERNEL_START) \
-		-D_kernel_entry=0x$(KERNEL_ENTRY) \
+HEAD_DEFINES := -D_kernel_start=$(VMLINUX_LOAD_ADDRESS) \
+		-D_kernel_entry=$(VMLINUX_ENTRY_ADDRESS) \
 		-D VERSION="\"$(Version)\"" \
-		-D TIMESTAMP=$(shell date +%s) 
+		-D TIMESTAMP=$(shell date +%s)
 
 $(obj)/head.o: $(obj)/head.S $(KERNEL_IMAGE)
-	$(CC) -fno-pic $(HEAD_DEFINES) -I$(TOPDIR)/include -c -o $@ $<
+	$(CC) -fno-pic $(HEAD_DEFINES) $(LINUXINCLUDE) -c -o $@ $<
 
 OBJECTS = head.o kImage.o
 
-rom.sw:	$(obj)/rom.sw
+rom.sw: $(obj)/rom.sw
+rom.bin:	$(obj)/rom.bin
 
 $(obj)/rom.sw:	$(obj)/rom.bin
 	$(MKLASATIMG) -o $@ -k $^ -m $(MKLASATIMG_ARCH)

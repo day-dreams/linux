@@ -1,16 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- *  arch/s390/kernel/ebcdic.c
  *    ECBDIC -> ASCII, ASCII -> ECBDIC,
  *    upper to lower case (EBCDIC) conversion tables.
  *
  *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright IBM Corp. 1999
  *    Author(s): Martin Schwidefsky <schwidefsky@de.ibm.com>
  *               Martin Peschke <peschke@fh-brandenburg.de>
  */
 
-#include <linux/module.h>
-#include <asm/types.h>
+#include <linux/types.h>
+#include <linux/export.h>
+#include <asm/ebcdic.h>
 
 /*
  * ASCII (IBM PC 437)  -> EBCDIC 037

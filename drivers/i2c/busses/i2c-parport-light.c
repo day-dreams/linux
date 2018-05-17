@@ -1,14 +1,14 @@
 /* ------------------------------------------------------------------------ *
- * i2c-parport.c I2C bus over parallel port                                 *
+ * i2c-parport-light.c I2C bus over parallel port                           *
  * ------------------------------------------------------------------------ *
-   Copyright (C) 2003-2004 Jean Delvare <khali@linux-fr.org>
-   
+   Copyright (C) 2003-2010 Jean Delvare <jdelvare@suse.de>
+
    Based on older i2c-velleman.c driver
    Copyright (C) 1995-2000 Simon G. Vogl
    With some changes from:
    Frodo Looijaard <frodol@dds.nl>
-   Kyösti Mälkki <kmalkki@cc.hut.fi>
-   
+   KyÃ¶sti MÃ¤lkki <kmalkki@cc.hut.fi>
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 2 of the License, or
@@ -18,27 +18,32 @@
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program; if not, write to the Free Software
-   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  * ------------------------------------------------------------------------ */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/delay.h>
+#include <linux/platform_device.h>
 #include <linux/ioport.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
-#include <asm/io.h>
+#include <linux/i2c-smbus.h>
+#include <linux/io.h>
 #include "i2c-parport.h"
 
 #define DEFAULT_BASE 0x378
+#define DRVNAME "i2c-parport-light"
+
+static struct platform_device *pdev;
 
 static u16 base;
-module_param(base, ushort, 0);
+module_param_hw(base, ushort, ioport, 0);
 MODULE_PARM_DESC(base, "Base I/O address");
+
+static int irq;
+module_param_hw(irq, int, irq, 0);
+MODULE_PARM_DESC(irq, "IRQ (optional)");
 
 /* ----- Low-level parallel port access ----------------------------------- */
 
@@ -104,70 +109,165 @@ static struct i2c_algo_bit_data parport_algo_data = {
 	.getsda		= parport_getsda,
 	.getscl		= parport_getscl,
 	.udelay		= 50,
-	.mdelay		= 50,
 	.timeout	= HZ,
-}; 
+};
 
-/* ----- I2c structure ---------------------------------------------------- */
+/* ----- Driver registration ---------------------------------------------- */
 
 static struct i2c_adapter parport_adapter = {
 	.owner		= THIS_MODULE,
 	.class		= I2C_CLASS_HWMON,
-	.id		= I2C_HW_B_LP,
 	.algo_data	= &parport_algo_data,
 	.name		= "Parallel port adapter (light)",
 };
 
-/* ----- Module loading, unloading and information ------------------------ */
+/* SMBus alert support */
+static struct i2c_smbus_alert_setup alert_data = {
+};
+static struct i2c_client *ara;
+static struct lineop parport_ctrl_irq = {
+	.val		= (1 << 4),
+	.port		= PORT_CTRL,
+};
 
-static int __init i2c_parport_init(void)
+static int i2c_parport_probe(struct platform_device *pdev)
 {
-	int type_count;
-
-	type_count = sizeof(adapter_parm)/sizeof(struct adapter_parm);
-	if (type < 0 || type >= type_count) {
-		printk(KERN_WARNING "i2c-parport: invalid type (%d)\n", type);
-		type = 0;
-	}
-	
-	if (base == 0) {
-		printk(KERN_INFO "i2c-parport: using default base 0x%x\n", DEFAULT_BASE);
-		base = DEFAULT_BASE;
-	}
-
-	if (!request_region(base, 3, "i2c-parport"))
-		return -ENODEV;
-
-        if (!adapter_parm[type].getscl.val)
-		parport_algo_data.getscl = NULL;
+	int err;
 
 	/* Reset hardware to a sane state (SCL and SDA high) */
 	parport_setsda(NULL, 1);
 	parport_setscl(NULL, 1);
 	/* Other init if needed (power on...) */
-	if (adapter_parm[type].init.val)
+	if (adapter_parm[type].init.val) {
 		line_set(1, &adapter_parm[type].init);
-
-	if (i2c_bit_add_bus(&parport_adapter) < 0) {
-		printk(KERN_ERR "i2c-parport: Unable to register with I2C\n");
-		release_region(base, 3);
-		return -ENODEV;
+		/* Give powered devices some time to settle */
+		msleep(100);
 	}
-	
+
+	parport_adapter.dev.parent = &pdev->dev;
+	err = i2c_bit_add_bus(&parport_adapter);
+	if (err) {
+		dev_err(&pdev->dev, "Unable to register with I2C\n");
+		return err;
+	}
+
+	/* Setup SMBus alert if supported */
+	if (adapter_parm[type].smbus_alert && irq) {
+		alert_data.irq = irq;
+		ara = i2c_setup_smbus_alert(&parport_adapter, &alert_data);
+		if (ara)
+			line_set(1, &parport_ctrl_irq);
+		else
+			dev_warn(&pdev->dev, "Failed to register ARA client\n");
+	}
+
 	return 0;
 }
 
-static void __exit i2c_parport_exit(void)
+static int i2c_parport_remove(struct platform_device *pdev)
 {
+	if (ara) {
+		line_set(0, &parport_ctrl_irq);
+		i2c_unregister_device(ara);
+		ara = NULL;
+	}
+	i2c_del_adapter(&parport_adapter);
+
 	/* Un-init if needed (power off...) */
 	if (adapter_parm[type].init.val)
 		line_set(0, &adapter_parm[type].init);
 
-	i2c_bit_del_bus(&parport_adapter);
+	return 0;
+}
+
+static struct platform_driver i2c_parport_driver = {
+	.driver = {
+		.name	= DRVNAME,
+	},
+	.probe		= i2c_parport_probe,
+	.remove		= i2c_parport_remove,
+};
+
+static int __init i2c_parport_device_add(u16 address)
+{
+	int err;
+
+	pdev = platform_device_alloc(DRVNAME, -1);
+	if (!pdev) {
+		err = -ENOMEM;
+		printk(KERN_ERR DRVNAME ": Device allocation failed\n");
+		goto exit;
+	}
+
+	err = platform_device_add(pdev);
+	if (err) {
+		printk(KERN_ERR DRVNAME ": Device addition failed (%d)\n",
+		       err);
+		goto exit_device_put;
+	}
+
+	return 0;
+
+exit_device_put:
+	platform_device_put(pdev);
+exit:
+	return err;
+}
+
+static int __init i2c_parport_init(void)
+{
+	int err;
+
+	if (type < 0) {
+		printk(KERN_ERR DRVNAME ": adapter type unspecified\n");
+		return -ENODEV;
+	}
+
+	if (type >= ARRAY_SIZE(adapter_parm)) {
+		printk(KERN_ERR DRVNAME ": invalid type (%d)\n", type);
+		return -ENODEV;
+	}
+
+	if (base == 0) {
+		pr_info(DRVNAME ": using default base 0x%x\n", DEFAULT_BASE);
+		base = DEFAULT_BASE;
+	}
+
+	if (!request_region(base, 3, DRVNAME))
+		return -EBUSY;
+
+	if (irq != 0)
+		pr_info(DRVNAME ": using irq %d\n", irq);
+
+	if (!adapter_parm[type].getscl.val)
+		parport_algo_data.getscl = NULL;
+
+	/* Sets global pdev as a side effect */
+	err = i2c_parport_device_add(base);
+	if (err)
+		goto exit_release;
+
+	err = platform_driver_register(&i2c_parport_driver);
+	if (err)
+		goto exit_device;
+
+	return 0;
+
+exit_device:
+	platform_device_unregister(pdev);
+exit_release:
+	release_region(base, 3);
+	return err;
+}
+
+static void __exit i2c_parport_exit(void)
+{
+	platform_driver_unregister(&i2c_parport_driver);
+	platform_device_unregister(pdev);
 	release_region(base, 3);
 }
 
-MODULE_AUTHOR("Jean Delvare <khali@linux-fr.org>");
+MODULE_AUTHOR("Jean Delvare <jdelvare@suse.de>");
 MODULE_DESCRIPTION("I2C bus over parallel port (light)");
 MODULE_LICENSE("GPL");
 

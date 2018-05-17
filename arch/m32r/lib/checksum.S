@@ -25,10 +25,7 @@
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
  */
-/* $Id$ */
 
-
-#include <linux/config.h>
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 #include <asm/errno.h>
@@ -320,3 +317,4 @@ ENTRY(csum_partial_copy_generic)
 	nop
 	nop
 
+	.end

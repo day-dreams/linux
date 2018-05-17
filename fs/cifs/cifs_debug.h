@@ -18,49 +18,59 @@
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  *
 */
-#define CIFS_DEBUG		/* BB temporary */
 
 #ifndef _H_CIFS_DEBUG
 #define _H_CIFS_DEBUG
 
 void cifs_dump_mem(char *label, void *data, int length);
-extern int traceSMB;		/* flag which enables the function below */
-void dump_smb(struct smb_hdr *, int);
+void cifs_dump_detail(void *);
+void cifs_dump_mids(struct TCP_Server_Info *);
+extern bool traceSMB;		/* flag which enables the function below */
+void dump_smb(void *, int);
+#define CIFS_INFO	0x01
+#define CIFS_RC		0x02
+#define CIFS_TIMER	0x04
+
+#define VFS 1
+#define FYI 2
+extern int cifsFYI;
+#ifdef CONFIG_CIFS_DEBUG2
+#define NOISY 4
+#else
+#define NOISY 0
+#endif
 
 /*
  *	debug ON
  *	--------
  */
-#ifdef CIFS_DEBUG
+#ifdef CONFIG_CIFS_DEBUG
 
+__printf(1, 2) void cifs_vfs_err(const char *fmt, ...);
 
 /* information message: e.g., configuration, major event */
-extern int cifsFYI;
-#define cifsfyi(format,arg...) if (cifsFYI) printk(KERN_DEBUG " " __FILE__ ": " format "\n" "" , ## arg)
-
-#define cFYI(button,prspec) if (button) cifsfyi prspec
-
-#define cifswarn(format, arg...) printk(KERN_WARNING ": " format "\n" , ## arg)
-
-/* debug event message: */
-extern int cifsERROR;
-
-#define cEVENT(format,arg...) if (cifsERROR) printk(KERN_EVENT __FILE__ ": " format "\n" , ## arg)
-
-/* error event message: e.g., i/o error */
-#define cifserror(format,arg...) if (cifsERROR) printk(KERN_ERR " CIFS VFS: " format "\n" "" , ## arg)
-
-#define cERROR(button, prspec) if (button) cifserror prspec
+#define cifs_dbg(type, fmt, ...)					\
+do {									\
+	if (type == FYI && cifsFYI & CIFS_INFO) {			\
+		pr_debug_ratelimited("%s: "				\
+			    fmt, __FILE__, ##__VA_ARGS__);		\
+	} else if (type == VFS) {					\
+		cifs_vfs_err(fmt, ##__VA_ARGS__);			\
+	} else if (type == NOISY && type != 0) {			\
+		pr_debug_ratelimited(fmt, ##__VA_ARGS__);		\
+	}								\
+} while (0)
 
 /*
  *	debug OFF
  *	---------
  */
 #else		/* _CIFS_DEBUG */
-#define cERROR(button,prspec)
-#define cEVENT(format,arg...)
-#define cFYI(button, prspec)
-#define cifserror(format,arg...)
-#endif		/* _CIFS_DEBUG */
+#define cifs_dbg(type, fmt, ...)					\
+do {									\
+	if (0)								\
+		pr_debug(fmt, ##__VA_ARGS__);				\
+} while (0)
+#endif
 
 #endif				/* _H_CIFS_DEBUG */

@@ -1,8 +1,6 @@
 /**
- * $Id: phram.c,v 1.11 2005/01/05 18:05:13 dwmw2 Exp $
- *
- * Copyright (c) ????		Jochen Schäuble <psionic@psionic.de>
- * Copyright (c) 2003-2004	Jörn Engel <joern@wh.fh-wedel.de>
+ * Copyright (c) ????		Jochen SchÃ¤uble <psionic@psionic.de>
+ * Copyright (c) 2003-2004	Joern Engel <joern@wh.fh-wedel.de>
  *
  * Usage:
  *
@@ -15,18 +13,18 @@
  *
  * Example:
  *	phram=swap,64Mi,128Mi phram=test,900Mi,1Mi
- *
  */
 
-#include <asm/io.h>
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
+#include <linux/io.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/slab.h>
 #include <linux/mtd/mtd.h>
-
-#define ERROR(fmt, args...) printk(KERN_ERR "phram: " fmt , ## args)
 
 struct phram_mtd_list {
 	struct mtd_info mtd;
@@ -35,44 +33,33 @@ struct phram_mtd_list {
 
 static LIST_HEAD(phram_list);
 
-
-
 static int phram_erase(struct mtd_info *mtd, struct erase_info *instr)
 {
 	u_char *start = mtd->priv;
 
-	if (instr->addr + instr->len > mtd->size)
-		return -EINVAL;
-	
 	memset(start + instr->addr, 0xff, instr->len);
 
-	/* This'll catch a few races. Free the thing before returning :) 
+	/*
+	 * This'll catch a few races. Free the thing before returning :)
 	 * I don't feel at all ashamed. This kind of thing is possible anyway
 	 * with flash, but unlikely.
 	 */
-
 	instr->state = MTD_ERASE_DONE;
-
 	mtd_erase_callback(instr);
-
 	return 0;
 }
 
 static int phram_point(struct mtd_info *mtd, loff_t from, size_t len,
-		size_t *retlen, u_char **mtdbuf)
+		size_t *retlen, void **virt, resource_size_t *phys)
 {
-	u_char *start = mtd->priv;
-
-	if (from + len > mtd->size)
-		return -EINVAL;
-	
-	*mtdbuf = start + from;
+	*virt = mtd->priv + from;
 	*retlen = len;
 	return 0;
 }
 
-static void phram_unpoint(struct mtd_info *mtd, u_char *addr, loff_t from, size_t len)
+static int phram_unpoint(struct mtd_info *mtd, loff_t from, size_t len)
 {
+	return 0;
 }
 
 static int phram_read(struct mtd_info *mtd, loff_t from, size_t len,
@@ -80,11 +67,7 @@ static int phram_read(struct mtd_info *mtd, loff_t from, size_t len,
 {
 	u_char *start = mtd->priv;
 
-	if (from + len > mtd->size)
-		return -EINVAL;
-	
 	memcpy(buf, start + from, len);
-
 	*retlen = len;
 	return 0;
 }
@@ -94,67 +77,61 @@ static int phram_write(struct mtd_info *mtd, loff_t to, size_t len,
 {
 	u_char *start = mtd->priv;
 
-	if (to + len > mtd->size)
-		return -EINVAL;
-	
 	memcpy(start + to, buf, len);
-
 	*retlen = len;
 	return 0;
 }
 
-
-
 static void unregister_devices(void)
 {
-	struct phram_mtd_list *this;
+	struct phram_mtd_list *this, *safe;
 
-	list_for_each_entry(this, &phram_list, list) {
-		del_mtd_device(&this->mtd);
+	list_for_each_entry_safe(this, safe, &phram_list, list) {
+		mtd_device_unregister(&this->mtd);
 		iounmap(this->mtd.priv);
+		kfree(this->mtd.name);
 		kfree(this);
 	}
 }
 
-static int register_device(char *name, unsigned long start, unsigned long len)
+static int register_device(char *name, phys_addr_t start, size_t len)
 {
 	struct phram_mtd_list *new;
 	int ret = -ENOMEM;
 
-	new = kmalloc(sizeof(*new), GFP_KERNEL);
+	new = kzalloc(sizeof(*new), GFP_KERNEL);
 	if (!new)
 		goto out0;
-
-	memset(new, 0, sizeof(*new));
 
 	ret = -EIO;
 	new->mtd.priv = ioremap(start, len);
 	if (!new->mtd.priv) {
-		ERROR("ioremap failed\n");
+		pr_err("ioremap failed\n");
 		goto out1;
 	}
 
 
 	new->mtd.name = name;
 	new->mtd.size = len;
-	new->mtd.flags = MTD_CAP_RAM | MTD_ERASEABLE | MTD_VOLATILE;
-        new->mtd.erase = phram_erase;
-	new->mtd.point = phram_point;
-	new->mtd.unpoint = phram_unpoint;
-	new->mtd.read = phram_read;
-	new->mtd.write = phram_write;
+	new->mtd.flags = MTD_CAP_RAM;
+	new->mtd._erase = phram_erase;
+	new->mtd._point = phram_point;
+	new->mtd._unpoint = phram_unpoint;
+	new->mtd._read = phram_read;
+	new->mtd._write = phram_write;
 	new->mtd.owner = THIS_MODULE;
 	new->mtd.type = MTD_RAM;
-	new->mtd.erasesize = 0;
+	new->mtd.erasesize = PAGE_SIZE;
+	new->mtd.writesize = 1;
 
 	ret = -EAGAIN;
-	if (add_mtd_device(&new->mtd)) {
-		ERROR("Failed to register new device\n");
+	if (mtd_device_register(&new->mtd, NULL, 0)) {
+		pr_err("Failed to register new device\n");
 		goto out2;
 	}
 
 	list_add_tail(&new->list, &phram_list);
-	return 0;	
+	return 0;
 
 out2:
 	iounmap(new->mtd.priv);
@@ -164,35 +141,35 @@ out0:
 	return ret;
 }
 
-static int ustrtoul(const char *cp, char **endp, unsigned int base)
+static int parse_num64(uint64_t *num64, char *token)
 {
-	unsigned long result = simple_strtoul(cp, endp, base);
+	size_t len;
+	int shift = 0;
+	int ret;
 
-	switch (**endp) {
-	case 'G':
-		result *= 1024;
-	case 'M':
-		result *= 1024;
-	case 'k':
-		result *= 1024;
+	len = strlen(token);
 	/* By dwmw2 editorial decree, "ki", "Mi" or "Gi" are to be used. */
-		if ((*endp)[1] == 'i')
-			(*endp) += 2;
+	if (len > 2) {
+		if (token[len - 1] == 'i') {
+			switch (token[len - 2]) {
+			case 'G':
+				shift += 10;
+			case 'M':
+				shift += 10;
+			case 'k':
+				shift += 10;
+				token[len - 2] = 0;
+				break;
+			default:
+				return -EINVAL;
+			}
+		}
 	}
-	return result;
-}
 
-static int parse_num32(uint32_t *num32, const char *token)
-{
-	char *endp;
-	unsigned long n;
+	ret = kstrtou64(token, 0, num64);
+	*num64 <<= shift;
 
-	n = ustrtoul(token, &endp, 0);
-	if (*endp)
-		return -EINVAL;
-
-	*num32 = n;
-	return 0;
+	return ret;
 }
 
 static int parse_name(char **pname, const char *token)
@@ -204,36 +181,58 @@ static int parse_name(char **pname, const char *token)
 	if (len > 64)
 		return -ENOSPC;
 
-	name = kmalloc(len, GFP_KERNEL);
+	name = kstrdup(token, GFP_KERNEL);
 	if (!name)
 		return -ENOMEM;
-
-	strcpy(name, token);
 
 	*pname = name;
 	return 0;
 }
 
+
+static inline void kill_final_newline(char *str)
+{
+	char *newline = strrchr(str, '\n');
+
+	if (newline && !newline[1])
+		*newline = 0;
+}
+
+
 #define parse_err(fmt, args...) do {	\
-	ERROR(fmt , ## args);	\
-	return 0;		\
+	pr_err(fmt , ## args);	\
+	return 1;		\
 } while (0)
 
-static int phram_setup(const char *val, struct kernel_param *kp)
+#ifndef MODULE
+static int phram_init_called;
+/*
+ * This shall contain the module parameter if any. It is of the form:
+ * - phram=<device>,<address>,<size> for module case
+ * - phram.phram=<device>,<address>,<size> for built-in case
+ * We leave 64 bytes for the device name, 20 for the address and 20 for the
+ * size.
+ * Example: phram.phram=rootfs,0xa0000000,512Mi
+ */
+static char phram_paramline[64 + 20 + 20];
+#endif
+
+static int phram_setup(const char *val)
 {
-	char buf[64+12+12], *str = buf;
+	char buf[64 + 20 + 20], *str = buf;
 	char *token[3];
 	char *name;
-	uint32_t start;
-	uint32_t len;
+	uint64_t start;
+	uint64_t len;
 	int i, ret;
 
 	if (strnlen(val, sizeof(buf)) >= sizeof(buf))
 		parse_err("parameter too long\n");
 
 	strcpy(str, val);
+	kill_final_newline(str);
 
-	for (i=0; i<3; i++)
+	for (i = 0; i < 3; i++)
 		token[i] = strsep(&str, ",");
 
 	if (str)
@@ -243,33 +242,77 @@ static int phram_setup(const char *val, struct kernel_param *kp)
 		parse_err("not enough arguments\n");
 
 	ret = parse_name(&name, token[0]);
-	if (ret == -ENOMEM)
-		parse_err("out of memory\n");
-	if (ret == -ENOSPC)
-		parse_err("name too long\n");
 	if (ret)
-		return 0;
+		return ret;
 
-	ret = parse_num32(&start, token[1]);
-	if (ret)
+	ret = parse_num64(&start, token[1]);
+	if (ret) {
+		kfree(name);
 		parse_err("illegal start address\n");
+	}
 
-	ret = parse_num32(&len, token[2]);
-	if (ret)
+	ret = parse_num64(&len, token[2]);
+	if (ret) {
+		kfree(name);
 		parse_err("illegal device length\n");
+	}
 
-	register_device(name, start, len);
+	ret = register_device(name, start, len);
+	if (!ret)
+		pr_info("%s device: %#llx at %#llx\n", name, len, start);
+	else
+		kfree(name);
 
-	return 0;
+	return ret;
 }
 
-module_param_call(phram, phram_setup, NULL, NULL, 000);
-MODULE_PARM_DESC(phram,"Memory region to map. \"map=<name>,<start>,<length>\"");
+static int phram_param_call(const char *val, const struct kernel_param *kp)
+{
+#ifdef MODULE
+	return phram_setup(val);
+#else
+	/*
+	 * If more parameters are later passed in via
+	 * /sys/module/phram/parameters/phram
+	 * and init_phram() has already been called,
+	 * we can parse the argument now.
+	 */
+
+	if (phram_init_called)
+		return phram_setup(val);
+
+	/*
+	 * During early boot stage, we only save the parameters
+	 * here. We must parse them later: if the param passed
+	 * from kernel boot command line, phram_param_call() is
+	 * called so early that it is not possible to resolve
+	 * the device (even kmalloc() fails). Defer that work to
+	 * phram_setup().
+	 */
+
+	if (strlen(val) >= sizeof(phram_paramline))
+		return -ENOSPC;
+	strcpy(phram_paramline, val);
+
+	return 0;
+#endif
+}
+
+module_param_call(phram, phram_param_call, NULL, NULL, 000);
+MODULE_PARM_DESC(phram, "Memory region to map. \"phram=<name>,<start>,<length>\"");
 
 
 static int __init init_phram(void)
 {
-	return 0;
+	int ret = 0;
+
+#ifndef MODULE
+	if (phram_paramline[0])
+		ret = phram_setup(phram_paramline);
+	phram_init_called = 1;
+#endif
+
+	return ret;
 }
 
 static void __exit cleanup_phram(void)
@@ -281,5 +324,5 @@ module_init(init_phram);
 module_exit(cleanup_phram);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Jörn Engel <joern@wh.fh-wedel.de>");
+MODULE_AUTHOR("Joern Engel <joern@wh.fh-wedel.de>");
 MODULE_DESCRIPTION("MTD driver for physical RAM");

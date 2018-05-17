@@ -19,7 +19,7 @@ It consists of several major infrastructure components:
 - klibc, a userspace C library, currently packaged separately, that is
   optimized for correctness and small size.
 
-The cpio file format used by initramfs is the "newc" (aka "cpio -c")
+The cpio file format used by initramfs is the "newc" (aka "cpio -H newc")
 format, and is documented in the file "buffer-format.txt".  There are
 two ways to add an early userspace image: specify an existing cpio
 archive to be used as the image or have the kernel build process build
@@ -28,7 +28,7 @@ the image from specifications.
 CPIO ARCHIVE method
 
 You can create a cpio archive that contains the early userspace image.
-Youre cpio archive should be specified in CONFIG_INITRAMFS_SOURCE and it
+Your cpio archive should be specified in CONFIG_INITRAMFS_SOURCE and it
 will be used directly.  Only a single cpio file may be specified in
 CONFIG_INITRAMFS_SOURCE and directory and file names are not allowed in
 combination with a cpio archive.
@@ -44,7 +44,7 @@ The image is specified as one or more sources in
 CONFIG_INITRAMFS_SOURCE.  Sources can be either directories or files -
 cpio archives are *not* allowed when building from sources.
 
-A source directory will have it and all of it's contents packaged.  The
+A source directory will have it and all of its contents packaged.  The
 specified directory name will be mapped to '/'.  When packaging a
 directory, limited user and group ID translation can be performed.
 INITRAMFS_ROOT_UID can be set to a user ID that needs to be mapped to
@@ -71,7 +71,7 @@ can really be interpreted as any legal argument to
 gen_initramfs_list.sh.  If a directory is specified as an argument then
 the contents are scanned, uid/gid translation is performed, and
 usr/gen_init_cpio file directives are output.  If a directory is
-specified as an arugemnt to scripts/gen_initramfs_list.sh then the
+specified as an argument to scripts/gen_initramfs_list.sh then the
 contents of the file are simply copied to the output.  All of the output
 directives from directory scanning and file contents copying are
 processed by usr/gen_init_cpio.
@@ -83,14 +83,13 @@ Where's this all leading?
 
 The klibc distribution contains some of the necessary software to make
 early userspace useful.  The klibc distribution is currently
-maintained separately from the kernel, but this may change early in
-the 2.7 era (it missed the boat for 2.5).
+maintained separately from the kernel.
 
 You can obtain somewhat infrequent snapshots of klibc from
-ftp://ftp.kernel.org/pub/linux/libs/klibc/
+https://www.kernel.org/pub/linux/libs/klibc/
 
-For active users, you are better off using the klibc BitKeeper
-repositories, at http://klibc.bkbits.net/
+For active users, you are better off using the klibc git
+repository, at http://git.kernel.org/?p=libs/klibc/klibc.git
 
 The standalone klibc distribution currently provides three components,
 in addition to the klibc library:
@@ -144,7 +143,7 @@ c) using initramfs.  The call to prepare_namespace() must be skipped.
    initrd format, an cpio archive.  It must be called "/init".  This binary
    is responsible to do all the things prepare_namespace() would do.
 
-   To remain backwards compatibility, the /init binary will only run if it
+   To maintain backwards compatibility, the /init binary will only run if it
    comes via an initramfs cpio archive.  If this is not the case,
    init/main.c:init() will run prepare_namespace() to mount the final root
    and exec one of the predefined init binaries.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/affs/bitmap.c
  *
@@ -7,31 +8,8 @@
  *  block allocation, deallocation, calculation of free space.
  */
 
+#include <linux/slab.h>
 #include "affs.h"
-
-/* This is, of course, shamelessly stolen from fs/minix */
-
-static int nibblemap[] = { 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4 };
-
-static u32
-affs_count_free_bits(u32 blocksize, const void *data)
-{
-	const u32 *map;
-	u32 free;
-	u32 tmp;
-
-	map = data;
-	free = 0;
-	for (blocksize /= 4; blocksize > 0; blocksize--) {
-		tmp = *map++;
-		while (tmp) {
-			free += nibblemap[tmp & 0xf];
-			tmp >>= 4;
-		}
-	}
-
-	return free;
-}
 
 u32
 affs_count_free_blocks(struct super_block *sb)
@@ -40,19 +18,19 @@ affs_count_free_blocks(struct super_block *sb)
 	u32 free;
 	int i;
 
-	pr_debug("AFFS: count_free_blocks()\n");
+	pr_debug("%s()\n", __func__);
 
-	if (sb->s_flags & MS_RDONLY)
+	if (sb_rdonly(sb))
 		return 0;
 
-	down(&AFFS_SB(sb)->s_bmlock);
+	mutex_lock(&AFFS_SB(sb)->s_bmlock);
 
 	bm = AFFS_SB(sb)->s_bitmap;
 	free = 0;
 	for (i = AFFS_SB(sb)->s_bmap_count; i > 0; bm++, i--)
 		free += bm->bm_free;
 
-	up(&AFFS_SB(sb)->s_bmlock);
+	mutex_unlock(&AFFS_SB(sb)->s_bmlock);
 
 	return free;
 }
@@ -66,7 +44,7 @@ affs_free_block(struct super_block *sb, u32 block)
 	u32 blk, bmap, bit, mask, tmp;
 	__be32 *data;
 
-	pr_debug("AFFS: free_block(%u)\n", block);
+	pr_debug("%s(%u)\n", __func__, block);
 
 	if (block > sbi->s_partition_size)
 		goto err_range;
@@ -76,7 +54,7 @@ affs_free_block(struct super_block *sb, u32 block)
 	bit     = blk % sbi->s_bmap_bits;
 	bm      = &sbi->s_bitmap[bmap];
 
-	down(&sbi->s_bmlock);
+	mutex_lock(&sbi->s_bmlock);
 
 	bh = sbi->s_bmap_bh;
 	if (sbi->s_last_bmap != bmap) {
@@ -102,33 +80,32 @@ affs_free_block(struct super_block *sb, u32 block)
 	*(__be32 *)bh->b_data = cpu_to_be32(tmp - mask);
 
 	mark_buffer_dirty(bh);
-	sb->s_dirt = 1;
+	affs_mark_sb_dirty(sb);
 	bm->bm_free++;
 
-	up(&sbi->s_bmlock);
+	mutex_unlock(&sbi->s_bmlock);
 	return;
 
 err_free:
 	affs_warning(sb,"affs_free_block","Trying to free block %u which is already free", block);
-	up(&sbi->s_bmlock);
+	mutex_unlock(&sbi->s_bmlock);
 	return;
 
 err_bh_read:
 	affs_error(sb,"affs_free_block","Cannot read bitmap block %u", bm->bm_key);
 	sbi->s_bmap_bh = NULL;
 	sbi->s_last_bmap = ~0;
-	up(&sbi->s_bmlock);
+	mutex_unlock(&sbi->s_bmlock);
 	return;
 
 err_range:
 	affs_error(sb, "affs_free_block","Block %u outside partition", block);
-	return;
 }
 
 /*
  * Allocate a block in the given allocation zone.
  * Since we have to byte-swap the bitmap on little-endian
- * machines, this is rather expensive. Therefor we will
+ * machines, this is rather expensive. Therefore we will
  * preallocate up to 16 blocks from the same word, if
  * possible. We are not doing preallocations in the
  * header zone, though.
@@ -148,7 +125,7 @@ affs_alloc_block(struct inode *inode, u32 goal)
 	sb = inode->i_sb;
 	sbi = AFFS_SB(sb);
 
-	pr_debug("AFFS: balloc(inode=%lu,goal=%u): ", inode->i_ino, goal);
+	pr_debug("balloc(inode=%lu,goal=%u): ", inode->i_ino, goal);
 
 	if (AFFS_I(inode)->i_pa_cnt) {
 		pr_debug("%d\n", AFFS_I(inode)->i_lastalloc+1);
@@ -168,7 +145,7 @@ affs_alloc_block(struct inode *inode, u32 goal)
 	bmap = blk / sbi->s_bmap_bits;
 	bm = &sbi->s_bitmap[bmap];
 
-	down(&sbi->s_bmlock);
+	mutex_lock(&sbi->s_bmlock);
 
 	if (bm->bm_free)
 		goto find_bmap_bit;
@@ -247,9 +224,9 @@ find_bit:
 	*(__be32 *)bh->b_data = cpu_to_be32(tmp + mask);
 
 	mark_buffer_dirty(bh);
-	sb->s_dirt = 1;
+	affs_mark_sb_dirty(sb);
 
-	up(&sbi->s_bmlock);
+	mutex_unlock(&sbi->s_bmlock);
 
 	pr_debug("%d\n", blk);
 	return blk;
@@ -259,7 +236,7 @@ err_bh_read:
 	sbi->s_bmap_bh = NULL;
 	sbi->s_last_bmap = ~0;
 err_full:
-	up(&sbi->s_bmlock);
+	mutex_unlock(&sbi->s_bmlock);
 	pr_debug("failed\n");
 	return 0;
 }
@@ -273,13 +250,12 @@ int affs_init_bitmap(struct super_block *sb, int *flags)
 	int i, res = 0;
 	struct affs_sb_info *sbi = AFFS_SB(sb);
 
-	if (*flags & MS_RDONLY)
+	if (*flags & SB_RDONLY)
 		return 0;
 
 	if (!AFFS_ROOT_TAIL(sb, sbi->s_root_bh)->bm_flag) {
-		printk(KERN_NOTICE "AFFS: Bitmap invalid - mounting %s read only\n",
-			sb->s_id);
-		*flags |= MS_RDONLY;
+		pr_notice("Bitmap invalid - mounting %s read only\n", sb->s_id);
+		*flags |= SB_RDONLY;
 		return 0;
 	}
 
@@ -289,12 +265,11 @@ int affs_init_bitmap(struct super_block *sb, int *flags)
 	sbi->s_bmap_count = (sbi->s_partition_size - sbi->s_reserved +
 				 sbi->s_bmap_bits - 1) / sbi->s_bmap_bits;
 	size = sbi->s_bmap_count * sizeof(*bm);
-	bm = sbi->s_bitmap = kmalloc(size, GFP_KERNEL);
+	bm = sbi->s_bitmap = kzalloc(size, GFP_KERNEL);
 	if (!sbi->s_bitmap) {
-		printk(KERN_ERR "AFFS: Bitmap allocation failed\n");
+		pr_err("Bitmap allocation failed\n");
 		return -ENOMEM;
 	}
-	memset(sbi->s_bitmap, 0, size);
 
 	bmap_blk = (__be32 *)sbi->s_root_bh->b_data;
 	blk = sb->s_blocksize / 4 - 49;
@@ -306,18 +281,18 @@ int affs_init_bitmap(struct super_block *sb, int *flags)
 		bm->bm_key = be32_to_cpu(bmap_blk[blk]);
 		bh = affs_bread(sb, bm->bm_key);
 		if (!bh) {
-			printk(KERN_ERR "AFFS: Cannot read bitmap\n");
+			pr_err("Cannot read bitmap\n");
 			res = -EIO;
 			goto out;
 		}
 		if (affs_checksum_block(sb, bh)) {
-			printk(KERN_WARNING "AFFS: Bitmap %u invalid - mounting %s read only.\n",
-			       bm->bm_key, sb->s_id);
-			*flags |= MS_RDONLY;
+			pr_warn("Bitmap %u invalid - mounting %s read only.\n",
+				bm->bm_key, sb->s_id);
+			*flags |= SB_RDONLY;
 			goto out;
 		}
-		pr_debug("AFFS: read bitmap block %d: %d\n", blk, bm->bm_key);
-		bm->bm_free = affs_count_free_bits(sb->s_blocksize - 4, bh->b_data + 4);
+		pr_debug("read bitmap block %d: %d\n", blk, bm->bm_key);
+		bm->bm_free = memweight(bh->b_data + 4, sb->s_blocksize - 4);
 
 		/* Don't try read the extension if this is the last block,
 		 * but we also need the right bm pointer below
@@ -328,7 +303,7 @@ int affs_init_bitmap(struct super_block *sb, int *flags)
 			affs_brelse(bmap_bh);
 		bmap_bh = affs_bread(sb, be32_to_cpu(bmap_blk[blk]));
 		if (!bmap_bh) {
-			printk(KERN_ERR "AFFS: Cannot read bitmap extension\n");
+			pr_err("Cannot read bitmap extension\n");
 			res = -EIO;
 			goto out;
 		}
@@ -367,7 +342,7 @@ int affs_init_bitmap(struct super_block *sb, int *flags)
 
 	/* recalculate bitmap count for last block */
 	bm--;
-	bm->bm_free = affs_count_free_bits(sb->s_blocksize - 4, bh->b_data + 4);
+	bm->bm_free = memweight(bh->b_data + 4, sb->s_blocksize - 4);
 
 out:
 	affs_brelse(bh);

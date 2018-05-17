@@ -1,20 +1,46 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/mm/mincore.c
  *
- * Copyright (C) 1994-1999  Linus Torvalds
+ * Copyright (C) 1994-2006  Linus Torvalds
  */
 
 /*
  * The mincore() system call.
  */
-#include <linux/slab.h>
 #include <linux/pagemap.h>
+#include <linux/gfp.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/syscalls.h>
+#include <linux/swap.h>
+#include <linux/swapops.h>
+#include <linux/shmem_fs.h>
+#include <linux/hugetlb.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/pgtable.h>
+
+static int mincore_hugetlb(pte_t *pte, unsigned long hmask, unsigned long addr,
+			unsigned long end, struct mm_walk *walk)
+{
+#ifdef CONFIG_HUGETLB_PAGE
+	unsigned char present;
+	unsigned char *vec = walk->private;
+
+	/*
+	 * Hugepages under user process are always in RAM and never
+	 * swapped out, but theoretically it needs to be checked.
+	 */
+	present = pte && !huge_pte_none(huge_ptep_get(pte));
+	for (; addr != end; vec++, addr += PAGE_SIZE)
+		*vec = present;
+	walk->private = vec;
+#else
+	BUG();
+#endif
+	return 0;
+}
 
 /*
  * Later we can get more picky about what "in core" means precisely.
@@ -22,62 +48,153 @@
  * and is up to date; i.e. that no page-in operation would be required
  * at this time if an application were to map and access this page.
  */
-static unsigned char mincore_page(struct vm_area_struct * vma,
-	unsigned long pgoff)
+static unsigned char mincore_page(struct address_space *mapping, pgoff_t pgoff)
 {
 	unsigned char present = 0;
-	struct address_space * as = vma->vm_file->f_mapping;
-	struct page * page;
+	struct page *page;
 
-	page = find_get_page(as, pgoff);
+	/*
+	 * When tmpfs swaps out a page from a file, any process mapping that
+	 * file will not get a swp_entry_t in its pte, but rather it is like
+	 * any other file mapping (ie. marked !present and faulted in with
+	 * tmpfs's .fault). So swapped out tmpfs mappings are tested here.
+	 */
+#ifdef CONFIG_SWAP
+	if (shmem_mapping(mapping)) {
+		page = find_get_entry(mapping, pgoff);
+		/*
+		 * shmem/tmpfs may return swap: account for swapcache
+		 * page too.
+		 */
+		if (radix_tree_exceptional_entry(page)) {
+			swp_entry_t swp = radix_to_swp_entry(page);
+			page = find_get_page(swap_address_space(swp),
+					     swp_offset(swp));
+		}
+	} else
+		page = find_get_page(mapping, pgoff);
+#else
+	page = find_get_page(mapping, pgoff);
+#endif
 	if (page) {
 		present = PageUptodate(page);
-		page_cache_release(page);
+		put_page(page);
 	}
 
 	return present;
 }
 
-static long mincore_vma(struct vm_area_struct * vma,
-	unsigned long start, unsigned long end, unsigned char __user * vec)
+static int __mincore_unmapped_range(unsigned long addr, unsigned long end,
+				struct vm_area_struct *vma, unsigned char *vec)
 {
-	long error, i, remaining;
-	unsigned char * tmp;
+	unsigned long nr = (end - addr) >> PAGE_SHIFT;
+	int i;
 
-	error = -ENOMEM;
-	if (!vma->vm_file)
-		return error;
+	if (vma->vm_file) {
+		pgoff_t pgoff;
 
-	start = ((start - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
-	if (end > vma->vm_end)
-		end = vma->vm_end;
-	end = ((end - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
+		pgoff = linear_page_index(vma, addr);
+		for (i = 0; i < nr; i++, pgoff++)
+			vec[i] = mincore_page(vma->vm_file->f_mapping, pgoff);
+	} else {
+		for (i = 0; i < nr; i++)
+			vec[i] = 0;
+	}
+	return nr;
+}
 
-	error = -EAGAIN;
-	tmp = (unsigned char *) __get_free_page(GFP_KERNEL);
-	if (!tmp)
-		return error;
+static int mincore_unmapped_range(unsigned long addr, unsigned long end,
+				   struct mm_walk *walk)
+{
+	walk->private += __mincore_unmapped_range(addr, end,
+						  walk->vma, walk->private);
+	return 0;
+}
 
-	/* (end - start) is # of pages, and also # of bytes in "vec */
-	remaining = (end - start),
+static int mincore_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
+			struct mm_walk *walk)
+{
+	spinlock_t *ptl;
+	struct vm_area_struct *vma = walk->vma;
+	pte_t *ptep;
+	unsigned char *vec = walk->private;
+	int nr = (end - addr) >> PAGE_SHIFT;
 
-	error = 0;
-	for (i = 0; remaining > 0; remaining -= PAGE_SIZE, i++) {
-		int j = 0;
-		long thispiece = (remaining < PAGE_SIZE) ?
-						remaining : PAGE_SIZE;
-
-		while (j < thispiece)
-			tmp[j++] = mincore_page(vma, start++);
-
-		if (copy_to_user(vec + PAGE_SIZE * i, tmp, thispiece)) {
-			error = -EFAULT;
-			break;
-		}
+	ptl = pmd_trans_huge_lock(pmd, vma);
+	if (ptl) {
+		memset(vec, 1, nr);
+		spin_unlock(ptl);
+		goto out;
 	}
 
-	free_page((unsigned long) tmp);
-	return error;
+	if (pmd_trans_unstable(pmd)) {
+		__mincore_unmapped_range(addr, end, vma, vec);
+		goto out;
+	}
+
+	ptep = pte_offset_map_lock(walk->mm, pmd, addr, &ptl);
+	for (; addr != end; ptep++, addr += PAGE_SIZE) {
+		pte_t pte = *ptep;
+
+		if (pte_none(pte))
+			__mincore_unmapped_range(addr, addr + PAGE_SIZE,
+						 vma, vec);
+		else if (pte_present(pte))
+			*vec = 1;
+		else { /* pte is a swap entry */
+			swp_entry_t entry = pte_to_swp_entry(pte);
+
+			if (non_swap_entry(entry)) {
+				/*
+				 * migration or hwpoison entries are always
+				 * uptodate
+				 */
+				*vec = 1;
+			} else {
+#ifdef CONFIG_SWAP
+				*vec = mincore_page(swap_address_space(entry),
+						    swp_offset(entry));
+#else
+				WARN_ON(1);
+				*vec = 1;
+#endif
+			}
+		}
+		vec++;
+	}
+	pte_unmap_unlock(ptep - 1, ptl);
+out:
+	walk->private += nr;
+	cond_resched();
+	return 0;
+}
+
+/*
+ * Do a chunk of "sys_mincore()". We've already checked
+ * all the arguments, we hold the mmap semaphore: we should
+ * just return the amount of info we're asked for.
+ */
+static long do_mincore(unsigned long addr, unsigned long pages, unsigned char *vec)
+{
+	struct vm_area_struct *vma;
+	unsigned long end;
+	int err;
+	struct mm_walk mincore_walk = {
+		.pmd_entry = mincore_pte_range,
+		.pte_hole = mincore_unmapped_range,
+		.hugetlb_entry = mincore_hugetlb,
+		.private = vec,
+	};
+
+	vma = find_vma(current->mm, addr);
+	if (!vma || addr < vma->vm_start)
+		return -ENOMEM;
+	mincore_walk.mm = vma->vm_mm;
+	end = min(vma->vm_end, addr + (pages << PAGE_SHIFT));
+	err = walk_page_range(addr, end, &mincore_walk);
+	if (err < 0)
+		return err;
+	return (end - addr) >> PAGE_SHIFT;
 }
 
 /*
@@ -97,93 +214,60 @@ static long mincore_vma(struct vm_area_struct * vma,
  * return values:
  *  zero    - success
  *  -EFAULT - vec points to an illegal address
- *  -EINVAL - addr is not a multiple of PAGE_CACHE_SIZE,
- *		or len has a nonpositive value
+ *  -EINVAL - addr is not a multiple of PAGE_SIZE
  *  -ENOMEM - Addresses in the range [addr, addr + len] are
  *		invalid for the address space of this process, or
  *		specify one or more pages which are not currently
  *		mapped
  *  -EAGAIN - A kernel resource was temporarily unavailable.
  */
-asmlinkage long sys_mincore(unsigned long start, size_t len,
-	unsigned char __user * vec)
+SYSCALL_DEFINE3(mincore, unsigned long, start, size_t, len,
+		unsigned char __user *, vec)
 {
-	int index = 0;
-	unsigned long end, limit;
-	struct vm_area_struct * vma;
-	size_t max;
-	int unmapped_error = 0;
-	long error;
+	long retval;
+	unsigned long pages;
+	unsigned char *tmp;
 
-	/* check the arguments */
- 	if (start & ~PAGE_CACHE_MASK)
-		goto einval;
+	/* Check the start address: needs to be page-aligned.. */
+	if (start & ~PAGE_MASK)
+		return -EINVAL;
 
-	if (start < FIRST_USER_PGD_NR * PGDIR_SIZE)
-		goto enomem;
+	/* ..and we need to be passed a valid user-space range */
+	if (!access_ok(VERIFY_READ, (void __user *) start, len))
+		return -ENOMEM;
 
-	limit = TASK_SIZE;
-	if (start >= limit)
-		goto enomem;
+	/* This also avoids any overflows on PAGE_ALIGN */
+	pages = len >> PAGE_SHIFT;
+	pages += (offset_in_page(len)) != 0;
 
-	max = limit - start;
-	len = PAGE_CACHE_ALIGN(len);
-	if (len > max)
-		goto einval;
+	if (!access_ok(VERIFY_WRITE, vec, pages))
+		return -EFAULT;
 
-	end = start + len;
+	tmp = (void *) __get_free_page(GFP_USER);
+	if (!tmp)
+		return -EAGAIN;
 
-	/* check the output buffer whilst holding the lock */
-	error = -EFAULT;
-	down_read(&current->mm->mmap_sem);
+	retval = 0;
+	while (pages) {
+		/*
+		 * Do at most PAGE_SIZE entries per iteration, due to
+		 * the temporary buffer size.
+		 */
+		down_read(&current->mm->mmap_sem);
+		retval = do_mincore(start, min(pages, PAGE_SIZE), tmp);
+		up_read(&current->mm->mmap_sem);
 
-	if (!access_ok(VERIFY_WRITE, vec, len >> PAGE_SHIFT))
-		goto out;
-
-	/*
-	 * If the interval [start,end) covers some unmapped address
-	 * ranges, just ignore them, but return -ENOMEM at the end.
-	 */
-	error = 0;
-
-	vma = find_vma(current->mm, start);
-	while (vma) {
-		/* Here start < vma->vm_end. */
-		if (start < vma->vm_start) {
-			unmapped_error = -ENOMEM;
-			start = vma->vm_start;
+		if (retval <= 0)
+			break;
+		if (copy_to_user(vec, tmp, retval)) {
+			retval = -EFAULT;
+			break;
 		}
-
-		/* Here vma->vm_start <= start < vma->vm_end. */
-		if (end <= vma->vm_end) {
-			if (start < end) {
-				error = mincore_vma(vma, start, end,
-							&vec[index]);
-				if (error)
-					goto out;
-			}
-			error = unmapped_error;
-			goto out;
-		}
-
-		/* Here vma->vm_start <= start < vma->vm_end < end. */
-		error = mincore_vma(vma, start, vma->vm_end, &vec[index]);
-		if (error)
-			goto out;
-		index += (vma->vm_end - start) >> PAGE_CACHE_SHIFT;
-		start = vma->vm_end;
-		vma = vma->vm_next;
+		pages -= retval;
+		vec += retval;
+		start += retval << PAGE_SHIFT;
+		retval = 0;
 	}
-
-	/* we found a hole in the area queried if we arrive here */
-	error = -ENOMEM;
-
-out:
-	up_read(&current->mm->mmap_sem);
-	return error;
-
-einval:
-	return -EINVAL;
-enomem:
-	return -ENOMEM;
+	free_page((unsigned long) tmp);
+	return retval;
 }

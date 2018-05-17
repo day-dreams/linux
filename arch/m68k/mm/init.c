@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/m68k/mm/init.c
  *
@@ -7,7 +8,7 @@
  *  to motorola.c and sun3mmu.c
  */
 
-#include <linux/config.h>
+#include <linux/module.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -17,100 +18,139 @@
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
+#include <linux/gfp.h>
 
 #include <asm/setup.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/page.h>
 #include <asm/pgalloc.h>
-#include <asm/system.h>
+#include <asm/traps.h>
 #include <asm/machdep.h>
 #include <asm/io.h>
 #ifdef CONFIG_ATARI
 #include <asm/atari_stram.h>
 #endif
+#include <asm/sections.h>
 #include <asm/tlb.h>
-
-DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
 /*
  * ZERO_PAGE is a special page that is used for zero-initialized
  * data and COW.
  */
-
 void *empty_zero_page;
+EXPORT_SYMBOL(empty_zero_page);
 
-void show_mem(void)
+#if !defined(CONFIG_SUN3) && !defined(CONFIG_COLDFIRE)
+extern void init_pointer_table(unsigned long ptable);
+extern pmd_t *zero_pgtable;
+#endif
+
+#ifdef CONFIG_MMU
+
+pg_data_t pg_data_map[MAX_NUMNODES];
+EXPORT_SYMBOL(pg_data_map);
+
+int m68k_virt_to_node_shift;
+
+#ifndef CONFIG_SINGLE_MEMORY_CHUNK
+pg_data_t *pg_data_table[65];
+EXPORT_SYMBOL(pg_data_table);
+#endif
+
+void __init m68k_setup_node(int node)
 {
-    unsigned long i;
-    int free = 0, total = 0, reserved = 0, shared = 0;
-    int cached = 0;
+#ifndef CONFIG_SINGLE_MEMORY_CHUNK
+	struct m68k_mem_info *info = m68k_memory + node;
+	int i, end;
 
-    printk("\nMem-info:\n");
-    show_free_areas();
-    printk("Free swap:       %6ldkB\n", nr_swap_pages<<(PAGE_SHIFT-10));
-    i = max_mapnr;
-    while (i-- > 0) {
-	total++;
-	if (PageReserved(mem_map+i))
-	    reserved++;
-	else if (PageSwapCache(mem_map+i))
-	    cached++;
-	else if (!page_count(mem_map+i))
-	    free++;
-	else
-	    shared += page_count(mem_map+i) - 1;
-    }
-    printk("%d pages of RAM\n",total);
-    printk("%d free pages\n",free);
-    printk("%d reserved pages\n",reserved);
-    printk("%d pages shared\n",shared);
-    printk("%d pages swap cached\n",cached);
+	i = (unsigned long)phys_to_virt(info->addr) >> __virt_to_node_shift();
+	end = (unsigned long)phys_to_virt(info->addr + info->size - 1) >> __virt_to_node_shift();
+	for (; i <= end; i++) {
+		if (pg_data_table[i])
+			pr_warn("overlap at %u for chunk %u\n", i, node);
+		pg_data_table[i] = pg_data_map + node;
+	}
+#endif
+	pg_data_map[node].bdata = bootmem_node_data + node;
+	node_set_online(node);
 }
 
-extern void init_pointer_table(unsigned long ptable);
+#else /* CONFIG_MMU */
 
-/* References to section boundaries */
-
-extern char _text, _etext, _edata, __bss_start, _end;
-extern char __init_begin, __init_end;
-
-extern pmd_t *zero_pgtable;
-
-void __init mem_init(void)
+/*
+ * paging_init() continues the virtual memory environment setup which
+ * was begun by the code in arch/head.S.
+ * The parameters are pointers to where to stick the starting and ending
+ * addresses of available kernel virtual memory.
+ */
+void __init paging_init(void)
 {
-	int codepages = 0;
-	int datapages = 0;
-	int initpages = 0;
-	unsigned long tmp;
-#ifndef CONFIG_SUN3
+	/*
+	 * Make sure start_mem is page aligned, otherwise bootmem and
+	 * page_alloc get different views of the world.
+	 */
+	unsigned long end_mem = memory_end & PAGE_MASK;
+	unsigned long zones_size[MAX_NR_ZONES] = { 0, };
+
+	high_memory = (void *) end_mem;
+
+	empty_zero_page = alloc_bootmem_pages(PAGE_SIZE);
+
+	/*
+	 * Set up SFC/DFC registers (user data space).
+	 */
+	set_fs (USER_DS);
+
+	zones_size[ZONE_DMA] = (end_mem - PAGE_OFFSET) >> PAGE_SHIFT;
+	free_area_init(zones_size);
+}
+
+#endif /* CONFIG_MMU */
+
+void free_initmem(void)
+{
+#ifndef CONFIG_MMU_SUN3
+	free_initmem_default(-1);
+#endif /* CONFIG_MMU_SUN3 */
+}
+
+#if defined(CONFIG_MMU) && !defined(CONFIG_COLDFIRE)
+#define VECTORS	&vectors[0]
+#else
+#define VECTORS	_ramvec
+#endif
+
+void __init print_memmap(void)
+{
+#define UL(x) ((unsigned long) (x))
+#define MLK(b, t) UL(b), UL(t), (UL(t) - UL(b)) >> 10
+#define MLM(b, t) UL(b), UL(t), (UL(t) - UL(b)) >> 20
+#define MLK_ROUNDUP(b, t) b, t, DIV_ROUND_UP(((t) - (b)), 1024)
+
+	pr_notice("Virtual kernel memory layout:\n"
+		"    vector  : 0x%08lx - 0x%08lx   (%4ld KiB)\n"
+		"    kmap    : 0x%08lx - 0x%08lx   (%4ld MiB)\n"
+		"    vmalloc : 0x%08lx - 0x%08lx   (%4ld MiB)\n"
+		"    lowmem  : 0x%08lx - 0x%08lx   (%4ld MiB)\n"
+		"      .init : 0x%p" " - 0x%p" "   (%4d KiB)\n"
+		"      .text : 0x%p" " - 0x%p" "   (%4d KiB)\n"
+		"      .data : 0x%p" " - 0x%p" "   (%4d KiB)\n"
+		"      .bss  : 0x%p" " - 0x%p" "   (%4d KiB)\n",
+		MLK(VECTORS, VECTORS + 256),
+		MLM(KMAP_START, KMAP_END),
+		MLM(VMALLOC_START, VMALLOC_END),
+		MLM(PAGE_OFFSET, (unsigned long)high_memory),
+		MLK_ROUNDUP(__init_begin, __init_end),
+		MLK_ROUNDUP(_stext, _etext),
+		MLK_ROUNDUP(_sdata, _edata),
+		MLK_ROUNDUP(__bss_start, __bss_stop));
+}
+
+static inline void init_pointer_tables(void)
+{
+#if defined(CONFIG_MMU) && !defined(CONFIG_SUN3) && !defined(CONFIG_COLDFIRE)
 	int i;
-#endif
 
-	max_mapnr = num_physpages = (((unsigned long)high_memory - PAGE_OFFSET) >> PAGE_SHIFT);
-
-#ifdef CONFIG_ATARI
-	if (MACH_IS_ATARI)
-		atari_stram_mem_init_hook();
-#endif
-
-	/* this will put all memory onto the freelists */
-	totalram_pages = free_all_bootmem();
-
-	for (tmp = PAGE_OFFSET ; tmp < (unsigned long)high_memory; tmp += PAGE_SIZE) {
-		if (PageReserved(virt_to_page(tmp))) {
-			if (tmp >= (unsigned long)&_text
-			    && tmp < (unsigned long)&_etext)
-				codepages++;
-			else if (tmp >= (unsigned long) &__init_begin
-				 && tmp < (unsigned long) &__init_end)
-				initpages++;
-			else
-				datapages++;
-			continue;
-		}
-	}
-
-#ifndef CONFIG_SUN3
 	/* insert pointer tables allocated so far into the tablelist */
 	init_pointer_table((unsigned long)kernel_pg_dir);
 	for (i = 0; i < PTRS_PER_PGD; i++) {
@@ -122,26 +162,20 @@ void __init mem_init(void)
 	if (zero_pgtable)
 		init_pointer_table((unsigned long)zero_pgtable);
 #endif
+}
 
-	printk("Memory: %luk/%luk available (%dk kernel code, %dk data, %dk init)\n",
-	       (unsigned long)nr_free_pages() << (PAGE_SHIFT-10),
-	       max_mapnr << (PAGE_SHIFT-10),
-	       codepages << (PAGE_SHIFT-10),
-	       datapages << (PAGE_SHIFT-10),
-	       initpages << (PAGE_SHIFT-10));
+void __init mem_init(void)
+{
+	/* this will put all memory onto the freelists */
+	free_all_bootmem();
+	init_pointer_tables();
+	mem_init_print_info(NULL);
+	print_memmap();
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD
 void free_initrd_mem(unsigned long start, unsigned long end)
 {
-	int pages = 0;
-	for (; start < end; start += PAGE_SIZE) {
-		ClearPageReserved(virt_to_page(start));
-		set_page_count(virt_to_page(start), 1);
-		free_page(start);
-		totalram_pages++;
-		pages++;
-	}
-	printk ("Freeing initrd memory: %dk freed\n", pages);
+	free_reserved_area((void *)start, (void *)end, -1, "initrd");
 }
 #endif

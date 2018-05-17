@@ -1,11 +1,9 @@
 /*
- * $Id: spaceball.c,v 1.17 2002/01/22 20:29:03 vojtech Exp $
- *
  *  Copyright (c) 1999-2001 Vojtech Pavlik
  *
  *  Based on the work of:
- *  	David Thompson
- *  	Joseph Krahn
+ *	David Thompson
+ *	Joseph Krahn
  */
 
 /*
@@ -35,7 +33,6 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/input.h>
 #include <linux/serio.h>
 
@@ -50,7 +47,7 @@ MODULE_LICENSE("GPL");
  */
 
 #define SPACEBALL_MAX_LENGTH	128
-#define SPACEBALL_MAX_ID	8
+#define SPACEBALL_MAX_ID	9
 
 #define SPACEBALL_1003      1
 #define SPACEBALL_2003B     3
@@ -70,8 +67,7 @@ static char *spaceball_names[] = {
  */
 
 struct spaceball {
-	struct input_dev dev;
-	struct serio *serio;
+	struct input_dev *dev;
 	int idx;
 	int escape;
 	unsigned char data[SPACEBALL_MAX_LENGTH];
@@ -83,15 +79,13 @@ struct spaceball {
  * SpaceBall.
  */
 
-static void spaceball_process_packet(struct spaceball* spaceball, struct pt_regs *regs)
+static void spaceball_process_packet(struct spaceball* spaceball)
 {
-	struct input_dev *dev = &spaceball->dev;
+	struct input_dev *dev = spaceball->dev;
 	unsigned char *data = spaceball->data;
 	int i;
 
 	if (spaceball->idx < 2) return;
-
-	input_regs(dev, regs);
 
 	switch (spaceball->data[0]) {
 
@@ -152,13 +146,13 @@ static void spaceball_process_packet(struct spaceball* spaceball, struct pt_regs
  */
 
 static irqreturn_t spaceball_interrupt(struct serio *serio,
-		unsigned char data, unsigned int flags, struct pt_regs *regs)
+		unsigned char data, unsigned int flags)
 {
-	struct spaceball *spaceball = serio->private;
+	struct spaceball *spaceball = serio_get_drvdata(serio);
 
 	switch (data) {
 		case 0xd:
-			spaceball_process_packet(spaceball, regs);
+			spaceball_process_packet(spaceball);
 			spaceball->idx = 0;
 			spaceball->escape = 0;
 			break;
@@ -168,6 +162,7 @@ static irqreturn_t spaceball_interrupt(struct serio *serio,
 				break;
 			}
 			spaceball->escape = 0;
+			/* fall through */
 		case 'M':
 		case 'Q':
 		case 'S':
@@ -175,6 +170,7 @@ static irqreturn_t spaceball_interrupt(struct serio *serio,
 				spaceball->escape = 0;
 				data &= 0x1f;
 			}
+			/* fall through */
 		default:
 			if (spaceball->escape)
 				spaceball->escape = 0;
@@ -191,111 +187,116 @@ static irqreturn_t spaceball_interrupt(struct serio *serio,
 
 static void spaceball_disconnect(struct serio *serio)
 {
-	struct spaceball* spaceball = serio->private;
-	input_unregister_device(&spaceball->dev);
+	struct spaceball* spaceball = serio_get_drvdata(serio);
+
 	serio_close(serio);
+	serio_set_drvdata(serio, NULL);
+	input_unregister_device(spaceball->dev);
 	kfree(spaceball);
 }
 
 /*
  * spaceball_connect() is the routine that is called when someone adds a
- * new serio device. It looks for the Magellan, and if found, registers
- * it as an input device.
+ * new serio device that supports Spaceball protocol and registers it as
+ * an input device.
  */
 
-static void spaceball_connect(struct serio *serio, struct serio_driver *drv)
+static int spaceball_connect(struct serio *serio, struct serio_driver *drv)
 {
 	struct spaceball *spaceball;
-	int i, t, id;
+	struct input_dev *input_dev;
+	int err = -ENOMEM;
+	int i, id;
 
-	if ((serio->type & ~SERIO_ID) != (SERIO_RS232 | SERIO_SPACEBALL))
-		return;
+	if ((id = serio->id.id) > SPACEBALL_MAX_ID)
+		return -ENODEV;
 
-	if ((id = (serio->type & SERIO_ID) >> 8) > SPACEBALL_MAX_ID)
-		return;
+	spaceball = kmalloc(sizeof(struct spaceball), GFP_KERNEL);
+	input_dev = input_allocate_device();
+	if (!spaceball || !input_dev)
+		goto fail1;
 
-	if (!(spaceball = kmalloc(sizeof(struct spaceball), GFP_KERNEL)))
-		return;
-	memset(spaceball, 0, sizeof(struct spaceball));
+	spaceball->dev = input_dev;
+	snprintf(spaceball->phys, sizeof(spaceball->phys), "%s/input0", serio->phys);
 
-	spaceball->dev.evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);
+	input_dev->name = spaceball_names[id];
+	input_dev->phys = spaceball->phys;
+	input_dev->id.bustype = BUS_RS232;
+	input_dev->id.vendor = SERIO_SPACEBALL;
+	input_dev->id.product = id;
+	input_dev->id.version = 0x0100;
+	input_dev->dev.parent = &serio->dev;
+
+	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
 
 	switch (id) {
 		case SPACEBALL_4000FLX:
 		case SPACEBALL_4000FLX_L:
-			spaceball->dev.keybit[LONG(BTN_0)] |= BIT(BTN_9);
-			spaceball->dev.keybit[LONG(BTN_A)] |= BIT(BTN_A) | BIT(BTN_B) | BIT(BTN_C) | BIT(BTN_MODE);
+			input_dev->keybit[BIT_WORD(BTN_0)] |= BIT_MASK(BTN_9);
+			input_dev->keybit[BIT_WORD(BTN_A)] |= BIT_MASK(BTN_A) |
+				BIT_MASK(BTN_B) | BIT_MASK(BTN_C) |
+				BIT_MASK(BTN_MODE);
+			/* fall through */
 		default:
-			spaceball->dev.keybit[LONG(BTN_0)] |= BIT(BTN_2) | BIT(BTN_3) | BIT(BTN_4)
-				| BIT(BTN_5) | BIT(BTN_6) | BIT(BTN_7) | BIT(BTN_8);
+			input_dev->keybit[BIT_WORD(BTN_0)] |= BIT_MASK(BTN_2) |
+				BIT_MASK(BTN_3) | BIT_MASK(BTN_4) |
+				BIT_MASK(BTN_5) | BIT_MASK(BTN_6) |
+				BIT_MASK(BTN_7) | BIT_MASK(BTN_8);
+			/* fall through */
 		case SPACEBALL_3003C:
-			spaceball->dev.keybit[LONG(BTN_0)] |= BIT(BTN_1) | BIT(BTN_8);
+			input_dev->keybit[BIT_WORD(BTN_0)] |= BIT_MASK(BTN_1) |
+				BIT_MASK(BTN_8);
 	}
 
-	for (i = 0; i < 6; i++) {
-		t = spaceball_axes[i];
-		set_bit(t, spaceball->dev.absbit);
-		spaceball->dev.absmin[t] = i < 3 ? -8000 : -1600;
-		spaceball->dev.absmax[t] = i < 3 ?  8000 :  1600;
-		spaceball->dev.absflat[t] = i < 3 ? 40 : 8;
-		spaceball->dev.absfuzz[t] = i < 3 ? 8 : 2;
+	for (i = 0; i < 3; i++) {
+		input_set_abs_params(input_dev, ABS_X + i, -8000, 8000, 8, 40);
+		input_set_abs_params(input_dev, ABS_RX + i, -1600, 1600, 2, 8);
 	}
 
-	spaceball->serio = serio;
-	spaceball->dev.private = spaceball;
+	serio_set_drvdata(serio, spaceball);
 
-	sprintf(spaceball->phys, "%s/input0", serio->phys);
+	err = serio_open(serio, drv);
+	if (err)
+		goto fail2;
 
-	init_input_dev(&spaceball->dev);
-	spaceball->dev.name = spaceball_names[id];
-	spaceball->dev.phys = spaceball->phys;
-	spaceball->dev.id.bustype = BUS_RS232;
-	spaceball->dev.id.vendor = SERIO_SPACEBALL;
-	spaceball->dev.id.product = id;
-	spaceball->dev.id.version = 0x0100;
-	spaceball->dev.dev = &serio->dev;
+	err = input_register_device(spaceball->dev);
+	if (err)
+		goto fail3;
 
-	serio->private = spaceball;
+	return 0;
 
-	if (serio_open(serio, drv)) {
-		kfree(spaceball);
-		return;
-	}
-
-	input_register_device(&spaceball->dev);
-
-	printk(KERN_INFO "input: %s on serio%s\n",
-		spaceball_names[id], serio->phys);
+ fail3:	serio_close(serio);
+ fail2:	serio_set_drvdata(serio, NULL);
+ fail1:	input_free_device(input_dev);
+	kfree(spaceball);
+	return err;
 }
 
 /*
- * The serio device structure.
+ * The serio driver structure.
  */
+
+static const struct serio_device_id spaceball_serio_ids[] = {
+	{
+		.type	= SERIO_RS232,
+		.proto	= SERIO_SPACEBALL,
+		.id	= SERIO_ANY,
+		.extra	= SERIO_ANY,
+	},
+	{ 0 }
+};
+
+MODULE_DEVICE_TABLE(serio, spaceball_serio_ids);
 
 static struct serio_driver spaceball_drv = {
 	.driver		= {
 		.name	= "spaceball",
 	},
 	.description	= DRIVER_DESC,
+	.id_table	= spaceball_serio_ids,
 	.interrupt	= spaceball_interrupt,
 	.connect	= spaceball_connect,
 	.disconnect	= spaceball_disconnect,
 };
 
-/*
- * The functions for inserting/removing us as a module.
- */
-
-int __init spaceball_init(void)
-{
-	serio_register_driver(&spaceball_drv);
-	return 0;
-}
-
-void __exit spaceball_exit(void)
-{
-	serio_unregister_driver(&spaceball_drv);
-}
-
-module_init(spaceball_init);
-module_exit(spaceball_exit);
+module_serio_driver(spaceball_drv);

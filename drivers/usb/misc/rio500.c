@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /* -*- linux-c -*- */
 
 /* 
@@ -6,20 +7,6 @@
  * Cesar Miquel (miquel@df.uba.ar)
  * 
  * based on hp_scanner.c by David E. Nelson (dnelson@jump.net)
- * 
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  * Based upon mouse.c (Brad Keryan) and printer.c (Michael Gee).
  *
@@ -31,22 +18,18 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
-#include <linux/sched.h>
+#include <linux/sched/signal.h>
+#include <linux/mutex.h>
 #include <linux/errno.h>
 #include <linux/random.h>
 #include <linux/poll.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/usb.h>
-#include <linux/smp_lock.h>
+#include <linux/wait.h>
 
 #include "rio500_usb.h"
 
-/*
- * Version Information
- */
-#define DRIVER_VERSION "v1.1"
 #define DRIVER_AUTHOR "Cesar Miquel <miquel@df.uba.ar>"
 #define DRIVER_DESC "USB Rio 500 driver"
 
@@ -68,28 +51,33 @@ struct rio_usb_data {
         char *obuf, *ibuf;              /* transfer buffers */
         char bulk_in_ep, bulk_out_ep;   /* Endpoint assignments */
         wait_queue_head_t wait_q;       /* for timeouts */
-	struct semaphore lock;          /* general race avoidance */
+	struct mutex lock;          /* general race avoidance */
 };
 
+static DEFINE_MUTEX(rio500_mutex);
 static struct rio_usb_data rio_instance;
 
 static int open_rio(struct inode *inode, struct file *file)
 {
 	struct rio_usb_data *rio = &rio_instance;
 
-	down(&(rio->lock));
+	/* against disconnect() */
+	mutex_lock(&rio500_mutex);
+	mutex_lock(&(rio->lock));
 
 	if (rio->isopen || !rio->present) {
-		up(&(rio->lock));
+		mutex_unlock(&(rio->lock));
+		mutex_unlock(&rio500_mutex);
 		return -EBUSY;
 	}
 	rio->isopen = 1;
 
 	init_waitqueue_head(&rio->wait_q);
 
-	up(&(rio->lock));
+	mutex_unlock(&(rio->lock));
 
-	info("Rio opened.");
+	dev_info(&rio->rio_dev->dev, "Rio opened.\n");
+	mutex_unlock(&rio500_mutex);
 
 	return 0;
 }
@@ -100,13 +88,11 @@ static int close_rio(struct inode *inode, struct file *file)
 
 	rio->isopen = 0;
 
-	info("Rio closed.");
+	dev_info(&rio->rio_dev->dev, "Rio closed.\n");
 	return 0;
 }
 
-static int
-ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
-	  unsigned long arg)
+static long ioctl_rio(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct RioCommand rio_cmd;
 	struct rio_usb_data *rio = &rio_instance;
@@ -116,12 +102,9 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 	int retries;
 	int retval=0;
 
-	down(&(rio->lock));
+	mutex_lock(&(rio->lock));
         /* Sanity check to make sure rio is connected, powered, etc */
-        if ( rio == NULL ||
-             rio->present == 0 ||
-             rio->rio_dev == NULL )
-	{
+        if (rio->present == 0 || rio->rio_dev == NULL) {
 		retval = -ENODEV;
 		goto err_out;
 	}
@@ -152,10 +135,10 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 
 		requesttype = rio_cmd.requesttype | USB_DIR_IN |
 		    USB_TYPE_VENDOR | USB_RECIP_DEVICE;
-		dbg
-		    ("sending command:reqtype=%0x req=%0x value=%0x index=%0x len=%0x",
-		     requesttype, rio_cmd.request, rio_cmd.value,
-		     rio_cmd.index, rio_cmd.length);
+		dev_dbg(&rio->rio_dev->dev,
+			"sending command:reqtype=%0x req=%0x value=%0x index=%0x len=%0x\n",
+			requesttype, rio_cmd.request, rio_cmd.value,
+			rio_cmd.index, rio_cmd.length);
 		/* Send rio control message */
 		retries = 3;
 		while (retries) {
@@ -166,15 +149,18 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 						 rio_cmd.value,
 						 rio_cmd.index, buffer,
 						 rio_cmd.length,
-						 rio_cmd.timeout);
+						 jiffies_to_msecs(rio_cmd.timeout));
 			if (result == -ETIMEDOUT)
 				retries--;
 			else if (result < 0) {
-				err("Error executing ioctrl. code = %d", result);
+				dev_err(&rio->rio_dev->dev,
+					"Error executing ioctrl. code = %d\n",
+					result);
 				retries = 0;
 			} else {
-				dbg("Executed ioctl. Result = %d (data=%02x)",
-				     result, buffer[0]);
+				dev_dbg(&rio->rio_dev->dev,
+					"Executed ioctl. Result = %d (data=%02x)\n",
+					result, buffer[0]);
 				if (copy_to_user(rio_cmd.buffer, buffer,
 						 rio_cmd.length)) {
 					free_page((unsigned long) buffer);
@@ -220,9 +206,10 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 
 		requesttype = rio_cmd.requesttype | USB_DIR_OUT |
 		    USB_TYPE_VENDOR | USB_RECIP_DEVICE;
-		dbg("sending command: reqtype=%0x req=%0x value=%0x index=%0x len=%0x",
-		     requesttype, rio_cmd.request, rio_cmd.value,
-		     rio_cmd.index, rio_cmd.length);
+		dev_dbg(&rio->rio_dev->dev,
+			"sending command: reqtype=%0x req=%0x value=%0x index=%0x len=%0x\n",
+			requesttype, rio_cmd.request, rio_cmd.value,
+			rio_cmd.index, rio_cmd.length);
 		/* Send rio control message */
 		retries = 3;
 		while (retries) {
@@ -233,14 +220,17 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 						 rio_cmd.value,
 						 rio_cmd.index, buffer,
 						 rio_cmd.length,
-						 rio_cmd.timeout);
+						 jiffies_to_msecs(rio_cmd.timeout));
 			if (result == -ETIMEDOUT)
 				retries--;
 			else if (result < 0) {
-				err("Error executing ioctrl. code = %d", result);
+				dev_err(&rio->rio_dev->dev,
+					"Error executing ioctrl. code = %d\n",
+					result);
 				retries = 0;
 			} else {
-				dbg("Executed ioctl. Result = %d", result);
+				dev_dbg(&rio->rio_dev->dev,
+					"Executed ioctl. Result = %d\n", result);
 				retries = 0;
 
 			}
@@ -256,7 +246,7 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 
 
 err_out:
-	up(&(rio->lock));
+	mutex_unlock(&(rio->lock));
 	return retval;
 }
 
@@ -264,6 +254,7 @@ static ssize_t
 write_rio(struct file *file, const char __user *buffer,
 	  size_t count, loff_t * ppos)
 {
+	DEFINE_WAIT(wait);
 	struct rio_usb_data *rio = &rio_instance;
 
 	unsigned long copy_size;
@@ -273,14 +264,14 @@ write_rio(struct file *file, const char __user *buffer,
 	int result = 0;
 	int maxretry;
 	int errn = 0;
+	int intr;
 
-	down(&(rio->lock));
+	intr = mutex_lock_interruptible(&(rio->lock));
+	if (intr)
+		return -EINTR;
         /* Sanity check to make sure rio is connected, powered, etc */
-        if ( rio == NULL ||
-             rio->present == 0 ||
-             rio->rio_dev == NULL )
-	{
-		up(&(rio->lock));
+        if (rio->present == 0 || rio->rio_dev == NULL) {
+		mutex_unlock(&(rio->lock));
 		return -ENODEV;
 	}
 
@@ -303,32 +294,36 @@ write_rio(struct file *file, const char __user *buffer,
 				goto error;
 			}
 			if (signal_pending(current)) {
-				up(&(rio->lock));
+				mutex_unlock(&(rio->lock));
 				return bytes_written ? bytes_written : -EINTR;
 			}
 
 			result = usb_bulk_msg(rio->rio_dev,
 					 usb_sndbulkpipe(rio->rio_dev, 2),
-					 obuf, thistime, &partial, 5 * HZ);
+					 obuf, thistime, &partial, 5000);
 
-			dbg("write stats: result:%d thistime:%lu partial:%u",
-			     result, thistime, partial);
+			dev_dbg(&rio->rio_dev->dev,
+				"write stats: result:%d thistime:%lu partial:%u\n",
+				result, thistime, partial);
 
 			if (result == -ETIMEDOUT) {	/* NAK - so hold for a while */
 				if (!maxretry--) {
 					errn = -ETIME;
 					goto error;
 				}
-				interruptible_sleep_on_timeout(&rio-> wait_q, NAK_TIMEOUT);
+				prepare_to_wait(&rio->wait_q, &wait, TASK_INTERRUPTIBLE);
+				schedule_timeout(NAK_TIMEOUT);
+				finish_wait(&rio->wait_q, &wait);
 				continue;
 			} else if (!result && partial) {
 				obuf += partial;
 				thistime -= partial;
 			} else
 				break;
-		};
+		}
 		if (result) {
-			err("Write Whoops - %x", result);
+			dev_err(&rio->rio_dev->dev, "Write Whoops - %x\n",
+				result);
 			errn = -EIO;
 			goto error;
 		}
@@ -337,18 +332,19 @@ write_rio(struct file *file, const char __user *buffer,
 		buffer += copy_size;
 	} while (count > 0);
 
-	up(&(rio->lock));
+	mutex_unlock(&(rio->lock));
 
 	return bytes_written ? bytes_written : -EIO;
 
 error:
-	up(&(rio->lock));
+	mutex_unlock(&(rio->lock));
 	return errn;
 }
 
 static ssize_t
 read_rio(struct file *file, char __user *buffer, size_t count, loff_t * ppos)
 {
+	DEFINE_WAIT(wait);
 	struct rio_usb_data *rio = &rio_instance;
 	ssize_t read_count;
 	unsigned int partial;
@@ -356,14 +352,14 @@ read_rio(struct file *file, char __user *buffer, size_t count, loff_t * ppos)
 	int result;
 	int maxretry = 10;
 	char *ibuf;
+	int intr;
 
-	down(&(rio->lock));
+	intr = mutex_lock_interruptible(&(rio->lock));
+	if (intr)
+		return -EINTR;
 	/* Sanity check to make sure rio is connected, powered, etc */
-        if ( rio == NULL ||
-             rio->present == 0 ||
-             rio->rio_dev == NULL )
-	{
-		up(&(rio->lock));
+        if (rio->present == 0 || rio->rio_dev == NULL) {
+		mutex_unlock(&(rio->lock));
 		return -ENODEV;
 	}
 
@@ -374,11 +370,11 @@ read_rio(struct file *file, char __user *buffer, size_t count, loff_t * ppos)
 
 	while (count > 0) {
 		if (signal_pending(current)) {
-			up(&(rio->lock));
+			mutex_unlock(&(rio->lock));
 			return read_count ? read_count : -EINTR;
 		}
 		if (!rio->rio_dev) {
-			up(&(rio->lock));
+			mutex_unlock(&(rio->lock));
 			return -ENODEV;
 		}
 		this_read = (count >= IBUF_SIZE) ? IBUF_SIZE : count;
@@ -386,35 +382,39 @@ read_rio(struct file *file, char __user *buffer, size_t count, loff_t * ppos)
 		result = usb_bulk_msg(rio->rio_dev,
 				      usb_rcvbulkpipe(rio->rio_dev, 1),
 				      ibuf, this_read, &partial,
-				      (int) (HZ * 8));
+				      8000);
 
-		dbg(KERN_DEBUG "read stats: result:%d this_read:%u partial:%u",
-		       result, this_read, partial);
+		dev_dbg(&rio->rio_dev->dev,
+			"read stats: result:%d this_read:%u partial:%u\n",
+			result, this_read, partial);
 
 		if (partial) {
 			count = this_read = partial;
 		} else if (result == -ETIMEDOUT || result == 15) {	/* FIXME: 15 ??? */
 			if (!maxretry--) {
-				up(&(rio->lock));
-				err("read_rio: maxretry timeout");
+				mutex_unlock(&(rio->lock));
+				dev_err(&rio->rio_dev->dev,
+					"read_rio: maxretry timeout\n");
 				return -ETIME;
 			}
-			interruptible_sleep_on_timeout(&rio->wait_q,
-						       NAK_TIMEOUT);
+			prepare_to_wait(&rio->wait_q, &wait, TASK_INTERRUPTIBLE);
+			schedule_timeout(NAK_TIMEOUT);
+			finish_wait(&rio->wait_q, &wait);
 			continue;
 		} else if (result != -EREMOTEIO) {
-			up(&(rio->lock));
-			err("Read Whoops - result:%u partial:%u this_read:%u",
-			     result, partial, this_read);
+			mutex_unlock(&(rio->lock));
+			dev_err(&rio->rio_dev->dev,
+				"Read Whoops - result:%d partial:%u this_read:%u\n",
+				result, partial, this_read);
 			return -EIO;
 		} else {
-			up(&(rio->lock));
+			mutex_unlock(&(rio->lock));
 			return (0);
 		}
 
 		if (this_read) {
 			if (copy_to_user(buffer, ibuf, this_read)) {
-				up(&(rio->lock));
+				mutex_unlock(&(rio->lock));
 				return -EFAULT;
 			}
 			count -= this_read;
@@ -422,24 +422,23 @@ read_rio(struct file *file, char __user *buffer, size_t count, loff_t * ppos)
 			buffer += this_read;
 		}
 	}
-	up(&(rio->lock));
+	mutex_unlock(&(rio->lock));
 	return read_count;
 }
 
-static struct
-file_operations usb_rio_fops = {
+static const struct file_operations usb_rio_fops = {
 	.owner =	THIS_MODULE,
 	.read =		read_rio,
 	.write =	write_rio,
-	.ioctl =	ioctl_rio,
+	.unlocked_ioctl = ioctl_rio,
 	.open =		open_rio,
 	.release =	close_rio,
+	.llseek =	noop_llseek,
 };
 
 static struct usb_class_driver usb_rio_class = {
-	.name =		"usb/rio500%d",
+	.name =		"rio500%d",
 	.fops =		&usb_rio_fops,
-	.mode =		S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
 	.minor_base =	RIO_MINOR,
 };
 
@@ -450,32 +449,35 @@ static int probe_rio(struct usb_interface *intf,
 	struct rio_usb_data *rio = &rio_instance;
 	int retval;
 
-	info("USB Rio found at address %d", dev->devnum);
+	dev_info(&intf->dev, "USB Rio found at address %d\n", dev->devnum);
 
 	retval = usb_register_dev(intf, &usb_rio_class);
 	if (retval) {
-		err("Not able to get a minor for this device.");
+		dev_err(&dev->dev,
+			"Not able to get a minor for this device.\n");
 		return -ENOMEM;
 	}
 
 	rio->rio_dev = dev;
 
-	if (!(rio->obuf = (char *) kmalloc(OBUF_SIZE, GFP_KERNEL))) {
-		err("probe_rio: Not enough memory for the output buffer");
+	if (!(rio->obuf = kmalloc(OBUF_SIZE, GFP_KERNEL))) {
+		dev_err(&dev->dev,
+			"probe_rio: Not enough memory for the output buffer\n");
 		usb_deregister_dev(intf, &usb_rio_class);
 		return -ENOMEM;
 	}
-	dbg("probe_rio: obuf address:%p", rio->obuf);
+	dev_dbg(&intf->dev, "obuf address:%p\n", rio->obuf);
 
-	if (!(rio->ibuf = (char *) kmalloc(IBUF_SIZE, GFP_KERNEL))) {
-		err("probe_rio: Not enough memory for the input buffer");
+	if (!(rio->ibuf = kmalloc(IBUF_SIZE, GFP_KERNEL))) {
+		dev_err(&dev->dev,
+			"probe_rio: Not enough memory for the input buffer\n");
 		usb_deregister_dev(intf, &usb_rio_class);
 		kfree(rio->obuf);
 		return -ENOMEM;
 	}
-	dbg("probe_rio: ibuf address:%p", rio->ibuf);
+	dev_dbg(&intf->dev, "ibuf address:%p\n", rio->ibuf);
 
-	init_MUTEX(&(rio->lock));
+	mutex_init(&(rio->lock));
 
 	usb_set_intfdata (intf, rio);
 	rio->present = 1;
@@ -488,28 +490,31 @@ static void disconnect_rio(struct usb_interface *intf)
 	struct rio_usb_data *rio = usb_get_intfdata (intf);
 
 	usb_set_intfdata (intf, NULL);
+	mutex_lock(&rio500_mutex);
 	if (rio) {
 		usb_deregister_dev(intf, &usb_rio_class);
 
-		down(&(rio->lock));
+		mutex_lock(&(rio->lock));
 		if (rio->isopen) {
 			rio->isopen = 0;
 			/* better let it finish - the release will do whats needed */
 			rio->rio_dev = NULL;
-			up(&(rio->lock));
+			mutex_unlock(&(rio->lock));
+			mutex_unlock(&rio500_mutex);
 			return;
 		}
 		kfree(rio->ibuf);
 		kfree(rio->obuf);
 
-		info("USB Rio disconnected.");
+		dev_info(&intf->dev, "USB Rio disconnected.\n");
 
 		rio->present = 0;
-		up(&(rio->lock));
+		mutex_unlock(&(rio->lock));
 	}
+	mutex_unlock(&rio500_mutex);
 }
 
-static struct usb_device_id rio_table [] = {
+static const struct usb_device_id rio_table[] = {
 	{ USB_DEVICE(0x0841, 1) }, 		/* Rio 500 */
 	{ }					/* Terminating entry */
 };
@@ -517,39 +522,13 @@ static struct usb_device_id rio_table [] = {
 MODULE_DEVICE_TABLE (usb, rio_table);
 
 static struct usb_driver rio_driver = {
-	.owner =	THIS_MODULE,
 	.name =		"rio500",
 	.probe =	probe_rio,
 	.disconnect =	disconnect_rio,
 	.id_table =	rio_table,
 };
 
-static int __init usb_rio_init(void)
-{
-	int retval;
-	retval = usb_register(&rio_driver);
-	if (retval)
-		goto out;
-
-	info(DRIVER_VERSION ":" DRIVER_DESC);
-
-out:
-	return retval;
-}
-
-
-static void __exit usb_rio_cleanup(void)
-{
-	struct rio_usb_data *rio = &rio_instance;
-
-	rio->present = 0;
-	usb_deregister(&rio_driver);
-
-
-}
-
-module_init(usb_rio_init);
-module_exit(usb_rio_cleanup);
+module_usb_driver(rio_driver);
 
 MODULE_AUTHOR( DRIVER_AUTHOR );
 MODULE_DESCRIPTION( DRIVER_DESC );

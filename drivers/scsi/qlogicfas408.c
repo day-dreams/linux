@@ -23,7 +23,7 @@
    Functions as standalone, loadable, and PCMCIA driver, the latter from
    Dave Hinds' PCMCIA package.
    
-   Cleaned up 26/10/2002 by Alan Cox <alan@redhat.com> as part of the 2.5
+   Cleaned up 26/10/2002 by Alan Cox <alan@lxorguk.ukuu.org.uk> as part of the 2.5
    SCSI driver cleanup and audit. This driver still needs work on the
    following
    	-	Non terminating hardware waits
@@ -209,7 +209,7 @@ static int ql_wai(struct qlogicfas408_priv *priv)
  *	caller must hold host lock
  */
 
-static void ql_icmd(Scsi_Cmnd * cmd)
+static void ql_icmd(struct scsi_cmnd *cmd)
 {
 	struct qlogicfas408_priv *priv = get_priv_by_cmd(cmd);
 	int 	qbase = priv->qbase;
@@ -243,7 +243,7 @@ static void ql_icmd(Scsi_Cmnd * cmd)
 	 /**/ outb(qlcfg5, qbase + 5);	/* select timer */
 	outb(qlcfg9 & 7, qbase + 9);	/* prescaler */
 /*	outb(0x99, qbase + 5);	*/
-	outb(cmd->device->id, qbase + 4);
+	outb(scmd_id(cmd), qbase + 4);
 
 	for (i = 0; i < cmd->cmd_len; i++)
 		outb(cmd->cmnd[i], qbase + 2);
@@ -256,7 +256,7 @@ static void ql_icmd(Scsi_Cmnd * cmd)
  *	Process scsi command - usually after interrupt 
  */
 
-static unsigned int ql_pcmd(Scsi_Cmnd * cmd)
+static unsigned int ql_pcmd(struct scsi_cmnd *cmd)
 {
 	unsigned int i, j;
 	unsigned long k;
@@ -265,8 +265,6 @@ static unsigned int ql_pcmd(Scsi_Cmnd * cmd)
 	unsigned int message;	/* scsi returned message */
 	unsigned int phase;	/* recorded scsi phase */
 	unsigned int reqlen;	/* total length of transfer */
-	struct scatterlist *sglist;	/* scatter-gather list pointer */
-	unsigned int sgcount;	/* sg counter */
 	char *buf;
 	struct qlogicfas408_priv *priv = get_priv_by_cmd(cmd);
 	int qbase = priv->qbase;
@@ -301,9 +299,10 @@ static unsigned int ql_pcmd(Scsi_Cmnd * cmd)
 	if (inb(qbase + 7) & 0x1f)	/* if some bytes in fifo */
 		outb(1, qbase + 3);	/* clear fifo */
 	/* note that request_bufflen is the total xfer size when sg is used */
-	reqlen = cmd->request_bufflen;
+	reqlen = scsi_bufflen(cmd);
 	/* note that it won't work if transfers > 16M are requested */
 	if (reqlen && !((phase = inb(qbase + 4)) & 6)) {	/* data phase */
+		struct scatterlist *sg;
 		rtrc(2)
 		outb(reqlen, qbase);	/* low-mid xfer cnt */
 		outb(reqlen >> 8, qbase + 1);	/* low-mid xfer cnt */
@@ -311,23 +310,16 @@ static unsigned int ql_pcmd(Scsi_Cmnd * cmd)
 		outb(0x90, qbase + 3);	/* command do xfer */
 		/* PIO pseudo DMA to buffer or sglist */
 		REG1;
-		if (!cmd->use_sg)
-			ql_pdma(priv, phase, cmd->request_buffer,
-				cmd->request_bufflen);
-		else {
-			sgcount = cmd->use_sg;
-			sglist = cmd->request_buffer;
-			while (sgcount--) {
-				if (priv->qabort) {
-					REG0;
-					return ((priv->qabort == 1 ?
-						DID_ABORT : DID_RESET) << 16);
-				}
-				buf = page_address(sglist->page) + sglist->offset;
-				if (ql_pdma(priv, phase, buf, sglist->length))
-					break;
-				sglist++;
+
+		scsi_for_each_sg(cmd, sg, scsi_sg_count(cmd), i) {
+			if (priv->qabort) {
+				REG0;
+				return ((priv->qabort == 1 ?
+					 DID_ABORT : DID_RESET) << 16);
 			}
+			buf = sg_virt(sg);
+			if (ql_pdma(priv, phase, buf, sg->length))
+				break;
 		}
 		REG0;
 		rtrc(2)
@@ -405,10 +397,10 @@ static unsigned int ql_pcmd(Scsi_Cmnd * cmd)
  *	Interrupt handler 
  */
 
-static void ql_ihandl(int irq, void *dev_id, struct pt_regs *regs)
+static void ql_ihandl(void *dev_id)
 {
-	Scsi_Cmnd *icmd;
-	struct Scsi_Host *host = (struct Scsi_Host *)dev_id;
+	struct scsi_cmnd *icmd;
+	struct Scsi_Host *host = dev_id;
 	struct qlogicfas408_priv *priv = get_priv_by_host(host);
 	int qbase = priv->qbase;
 	REG0;
@@ -432,13 +424,13 @@ static void ql_ihandl(int irq, void *dev_id, struct pt_regs *regs)
 	(icmd->scsi_done) (icmd);
 }
 
-irqreturn_t qlogicfas408_ihandl(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t qlogicfas408_ihandl(int irq, void *dev_id)
 {
 	unsigned long flags;
 	struct Scsi_Host *host = dev_id;
 
 	spin_lock_irqsave(host->host_lock, flags);
-	ql_ihandl(irq, dev_id, regs);
+	ql_ihandl(dev_id);
 	spin_unlock_irqrestore(host->host_lock, flags);
 	return IRQ_HANDLED;
 }
@@ -447,10 +439,11 @@ irqreturn_t qlogicfas408_ihandl(int irq, void *dev_id, struct pt_regs *regs)
  *	Queued command
  */
 
-int qlogicfas408_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
+static int qlogicfas408_queuecommand_lck(struct scsi_cmnd *cmd,
+			      void (*done) (struct scsi_cmnd *))
 {
 	struct qlogicfas408_priv *priv = get_priv_by_cmd(cmd);
-	if (cmd->device->id == priv->qinitid) {
+	if (scmd_id(cmd) == priv->qinitid) {
 		cmd->result = DID_BAD_TARGET << 16;
 		done(cmd);
 		return 0;
@@ -466,13 +459,14 @@ int qlogicfas408_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 	return 0;
 }
 
+DEF_SCSI_QCMD(qlogicfas408_queuecommand)
+
 /* 
  *	Return bios parameters 
  */
 
-int qlogicfas408_biosparam(struct scsi_device * disk,
-		        struct block_device *dev,
-			sector_t capacity, int ip[])
+int qlogicfas408_biosparam(struct scsi_device *disk, struct block_device *dev,
+			   sector_t capacity, int ip[])
 {
 /* This should mimic the DOS Qlogic driver's behavior exactly */
 	ip[0] = 0x40;
@@ -494,7 +488,7 @@ int qlogicfas408_biosparam(struct scsi_device * disk,
  *	Abort a command in progress
  */
  
-int qlogicfas408_abort(Scsi_Cmnd * cmd)
+int qlogicfas408_abort(struct scsi_cmnd *cmd)
 {
 	struct qlogicfas408_priv *priv = get_priv_by_cmd(cmd);
 	priv->qabort = 1;
@@ -502,36 +496,24 @@ int qlogicfas408_abort(Scsi_Cmnd * cmd)
 	return SUCCESS;
 }
 
-/* 
+/*
  *	Reset SCSI bus
  *	FIXME: This function is invoked with cmd = NULL directly by
  *	the PCMCIA qlogic_stub code. This wants fixing
  */
 
-int qlogicfas408_bus_reset(Scsi_Cmnd * cmd)
+int qlogicfas408_host_reset(struct scsi_cmnd *cmd)
 {
 	struct qlogicfas408_priv *priv = get_priv_by_cmd(cmd);
+	unsigned long flags;
+
 	priv->qabort = 2;
+
+	spin_lock_irqsave(cmd->device->host->host_lock, flags);
 	ql_zap(priv);
+	spin_unlock_irqrestore(cmd->device->host->host_lock, flags);
+
 	return SUCCESS;
-}
-
-/* 
- *	Reset SCSI host controller
- */
-
-int qlogicfas408_host_reset(Scsi_Cmnd * cmd)
-{
-	return FAILED;
-}
-
-/* 
- *	Reset SCSI device
- */
-
-int qlogicfas408_device_reset(Scsi_Cmnd * cmd)
-{
-	return FAILED;
 }
 
 /*
@@ -625,8 +607,6 @@ module_exit(qlogicfas408_exit);
 EXPORT_SYMBOL(qlogicfas408_info);
 EXPORT_SYMBOL(qlogicfas408_queuecommand);
 EXPORT_SYMBOL(qlogicfas408_abort);
-EXPORT_SYMBOL(qlogicfas408_bus_reset);
-EXPORT_SYMBOL(qlogicfas408_device_reset);
 EXPORT_SYMBOL(qlogicfas408_host_reset);
 EXPORT_SYMBOL(qlogicfas408_biosparam);
 EXPORT_SYMBOL(qlogicfas408_ihandl);

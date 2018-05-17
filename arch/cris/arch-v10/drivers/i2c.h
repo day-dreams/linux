@@ -1,5 +1,5 @@
-/* $Id: i2c.h,v 1.3 2004/05/28 09:26:59 starvik Exp $ */
-
+/* SPDX-License-Identifier: GPL-2.0 */
+/* i2c.h */
 int i2c_init(void);
 
 /* High level I2C actions */

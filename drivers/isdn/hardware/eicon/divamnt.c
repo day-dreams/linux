@@ -10,21 +10,19 @@
  * of the GNU General Public License, incorporated herein by reference.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/smp_lock.h>
 #include <linux/poll.h>
-#include <linux/devfs_fs_kernel.h>
-#include <asm/uaccess.h>
+#include <linux/mutex.h>
+#include <linux/uaccess.h>
 
 #include "platform.h"
 #include "di_defs.h"
 #include "divasync.h"
 #include "debug_if.h"
 
+static DEFINE_MUTEX(maint_mutex);
 static char *main_revision = "$Revision: 1.32.6.10 $";
 
 static int major;
@@ -40,14 +38,13 @@ static unsigned long diva_dbg_mem = 0;
 module_param(diva_dbg_mem, ulong, 0);
 
 static char *DRIVERNAME =
-    "Eicon DIVA - MAINT module (http://www.melware.net)";
+	"Eicon DIVA - MAINT module (http://www.melware.net)";
 static char *DRIVERLNAME = "diva_mnt";
 static char *DEVNAME = "DivasMAINT";
 char *DRIVERRELEASE_MNT = "2.0";
 
 static wait_queue_head_t msgwaitq;
 static unsigned long opened;
-static struct timeval start_time;
 
 extern int mntfunc_init(int *, void **, unsigned long);
 extern void mntfunc_finit(void);
@@ -88,57 +85,46 @@ int diva_os_copy_from_user(void *os_handle, void *dst, const void __user *src,
 /*
  * get time
  */
-void diva_os_get_time(dword * sec, dword * usec)
+void diva_os_get_time(dword *sec, dword *usec)
 {
-	struct timeval tv;
+	struct timespec64 time;
 
-	do_gettimeofday(&tv);
+	ktime_get_ts64(&time);
 
-	if (tv.tv_sec > start_time.tv_sec) {
-		if (start_time.tv_usec > tv.tv_usec) {
-			tv.tv_sec--;
-			tv.tv_usec += 1000000;
-		}
-		*sec = (dword) (tv.tv_sec - start_time.tv_sec);
-		*usec = (dword) (tv.tv_usec - start_time.tv_usec);
-	} else if (tv.tv_sec == start_time.tv_sec) {
-		*sec = 0;
-		if (start_time.tv_usec < tv.tv_usec) {
-			*usec = (dword) (tv.tv_usec - start_time.tv_usec);
-		} else {
-			*usec = 0;
-		}
-	} else {
-		*sec = (dword) tv.tv_sec;
-		*usec = (dword) tv.tv_usec;
-	}
+	*sec = (dword) time.tv_sec;
+	*usec = (dword) (time.tv_nsec / NSEC_PER_USEC);
 }
 
 /*
  * device node operations
  */
-static unsigned int maint_poll(struct file *file, poll_table * wait)
+static __poll_t maint_poll(struct file *file, poll_table *wait)
 {
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 
 	poll_wait(file, &msgwaitq, wait);
-	mask = POLLOUT | POLLWRNORM;
+	mask = EPOLLOUT | EPOLLWRNORM;
 	if (file->private_data || diva_dbg_q_length()) {
-		mask |= POLLIN | POLLRDNORM;
+		mask |= EPOLLIN | EPOLLRDNORM;
 	}
 	return (mask);
 }
 
 static int maint_open(struct inode *ino, struct file *filep)
 {
+	int ret;
+
+	mutex_lock(&maint_mutex);
 	/* only one open is allowed, so we test
 	   it atomically */
 	if (test_and_set_bit(0, &opened))
-		return (-EBUSY);
-
-	filep->private_data = NULL;
-
-	return nonseekable_open(ino, filep);
+		ret = -EBUSY;
+	else {
+		filep->private_data = NULL;
+		ret = nonseekable_open(ino, filep);
+	}
+	mutex_unlock(&maint_mutex);
+	return ret;
 }
 
 static int maint_close(struct inode *ino, struct file *filep)
@@ -150,23 +136,23 @@ static int maint_close(struct inode *ino, struct file *filep)
 
 	/* clear 'used' flag */
 	clear_bit(0, &opened);
-	
+
 	return (0);
 }
 
 static ssize_t divas_maint_write(struct file *file, const char __user *buf,
-				 size_t count, loff_t * ppos)
+				 size_t count, loff_t *ppos)
 {
 	return (maint_read_write((char __user *) buf, (int) count));
 }
 
 static ssize_t divas_maint_read(struct file *file, char __user *buf,
-				size_t count, loff_t * ppos)
+				size_t count, loff_t *ppos)
 {
 	return (maint_read_write(buf, (int) count));
 }
 
-static struct file_operations divas_maint_fops = {
+static const struct file_operations divas_maint_fops = {
 	.owner   = THIS_MODULE,
 	.llseek  = no_llseek,
 	.read    = divas_maint_read,
@@ -178,11 +164,10 @@ static struct file_operations divas_maint_fops = {
 
 static void divas_maint_unregister_chrdev(void)
 {
-	devfs_remove(DEVNAME);
 	unregister_chrdev(major, DEVNAME);
 }
 
-static int DIVA_INIT_FUNCTION divas_maint_register_chrdev(void)
+static int __init divas_maint_register_chrdev(void)
 {
 	if ((major = register_chrdev(0, DEVNAME, &divas_maint_fops)) < 0)
 	{
@@ -190,7 +175,6 @@ static int DIVA_INIT_FUNCTION divas_maint_register_chrdev(void)
 		       DRIVERLNAME);
 		return (0);
 	}
-	devfs_mk_cdev(MKDEV(major, 0), S_IFCHR|S_IRUSR|S_IWUSR, DEVNAME);
 
 	return (1);
 }
@@ -206,13 +190,12 @@ void diva_maint_wakeup_read(void)
 /*
  *  Driver Load
  */
-static int DIVA_INIT_FUNCTION maint_init(void)
+static int __init maint_init(void)
 {
 	char tmprev[50];
 	int ret = 0;
 	void *buffer = NULL;
 
-	do_gettimeofday(&start_time);
 	init_waitqueue_head(&msgwaitq);
 
 	printk(KERN_INFO "%s\n", DRIVERNAME);
@@ -237,14 +220,14 @@ static int DIVA_INIT_FUNCTION maint_init(void)
 	       DRIVERLNAME, buffer, (buffer_length / 1024),
 	       (diva_dbg_mem == 0) ? "internal" : "external", major);
 
-      out:
+out:
 	return (ret);
 }
 
 /*
 **  Driver Unload
 */
-static void DIVA_EXIT_FUNCTION maint_exit(void)
+static void __exit maint_exit(void)
 {
 	divas_maint_unregister_chrdev();
 	mntfunc_finit();
@@ -254,4 +237,3 @@ static void DIVA_EXIT_FUNCTION maint_exit(void)
 
 module_init(maint_init);
 module_exit(maint_exit);
-

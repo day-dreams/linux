@@ -3,7 +3,7 @@
 
 /*
  *  Header file for ES488/ES1688
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -22,15 +22,16 @@
  *
  */
 
-#include "control.h"
-#include "pcm.h"
+#include <sound/control.h>
+#include <sound/pcm.h>
 #include <linux/interrupt.h>
 
 #define ES1688_HW_AUTO		0x0000
 #define ES1688_HW_688		0x0001
 #define ES1688_HW_1688		0x0002
+#define ES1688_HW_UNDEF	0x0003
 
-struct _snd_es1688 {
+struct snd_es1688 {
 	unsigned long port;		/* port of ESS chip */
 	struct resource *res_port;
 	unsigned long mpu_port;		/* MPU-401 port of ESS chip */
@@ -44,16 +45,13 @@ struct _snd_es1688 {
 	unsigned char pad;
 	unsigned int dma_size;
 
-	snd_card_t *card;
-	snd_pcm_t *pcm;
-	snd_pcm_substream_t *playback_substream;
-	snd_pcm_substream_t *capture_substream;
+	struct snd_pcm *pcm;
+	struct snd_pcm_substream *playback_substream;
+	struct snd_pcm_substream *capture_substream;
 
 	spinlock_t reg_lock;
 	spinlock_t mixer_lock;
 };
-
-typedef struct _snd_es1688 es1688_t;
 
 /* I/O ports */
 
@@ -107,17 +105,18 @@ typedef struct _snd_es1688 es1688_t;
 
  */
 
-void snd_es1688_mixer_write(es1688_t *chip, unsigned char reg, unsigned char data);
+void snd_es1688_mixer_write(struct snd_es1688 *chip, unsigned char reg, unsigned char data);
 
-int snd_es1688_create(snd_card_t * card,
+int snd_es1688_create(struct snd_card *card,
+		      struct snd_es1688 *chip,
 		      unsigned long port,
 		      unsigned long mpu_port,
 		      int irq,
 		      int mpu_irq,
 		      int dma8,
-		      unsigned short hardware,
-		      es1688_t ** rchip);
-int snd_es1688_pcm(es1688_t *chip, int device, snd_pcm_t ** rpcm);
-int snd_es1688_mixer(es1688_t *chip);
+		      unsigned short hardware);
+int snd_es1688_pcm(struct snd_card *card, struct snd_es1688 *chip, int device);
+int snd_es1688_mixer(struct snd_card *card, struct snd_es1688 *chip);
+int snd_es1688_reset(struct snd_es1688 *chip);
 
 #endif /* __SOUND_ES1688_H */

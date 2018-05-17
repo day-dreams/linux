@@ -1,12 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * linux/arch/m32r/lib/ashxdi3.S
  *
  * Copyright (C) 2001,2002  Hiroyuki Kondo, and Hirokazu Takata
  *
  */
-/* $Id$ */
-
-#include <linux/config.h>
 
 ;
 ;      input   (r0,r1)  src
@@ -294,4 +292,3 @@ __lshrdi3:
 #endif /* not CONFIG_ISA_DUAL_ISSUE */
 
 	.end
-

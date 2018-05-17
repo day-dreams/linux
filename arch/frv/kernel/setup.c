@@ -10,8 +10,7 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
-#include <linux/version.h>
+#include <generated/utsrelease.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
@@ -30,9 +29,9 @@
 #include <linux/serial.h>
 #include <linux/serial_core.h>
 #include <linux/serial_reg.h>
+#include <linux/serial_8250.h>
 
 #include <asm/setup.h>
-#include <asm/serial.h>
 #include <asm/irq.h>
 #include <asm/sections.h>
 #include <asm/pgalloc.h>
@@ -44,11 +43,9 @@
 #include <asm/mb-regs.h>
 #include <asm/mb93493-regs.h>
 #include <asm/gdb-stub.h>
-#include <asm/irq-routing.h>
 #include <asm/io.h>
 
 #ifdef CONFIG_BLK_DEV_INITRD
-#include <linux/blk.h>
 #include <asm/pgtable.h>
 #endif
 
@@ -61,13 +58,6 @@ static void __init mb93090_display(void);
 static void __init setup_linux_memory(void);
 #else
 static void __init setup_uclinux_memory(void);
-#endif
-
-#ifdef CONFIG_CONSOLE
-extern struct consw *conswitchp;
-#ifdef CONFIG_FRAMEBUFFER
-extern struct consw fb_con;
-#endif
 #endif
 
 #ifdef CONFIG_MB93090_MB00
@@ -114,17 +104,17 @@ unsigned long __nongprelbss dma_coherent_mem_end;
 unsigned long __initdata __sdram_old_base;
 unsigned long __initdata num_mappedpages;
 
-struct cpuinfo_frv __nongprelbss boot_cpu_data;
-
-char command_line[COMMAND_LINE_SIZE];
+char __initdata command_line[COMMAND_LINE_SIZE];
 char __initdata redboot_command_line[COMMAND_LINE_SIZE];
 
 #ifdef CONFIG_PM
 #define __pminit
 #define __pminitdata
+#define __pminitconst
 #else
 #define __pminit __init
 #define __pminitdata __initdata
+#define __pminitconst __initconst
 #endif
 
 struct clock_cmode {
@@ -194,10 +184,10 @@ static struct clock_cmode __pminitdata clock_cmodes_fr555[16] = {
 	[6]	= {	_x1,	_x1_5,	_x1_5,	_x4_5,	_x0_375	},
 };
 
-static const struct clock_cmode __pminitdata *clock_cmodes;
+static const struct clock_cmode __pminitconst *clock_cmodes;
 static int __pminitdata clock_doubled;
 
-static struct uart_port __initdata __frv_uart0 = {
+static struct uart_port __pminitdata __frv_uart0 = {
 	.uartclk		= 0,
 	.membase		= (char *) UART0_BASE,
 	.irq			= IRQ_CPU_UART0,
@@ -206,7 +196,7 @@ static struct uart_port __initdata __frv_uart0 = {
 	.flags			= UPF_BOOT_AUTOCONF | UPF_SKIP_TEST,
 };
 
-static struct uart_port __initdata __frv_uart1 = {
+static struct uart_port __pminitdata __frv_uart1 = {
 	.uartclk		= 0,
 	.membase		= (char *) UART1_BASE,
 	.irq			= IRQ_CPU_UART1,
@@ -717,7 +707,7 @@ static void __init reserve_dma_coherent(void)
 /*
  * calibrate the delay loop
  */
-void __init calibrate_delay(void)
+void calibrate_delay(void)
 {
 	loops_per_jiffy = __delay_loops_MHz * (1000000 / HZ);
 
@@ -743,7 +733,7 @@ static void __init parse_cmdline_early(char *cmdline)
 		/* "mem=XXX[kKmM]" sets SDRAM size to <mem>, overriding the value we worked
 		 * out from the SDRAM controller mask register
 		 */
-		if (!memcmp(cmdline, "mem=", 4)) {
+		if (!strncmp(cmdline, "mem=", 4)) {
 			unsigned long long mem_size;
 
 			mem_size = memparse(cmdline + 4, &cmdline);
@@ -768,7 +758,7 @@ void __init setup_arch(char **cmdline_p)
 	printk("uClinux FR-V port done by Red Hat Inc <dhowells@redhat.com>\n");
 #endif
 
-	memcpy(saved_command_line, redboot_command_line, COMMAND_LINE_SIZE);
+	memcpy(boot_command_line, redboot_command_line, COMMAND_LINE_SIZE);
 
 	determine_cpu();
 	determine_clocks(1);
@@ -790,26 +780,19 @@ void __init setup_arch(char **cmdline_p)
 #endif
 
 	/* register those serial ports that are available */
+#ifdef CONFIG_FRV_ONCPU_SERIAL
 #ifndef CONFIG_GDBSTUB_UART0
 	__reg(UART0_BASE + UART_IER * 8) = 0;
 	early_serial_setup(&__frv_uart0);
-//	register_serial(&__frv_uart0);
 #endif
 #ifndef CONFIG_GDBSTUB_UART1
 	__reg(UART1_BASE + UART_IER * 8) = 0;
 	early_serial_setup(&__frv_uart1);
-//	register_serial(&__frv_uart1);
 #endif
-
-#if defined(CONFIG_CHR_DEV_FLASH) || defined(CONFIG_BLK_DEV_FLASH)
-	/* we need to initialize the Flashrom device here since we might
-	 * do things with flash early on in the boot
-	 */
-	flash_probe();
 #endif
 
 	/* deal with the command line - RedBoot may have passed one to the kernel */
-	memcpy(command_line, saved_command_line, sizeof(command_line));
+	memcpy(command_line, boot_command_line, sizeof(command_line));
 	*cmdline_p = &command_line[0];
 	parse_cmdline_early(command_line);
 
@@ -817,11 +800,11 @@ void __init setup_arch(char **cmdline_p)
 	 * - by now the stack is part of the init task */
 	printk("Memory %08lx-%08lx\n", memory_start, memory_end);
 
-	if (memory_start == memory_end) BUG();
+	BUG_ON(memory_start == memory_end);
 
-	init_mm.start_code = (unsigned long) &_stext;
-	init_mm.end_code = (unsigned long) &_etext;
-	init_mm.end_data = (unsigned long) &_edata;
+	init_mm.start_code = (unsigned long) _stext;
+	init_mm.end_code = (unsigned long) _etext;
+	init_mm.end_data = (unsigned long) _edata;
 #if 0 /* DAVIDM - don't set brk just incase someone decides to use it */
 	init_mm.brk = (unsigned long) &_end;
 #else
@@ -829,10 +812,8 @@ void __init setup_arch(char **cmdline_p)
 #endif
 
 #ifdef DEBUG
-	printk("KERNEL -> TEXT=0x%06x-0x%06x DATA=0x%06x-0x%06x BSS=0x%06x-0x%06x\n",
-	       (int) &_stext, (int) &_etext,
-	       (int) &_sdata, (int) &_edata,
-	       (int) &_sbss, (int) &_ebss);
+	printk("KERNEL -> TEXT=0x%p-0x%p DATA=0x%p-0x%p BSS=0x%p-0x%p\n",
+	       _stext, _etext, _sdata, _edata, __bss_start, __bss_stop);
 #endif
 
 #ifdef CONFIG_VT
@@ -842,11 +823,6 @@ void __init setup_arch(char **cmdline_p)
         conswitchp = &dummy_con;
 #endif
 #endif
-
-#ifdef CONFIG_BLK_DEV_BLKMEM
-	ROOT_DEV = MKDEV(BLKMEM_MAJOR,0);
-#endif
-	/*rom_length = (unsigned long)&_flashend - (unsigned long)&_romvec;*/
 
 #ifdef CONFIG_MMU
 	setup_linux_memory();
@@ -874,7 +850,7 @@ void __init setup_arch(char **cmdline_p)
 /*
  *
  */
-static int __devinit setup_arch_serial(void)
+static int setup_arch_serial(void)
 {
 	/* register those serial ports that are available */
 #ifndef CONFIG_GDBSTUB_UART0
@@ -898,6 +874,7 @@ late_initcall(setup_arch_serial);
 static void __init setup_linux_memory(void)
 {
 	unsigned long bootmap_size, low_top_pfn, kstart, kend, high_mem;
+	unsigned long physpages;
 
 	kstart	= (unsigned long) &__kernel_image_start - PAGE_OFFSET;
 	kend	= (unsigned long) &__kernel_image_end - PAGE_OFFSET;
@@ -915,19 +892,19 @@ static void __init setup_linux_memory(void)
 					 );
 
 	/* pass the memory that the kernel can immediately use over to the bootmem allocator */
-	max_mapnr = num_physpages = (memory_end - memory_start) >> PAGE_SHIFT;
+	max_mapnr = physpages = (memory_end - memory_start) >> PAGE_SHIFT;
 	low_top_pfn = (KERNEL_LOWMEM_END - KERNEL_LOWMEM_START) >> PAGE_SHIFT;
 	high_mem = 0;
 
-	if (num_physpages > low_top_pfn) {
+	if (physpages > low_top_pfn) {
 #ifdef CONFIG_HIGHMEM
-		high_mem = num_physpages - low_top_pfn;
+		high_mem = physpages - low_top_pfn;
 #else
-		max_mapnr = num_physpages = low_top_pfn;
+		max_mapnr = physpages = low_top_pfn;
 #endif
 	}
 	else {
-		low_top_pfn = num_physpages;
+		low_top_pfn = physpages;
 	}
 
 	min_low_pfn = memory_start >> PAGE_SHIFT;
@@ -946,14 +923,16 @@ static void __init setup_linux_memory(void)
 #endif
 
 	/* take back the memory occupied by the kernel image and the bootmem alloc map */
-	reserve_bootmem(kstart, kend - kstart + bootmap_size);
+	reserve_bootmem(kstart, kend - kstart + bootmap_size,
+			BOOTMEM_DEFAULT);
 
 	/* reserve the memory occupied by the initial ramdisk */
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (LOADER_TYPE && INITRD_START) {
 		if (INITRD_START + INITRD_SIZE <= (low_top_pfn << PAGE_SHIFT)) {
-			reserve_bootmem(INITRD_START, INITRD_SIZE);
-			initrd_start = INITRD_START ? INITRD_START + PAGE_OFFSET : 0;
+			reserve_bootmem(INITRD_START, INITRD_SIZE,
+					BOOTMEM_DEFAULT);
+			initrd_start = INITRD_START + PAGE_OFFSET;
 			initrd_end = initrd_start + INITRD_SIZE;
 		}
 		else {
@@ -999,7 +978,7 @@ static void __init setup_uclinux_memory(void)
 	free_bootmem(memory_start, memory_end - memory_start);
 
 	high_memory = (void *) (memory_end & PAGE_MASK);
-	max_mapnr = num_physpages = ((unsigned long) high_memory - PAGE_OFFSET) >> PAGE_SHIFT;
+	max_mapnr = ((unsigned long) high_memory - PAGE_OFFSET) >> PAGE_SHIFT;
 
 	min_low_pfn = memory_start >> PAGE_SHIFT;
 	max_low_pfn = memory_end >> PAGE_SHIFT;
@@ -1007,9 +986,10 @@ static void __init setup_uclinux_memory(void)
 
 	/* now take back the bits the core kernel is occupying */
 #ifndef CONFIG_PROTECT_KERNEL
-	reserve_bootmem(kend, bootmap_size);
+	reserve_bootmem(kend, bootmap_size, BOOTMEM_DEFAULT);
 	reserve_bootmem((unsigned long) &__kernel_image_start,
-			kend - (unsigned long) &__kernel_image_start);
+			kend - (unsigned long) &__kernel_image_start,
+			BOOTMEM_DEFAULT);
 
 #else
 	dampr = __get_DAMPR(0);
@@ -1017,14 +997,15 @@ static void __init setup_uclinux_memory(void)
 	dampr = (dampr >> 4) + 17;
 	dampr = 1 << dampr;
 
-	reserve_bootmem(__get_DAMPR(0) & xAMPRx_PPFN, dampr);
+	reserve_bootmem(__get_DAMPR(0) & xAMPRx_PPFN, dampr, BOOTMEM_DEFAULT);
 #endif
 
 	/* reserve some memory to do uncached DMA through if requested */
 #ifdef CONFIG_RESERVE_DMA_COHERENT
 	if (dma_coherent_mem_start)
 		reserve_bootmem(dma_coherent_mem_start,
-				dma_coherent_mem_end - dma_coherent_mem_start);
+				dma_coherent_mem_end - dma_coherent_mem_start,
+				BOOTMEM_DEFAULT);
 #endif
 
 } /* end setup_uclinux_memory() */
@@ -1130,7 +1111,7 @@ static void c_stop(struct seq_file *m, void *v)
 {
 }
 
-struct seq_operations cpuinfo_op = {
+const struct seq_operations cpuinfo_op = {
 	.start	= c_start,
 	.next	= c_next,
 	.stop	= c_stop,

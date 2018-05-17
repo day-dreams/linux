@@ -12,19 +12,18 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
 #include <linux/spinlock.h>
 #include <linux/net.h>
+#include <linux/gfp.h>
 #include <net/ax25.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <asm/uaccess.h>
-#include <asm/system.h>
+#include <linux/uaccess.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -40,9 +39,8 @@ void ax25_ds_nr_error_recovery(ax25_cb *ax25)
 void ax25_ds_enquiry_response(ax25_cb *ax25)
 {
 	ax25_cb *ax25o;
-	struct hlist_node *node;
 
-	/* Please note that neither DK4EG´s nor DG2FEF´s
+	/* Please note that neither DK4EG's nor DG2FEF's
 	 * DAMA spec mention the following behaviour as seen
 	 * with TheFirmware:
 	 *
@@ -80,8 +78,8 @@ void ax25_ds_enquiry_response(ax25_cb *ax25)
 	ax25_start_t3timer(ax25);
 	ax25_ds_set_timer(ax25->ax25_dev);
 
-	spin_lock_bh(&ax25_list_lock);
-	ax25_for_each(ax25o, node, &ax25_list) {
+	spin_lock(&ax25_list_lock);
+	ax25_for_each(ax25o, &ax25_list) {
 		if (ax25o == ax25)
 			continue;
 
@@ -106,7 +104,7 @@ void ax25_ds_enquiry_response(ax25_cb *ax25)
 		if (ax25o->state != AX25_STATE_0)
 			ax25_start_t3timer(ax25o);
 	}
-	spin_unlock_bh(&ax25_list_lock);
+	spin_unlock(&ax25_list_lock);
 }
 
 void ax25_ds_establish_data_link(ax25_cb *ax25)
@@ -137,14 +135,13 @@ static void ax25_kiss_cmd(ax25_dev *ax25_dev, unsigned char cmd, unsigned char p
 	if ((skb = alloc_skb(2, GFP_ATOMIC)) == NULL)
 		return;
 
-	skb->nh.raw = skb->data;
+	skb_reset_network_header(skb);
 	p = skb_put(skb, 2);
 
 	*p++ = cmd;
 	*p++ = param;
 
-	skb->dev      = ax25_dev->dev;
-	skb->protocol = htons(ETH_P_AX25);
+	skb->protocol = ax25_type_trans(skb, ax25_dev->dev);
 
 	dev_queue_xmit(skb);
 }
@@ -161,15 +158,14 @@ static int ax25_check_dama_slave(ax25_dev *ax25_dev)
 {
 	ax25_cb *ax25;
 	int res = 0;
-	struct hlist_node *node;
 
-	spin_lock_bh(&ax25_list_lock);
-	ax25_for_each(ax25, node, &ax25_list)
+	spin_lock(&ax25_list_lock);
+	ax25_for_each(ax25, &ax25_list)
 		if (ax25->ax25_dev == ax25_dev && (ax25->condition & AX25_COND_DAMA_MODE) && ax25->state > AX25_STATE_1) {
 			res = 1;
 			break;
 		}
-	spin_unlock_bh(&ax25_list_lock);
+	spin_unlock(&ax25_list_lock);
 
 	return res;
 }

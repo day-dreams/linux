@@ -47,7 +47,7 @@ static char qlogicfas_name[] = "qlogicfas";
  *	Look for qlogic card and init if found 
  */
  
-static struct Scsi_Host *__qlogicfas_detect(Scsi_Host_Template *host,
+static struct Scsi_Host *__qlogicfas_detect(struct scsi_host_template *host,
 								int qbase,
 								int qlirq)
 {
@@ -137,12 +137,12 @@ err:
 static struct qlogicfas408_priv *cards;
 static int iobase[MAX_QLOGICFAS];
 static int irq[MAX_QLOGICFAS] = { [0 ... MAX_QLOGICFAS-1] = -1 };
-module_param_array(iobase, int, NULL, 0);
-module_param_array(irq, int, NULL, 0);
+module_param_hw_array(iobase, int, ioport, NULL, 0);
+module_param_hw_array(irq, int, irq, NULL, 0);
 MODULE_PARM_DESC(iobase, "I/O address");
 MODULE_PARM_DESC(irq, "IRQ");
 
-static int __devinit qlogicfas_detect(Scsi_Host_Template *sht)
+static int qlogicfas_detect(struct scsi_host_template *sht)
 {
 	struct Scsi_Host *shost;
 	struct qlogicfas408_priv *priv;
@@ -166,15 +166,13 @@ static int qlogicfas_release(struct Scsi_Host *shost)
 {
 	struct qlogicfas408_priv *priv = get_priv_by_host(shost);
 
+	scsi_remove_host(shost);
 	if (shost->irq) {
 		qlogicfas408_disable_ints(priv);	
 		free_irq(shost->irq, shost);
 	}
-	if (shost->dma_channel != 0xff)
-		free_dma(shost->dma_channel);
 	if (shost->io_port && shost->n_io_port)
 		release_region(shost->io_port, shost->n_io_port);
-	scsi_remove_host(shost);
 	scsi_host_put(shost);
 
 	return 0;
@@ -183,21 +181,18 @@ static int qlogicfas_release(struct Scsi_Host *shost)
 /*
  *	The driver template is also needed for PCMCIA
  */
-static Scsi_Host_Template qlogicfas_driver_template = {
+static struct scsi_host_template qlogicfas_driver_template = {
 	.module			= THIS_MODULE,
 	.name			= qlogicfas_name,
 	.proc_name		= qlogicfas_name,
 	.info			= qlogicfas408_info,
 	.queuecommand		= qlogicfas408_queuecommand,
 	.eh_abort_handler	= qlogicfas408_abort,
-	.eh_bus_reset_handler	= qlogicfas408_bus_reset,
-	.eh_device_reset_handler= qlogicfas408_device_reset,
 	.eh_host_reset_handler	= qlogicfas408_host_reset,
 	.bios_param		= qlogicfas408_biosparam,
 	.can_queue		= 1,
 	.this_id		= -1,
 	.sg_tablesize		= SG_ALL,
-	.cmd_per_lun		= 1,
 	.use_clustering		= DISABLE_CLUSTERING,
 };
 

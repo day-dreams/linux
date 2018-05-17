@@ -7,6 +7,7 @@
  * Copyright (C) Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  */
 #include <linux/types.h>
+#include <linux/slab.h>
 #include <linux/socket.h>
 #include <linux/timer.h>
 #include <net/ax25.h>
@@ -18,12 +19,13 @@ static struct sk_buff_head loopback_queue;
 static struct timer_list loopback_timer;
 
 static void rose_set_loopback_timer(void);
+static void rose_loopback_timer(struct timer_list *unused);
 
 void rose_loopback_init(void)
 {
 	skb_queue_head_init(&loopback_queue);
 
-	init_timer(&loopback_timer);
+	timer_setup(&loopback_timer, rose_loopback_timer, 0);
 }
 
 static int rose_loopback_running(void)
@@ -49,20 +51,16 @@ int rose_loopback_queue(struct sk_buff *skb, struct rose_neigh *neigh)
 	return 1;
 }
 
-static void rose_loopback_timer(unsigned long);
 
 static void rose_set_loopback_timer(void)
 {
 	del_timer(&loopback_timer);
 
-	loopback_timer.data     = 0;
-	loopback_timer.function = &rose_loopback_timer;
 	loopback_timer.expires  = jiffies + 10;
-
 	add_timer(&loopback_timer);
 }
 
-static void rose_loopback_timer(unsigned long param)
+static void rose_loopback_timer(struct timer_list *unused)
 {
 	struct sk_buff *skb;
 	struct net_device *dev;
@@ -72,14 +70,26 @@ static void rose_loopback_timer(unsigned long param)
 	unsigned int lci_i, lci_o;
 
 	while ((skb = skb_dequeue(&loopback_queue)) != NULL) {
+		if (skb->len < ROSE_MIN_LEN) {
+			kfree_skb(skb);
+			continue;
+		}
 		lci_i     = ((skb->data[0] << 8) & 0xF00) + ((skb->data[1] << 0) & 0x0FF);
 		frametype = skb->data[2];
-		dest      = (rose_address *)(skb->data + 4);
-		lci_o     = 0xFFF - lci_i;
+		if (frametype == ROSE_CALL_REQUEST &&
+		    (skb->len <= ROSE_CALL_REQ_FACILITIES_OFF ||
+		     skb->data[ROSE_CALL_REQ_ADDR_LEN_OFF] !=
+		     ROSE_CALL_REQ_ADDR_LEN_VAL)) {
+			kfree_skb(skb);
+			continue;
+		}
+		dest      = (rose_address *)(skb->data + ROSE_CALL_REQ_DEST_ADDR_OFF);
+		lci_o     = ROSE_DEFAULT_MAXVC + 1 - lci_i;
 
-		skb->h.raw = skb->data;
+		skb_reset_transport_header(skb);
 
-		if ((sk = rose_find_socket(lci_o, rose_loopback_neigh)) != NULL) {
+		sk = rose_find_socket(lci_o, rose_loopback_neigh);
+		if (sk) {
 			if (rose_process_rx_frame(sk, skb) == 0)
 				kfree_skb(skb);
 			continue;

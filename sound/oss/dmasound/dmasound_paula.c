@@ -16,14 +16,14 @@
 
 
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/soundcard.h>
 #include <linux/interrupt.h>
+#include <linux/platform_device.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/setup.h>
 #include <asm/amigahw.h>
 #include <asm/amigaints.h>
@@ -34,6 +34,7 @@
 #define DMASOUND_PAULA_REVISION 0
 #define DMASOUND_PAULA_EDITION 4
 
+#define custom amiga_custom
    /*
     *	The minimum period for audio depends on htotal (for OCS/ECS/AGA)
     *	(Imported from arch/m68k/amiga/amisound.c)
@@ -69,7 +70,7 @@ static int write_sq_block_size_half, write_sq_block_size_quarter;
 /*** Low level stuff *********************************************************/
 
 
-static void *AmiAlloc(unsigned int size, int flags);
+static void *AmiAlloc(unsigned int size, gfp_t flags);
 static void AmiFree(void *obj, unsigned int size);
 static int AmiIrqInit(void);
 #ifdef MODULE
@@ -82,7 +83,7 @@ static int AmiSetVolume(int volume);
 static int AmiSetTreble(int treble);
 static void AmiPlayNextFrame(int index);
 static void AmiPlay(void);
-static irqreturn_t AmiInterrupt(int irq, void *dummy, struct pt_regs *fp);
+static irqreturn_t AmiInterrupt(int irq, void *dummy);
 
 #ifdef CONFIG_HEARTBEAT
 
@@ -90,10 +91,6 @@ static irqreturn_t AmiInterrupt(int irq, void *dummy, struct pt_regs *fp);
      *  Heartbeat interferes with sound since the 7 kHz low-pass filter and the
      *  power LED are controlled by the same line.
      */
-
-#ifdef CONFIG_APUS
-#define mach_heartbeat	ppc_md.heartbeat
-#endif
 
 static void (*saved_heartbeat)(int) = NULL;
 
@@ -156,7 +153,7 @@ static int AmiStateInfo(char *buffer, size_t space);
      *  Native format
      */
 
-static ssize_t ami_ct_s8(const u_char *userPtr, size_t userCount,
+static ssize_t ami_ct_s8(const u_char __user *userPtr, size_t userCount,
 			 u_char frame[], ssize_t *frameUsed, ssize_t frameLeft)
 {
 	ssize_t count, used;
@@ -189,7 +186,7 @@ static ssize_t ami_ct_s8(const u_char *userPtr, size_t userCount,
      */
 
 #define GENERATE_AMI_CT8(funcname, convsample)				\
-static ssize_t funcname(const u_char *userPtr, size_t userCount,	\
+static ssize_t funcname(const u_char __user *userPtr, size_t userCount,	\
 			u_char frame[], ssize_t *frameUsed,		\
 			ssize_t frameLeft)				\
 {									\
@@ -240,10 +237,11 @@ GENERATE_AMI_CT8(ami_ct_u8, AMI_CT_U8)
      */
 
 #define GENERATE_AMI_CT_16(funcname, convsample)			\
-static ssize_t funcname(const u_char *userPtr, size_t userCount,	\
+static ssize_t funcname(const u_char __user *userPtr, size_t userCount,	\
 			u_char frame[], ssize_t *frameUsed,		\
 			ssize_t frameLeft)				\
 {									\
+	const u_short __user *ptr = (const u_short __user *)userPtr;	\
 	ssize_t count, used;						\
 	u_short data;							\
 									\
@@ -253,7 +251,7 @@ static ssize_t funcname(const u_char *userPtr, size_t userCount,	\
 		count = min_t(size_t, userCount, frameLeft)>>1 & ~1;	\
 		used = count*2;						\
 		while (count > 0) {					\
-			if (get_user(data, ((u_short *)userPtr)++))	\
+			if (get_user(data, ptr++))			\
 				return -EFAULT;				\
 			data = convsample(data);			\
 			*high++ = data>>8;				\
@@ -268,12 +266,12 @@ static ssize_t funcname(const u_char *userPtr, size_t userCount,	\
 		count = min_t(size_t, userCount, frameLeft)>>2 & ~1;	\
 		used = count*4;						\
 		while (count > 0) {					\
-			if (get_user(data, ((u_short *)userPtr)++))	\
+			if (get_user(data, ptr++))			\
 				return -EFAULT;				\
 			data = convsample(data);			\
 			*lefth++ = data>>8;				\
 			*leftl++ = (data>>2) & 0x3f;			\
-			if (get_user(data, ((u_short *)userPtr)++))	\
+			if (get_user(data, ptr++))			\
 				return -EFAULT;				\
 			data = convsample(data);			\
 			*righth++ = data>>8;				\
@@ -317,7 +315,7 @@ static inline void StopDMA(void)
 	enable_heartbeat();
 }
 
-static void *AmiAlloc(unsigned int size, int flags)
+static void *AmiAlloc(unsigned int size, gfp_t flags)
 {
 	return amiga_chip_alloc((long)size, "dmasound [Paula]");
 }
@@ -555,7 +553,7 @@ static void AmiPlay(void)
 }
 
 
-static irqreturn_t AmiInterrupt(int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t AmiInterrupt(int irq, void *dummy)
 {
 	int minframes = 1;
 
@@ -660,7 +658,7 @@ static int AmiStateInfo(char *buffer, size_t space)
 	len += sprintf(buffer+len, "\tsound.volume_right = %d [0...64]\n",
 		       dmasound.volume_right);
 	if (len >= space) {
-		printk(KERN_ERR "dmasound_paula: overlowed state buffer alloc.\n") ;
+		printk(KERN_ERR "dmasound_paula: overflowed state buffer alloc.\n") ;
 		len = space ;
 	}
 	return len;
@@ -713,31 +711,28 @@ static MACHINE machAmiga = {
 /*** Config & Setup **********************************************************/
 
 
-int __init dmasound_paula_init(void)
+static int __init amiga_audio_probe(struct platform_device *pdev)
 {
-	int err;
-
-	if (MACH_IS_AMIGA && AMIGAHW_PRESENT(AMI_AUDIO)) {
-	    if (!request_mem_region(CUSTOM_PHYSADDR+0xa0, 0x40,
-				    "dmasound [Paula]"))
-		return -EBUSY;
-	    dmasound.mach = machAmiga;
-	    dmasound.mach.default_hard = def_hard ;
-	    dmasound.mach.default_soft = def_soft ;
-	    err = dmasound_init();
-	    if (err)
-		release_mem_region(CUSTOM_PHYSADDR+0xa0, 0x40);
-	    return err;
-	} else
-	    return -ENODEV;
+	dmasound.mach = machAmiga;
+	dmasound.mach.default_hard = def_hard ;
+	dmasound.mach.default_soft = def_soft ;
+	return dmasound_init();
 }
 
-static void __exit dmasound_paula_cleanup(void)
+static int __exit amiga_audio_remove(struct platform_device *pdev)
 {
 	dmasound_deinit();
-	release_mem_region(CUSTOM_PHYSADDR+0xa0, 0x40);
+	return 0;
 }
 
-module_init(dmasound_paula_init);
-module_exit(dmasound_paula_cleanup);
+static struct platform_driver amiga_audio_driver = {
+	.remove = __exit_p(amiga_audio_remove),
+	.driver   = {
+		.name	= "amiga-audio",
+	},
+};
+
+module_platform_driver_probe(amiga_audio_driver, amiga_audio_probe);
+
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:amiga-audio");

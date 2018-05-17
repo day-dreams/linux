@@ -1,150 +1,161 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * xfrm6_input.c: based on net/ipv4/xfrm4_input.c
  *
  * Authors:
  *	Mitsuru KANDA @USAGI
- * 	Kazunori MIYAZAWA @USAGI
- * 	Kunihiro Ishiguro <kunihiro@ipinfusion.com>
+ *	Kazunori MIYAZAWA @USAGI
+ *	Kunihiro Ishiguro <kunihiro@ipinfusion.com>
  *	YOSHIFUJI Hideaki @USAGI
  *		IPv6 support
  */
 
 #include <linux/module.h>
 #include <linux/string.h>
-#include <net/dsfield.h>
-#include <net/inet_ecn.h>
-#include <net/ip.h>
+#include <linux/netfilter.h>
+#include <linux/netfilter_ipv6.h>
 #include <net/ipv6.h>
 #include <net/xfrm.h>
 
-static inline void ipip6_ecn_decapsulate(struct sk_buff *skb)
+int xfrm6_extract_input(struct xfrm_state *x, struct sk_buff *skb)
 {
-	struct ipv6hdr *outer_iph = skb->nh.ipv6h;
-	struct ipv6hdr *inner_iph = skb->h.ipv6h;
-
-	if (INET_ECN_is_ce(ipv6_get_dsfield(outer_iph)))
-		IP6_ECN_set_ce(inner_iph);
+	return xfrm6_extract_header(skb);
 }
 
-int xfrm6_rcv_spi(struct sk_buff **pskb, unsigned int *nhoffp, u32 spi)
+int xfrm6_rcv_spi(struct sk_buff *skb, int nexthdr, __be32 spi,
+		  struct ip6_tnl *t)
 {
-	struct sk_buff *skb = *pskb;
-	int err;
-	u32 seq;
-	struct sec_decap_state xfrm_vec[XFRM_MAX_DEPTH];
-	struct xfrm_state *x;
-	int xfrm_nr = 0;
-	int decaps = 0;
-	int nexthdr;
-	unsigned int nhoff;
+	XFRM_TUNNEL_SKB_CB(skb)->tunnel.ip6 = t;
+	XFRM_SPI_SKB_CB(skb)->family = AF_INET6;
+	XFRM_SPI_SKB_CB(skb)->daddroff = offsetof(struct ipv6hdr, daddr);
+	return xfrm_input(skb, nexthdr, spi, 0);
+}
+EXPORT_SYMBOL(xfrm6_rcv_spi);
 
-	nhoff = *nhoffp;
-	nexthdr = skb->nh.raw[nhoff];
-
-	seq = 0;
-	if (!spi && (err = xfrm_parse_spi(skb, nexthdr, &spi, &seq)) != 0)
-		goto drop;
-	
-	do {
-		struct ipv6hdr *iph = skb->nh.ipv6h;
-
-		if (xfrm_nr == XFRM_MAX_DEPTH)
-			goto drop;
-
-		x = xfrm_state_lookup((xfrm_address_t *)&iph->daddr, spi, nexthdr, AF_INET6);
-		if (x == NULL)
-			goto drop;
-		spin_lock(&x->lock);
-		if (unlikely(x->km.state != XFRM_STATE_VALID))
-			goto drop_unlock;
-
-		if (x->props.replay_window && xfrm_replay_check(x, seq))
-			goto drop_unlock;
-
-		if (xfrm_state_check_expire(x))
-			goto drop_unlock;
-
-		nexthdr = x->type->input(x, &(xfrm_vec[xfrm_nr].decap), skb);
-		if (nexthdr <= 0)
-			goto drop_unlock;
-
-		skb->nh.raw[nhoff] = nexthdr;
-
-		if (x->props.replay_window)
-			xfrm_replay_advance(x, seq);
-
-		x->curlft.bytes += skb->len;
-		x->curlft.packets++;
-
-		spin_unlock(&x->lock);
-
-		xfrm_vec[xfrm_nr++].xvec = x;
-
-		if (x->props.mode) { /* XXX */
-			if (nexthdr != IPPROTO_IPV6)
-				goto drop;
-			if (!pskb_may_pull(skb, sizeof(struct ipv6hdr)))
-				goto drop;
-			if (skb_cloned(skb) &&
-			    pskb_expand_head(skb, 0, 0, GFP_ATOMIC))
-				goto drop;
-			if (x->props.flags & XFRM_STATE_DECAP_DSCP)
-				ipv6_copy_dscp(skb->nh.ipv6h, skb->h.ipv6h);
-			if (!(x->props.flags & XFRM_STATE_NOECN))
-				ipip6_ecn_decapsulate(skb);
-			skb->mac.raw = memmove(skb->data - skb->mac_len,
-					       skb->mac.raw, skb->mac_len);
-			skb->nh.raw = skb->data;
-			decaps = 1;
-			break;
-		}
-
-		if ((err = xfrm_parse_spi(skb, nexthdr, &spi, &seq)) < 0)
-			goto drop;
-	} while (!err);
-
-	/* Allocate new secpath or COW existing one. */
-	if (!skb->sp || atomic_read(&skb->sp->refcnt) != 1) {
-		struct sec_path *sp;
-		sp = secpath_dup(skb->sp);
-		if (!sp)
-			goto drop;
-		if (skb->sp)
-			secpath_put(skb->sp);
-		skb->sp = sp;
-	}
-
-	if (xfrm_nr + skb->sp->len > XFRM_MAX_DEPTH)
-		goto drop;
-
-	memcpy(skb->sp->x+skb->sp->len, xfrm_vec, xfrm_nr*sizeof(struct sec_decap_state));
-	skb->sp->len += xfrm_nr;
-	skb->ip_summed = CHECKSUM_NONE;
-
-	if (decaps) {
-		if (!(skb->dev->flags&IFF_LOOPBACK)) {
-			dst_release(skb->dst);
-			skb->dst = NULL;
-		}
-		netif_rx(skb);
-		return -1;
-	} else {
-		return 1;
-	}
-
-drop_unlock:
-	spin_unlock(&x->lock);
-	xfrm_state_put(x);
-drop:
-	while (--xfrm_nr >= 0)
-		xfrm_state_put(xfrm_vec[xfrm_nr].xvec);
-	kfree_skb(skb);
+static int xfrm6_transport_finish2(struct net *net, struct sock *sk,
+				   struct sk_buff *skb)
+{
+	if (xfrm_trans_queue(skb, ip6_rcv_finish))
+		__kfree_skb(skb);
 	return -1;
 }
 
-EXPORT_SYMBOL(xfrm6_rcv_spi);
-
-int xfrm6_rcv(struct sk_buff **pskb, unsigned int *nhoffp)
+int xfrm6_transport_finish(struct sk_buff *skb, int async)
 {
-	return xfrm6_rcv_spi(pskb, nhoffp, 0);
+	struct xfrm_offload *xo = xfrm_offload(skb);
+	int nhlen = skb->data - skb_network_header(skb);
+
+	skb_network_header(skb)[IP6CB(skb)->nhoff] =
+		XFRM_MODE_SKB_CB(skb)->protocol;
+
+#ifndef CONFIG_NETFILTER
+	if (!async)
+		return 1;
+#endif
+
+	__skb_push(skb, nhlen);
+	ipv6_hdr(skb)->payload_len = htons(skb->len - sizeof(struct ipv6hdr));
+	skb_postpush_rcsum(skb, skb_network_header(skb), nhlen);
+
+	if (xo && (xo->flags & XFRM_GRO)) {
+		skb_mac_header_rebuild(skb);
+		return -1;
+	}
+
+	NF_HOOK(NFPROTO_IPV6, NF_INET_PRE_ROUTING,
+		dev_net(skb->dev), NULL, skb, skb->dev, NULL,
+		xfrm6_transport_finish2);
+	return -1;
 }
+
+int xfrm6_rcv_tnl(struct sk_buff *skb, struct ip6_tnl *t)
+{
+	return xfrm6_rcv_spi(skb, skb_network_header(skb)[IP6CB(skb)->nhoff],
+			     0, t);
+}
+EXPORT_SYMBOL(xfrm6_rcv_tnl);
+
+int xfrm6_rcv(struct sk_buff *skb)
+{
+	return xfrm6_rcv_tnl(skb, NULL);
+}
+EXPORT_SYMBOL(xfrm6_rcv);
+int xfrm6_input_addr(struct sk_buff *skb, xfrm_address_t *daddr,
+		     xfrm_address_t *saddr, u8 proto)
+{
+	struct net *net = dev_net(skb->dev);
+	struct xfrm_state *x = NULL;
+	int i = 0;
+
+	if (secpath_set(skb)) {
+		XFRM_INC_STATS(net, LINUX_MIB_XFRMINERROR);
+		goto drop;
+	}
+
+	if (1 + skb->sp->len == XFRM_MAX_DEPTH) {
+		XFRM_INC_STATS(net, LINUX_MIB_XFRMINBUFFERERROR);
+		goto drop;
+	}
+
+	for (i = 0; i < 3; i++) {
+		xfrm_address_t *dst, *src;
+
+		switch (i) {
+		case 0:
+			dst = daddr;
+			src = saddr;
+			break;
+		case 1:
+			/* lookup state with wild-card source address */
+			dst = daddr;
+			src = (xfrm_address_t *)&in6addr_any;
+			break;
+		default:
+			/* lookup state with wild-card addresses */
+			dst = (xfrm_address_t *)&in6addr_any;
+			src = (xfrm_address_t *)&in6addr_any;
+			break;
+		}
+
+		x = xfrm_state_lookup_byaddr(net, skb->mark, dst, src, proto, AF_INET6);
+		if (!x)
+			continue;
+
+		spin_lock(&x->lock);
+
+		if ((!i || (x->props.flags & XFRM_STATE_WILDRECV)) &&
+		    likely(x->km.state == XFRM_STATE_VALID) &&
+		    !xfrm_state_check_expire(x)) {
+			spin_unlock(&x->lock);
+			if (x->type->input(x, skb) > 0) {
+				/* found a valid state */
+				break;
+			}
+		} else
+			spin_unlock(&x->lock);
+
+		xfrm_state_put(x);
+		x = NULL;
+	}
+
+	if (!x) {
+		XFRM_INC_STATS(net, LINUX_MIB_XFRMINNOSTATES);
+		xfrm_audit_state_notfound_simple(skb, AF_INET6);
+		goto drop;
+	}
+
+	skb->sp->xvec[skb->sp->len++] = x;
+
+	spin_lock(&x->lock);
+
+	x->curlft.bytes += skb->len;
+	x->curlft.packets++;
+
+	spin_unlock(&x->lock);
+
+	return 1;
+
+drop:
+	return -1;
+}
+EXPORT_SYMBOL(xfrm6_input_addr);

@@ -111,7 +111,7 @@ TROUBLESHOOTING SERIAL CONSOLE PROBLEMS
 
 	- If you don't have an HCDP, the kernel doesn't know where
 	  your console lives until the driver discovers serial
-	  devices.  Use "console=uart, io,0x3f8" (or appropriate
+	  devices.  Use "console=uart,io,0x3f8" (or appropriate
 	  address for your machine).
 
     Kernel and init script output works fine, but no "login:" prompt:
@@ -124,9 +124,16 @@ TROUBLESHOOTING SERIAL CONSOLE PROBLEMS
 
 	- Add entry to /etc/securetty for console tty.
 
+    No ACPI serial devices found in 2.6.17 or later:
+
+	- Turn on CONFIG_PNP and CONFIG_PNPACPI.  Prior to 2.6.17, ACPI
+	  serial devices were discovered by 8250_acpi.  In 2.6.17,
+	  8250_acpi was replaced by the combination of 8250_pnp and
+	  CONFIG_PNPACPI.
 
 
-[1] http://www.dig64.org/specifications/DIG64_PCDPv20.pdf
+
+[1] http://www.dig64.org/specifications/agreement 
     The table was originally defined as the "HCDP" for "Headless
     Console/Debug Port."  The current version is the "PCDP" for
     "Primary Console and Debug Port Devices."

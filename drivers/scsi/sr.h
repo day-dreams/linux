@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *      sr.h by David Giller
  *      CD-ROM disk driver header file
@@ -20,6 +21,9 @@
 #include <linux/genhd.h>
 #include <linux/kref.h>
 
+#define MAX_RETRIES	3
+#define SR_TIMEOUT	(30 * HZ)
+
 struct scsi_device;
 
 /* The CDROM is fairly slow, so we need a little extra time */
@@ -33,17 +37,28 @@ typedef struct scsi_cd {
 	struct scsi_device *device;
 	unsigned int vendor;	/* vendor code, see sr_vendor.c         */
 	unsigned long ms_offset;	/* for reading multisession-CD's        */
-	unsigned needs_sector_size:1;	/* needs to get sector size */
+	unsigned writeable : 1;
 	unsigned use:1;		/* is this device still supportable     */
 	unsigned xa_flag:1;	/* CD has XA sectors ? */
 	unsigned readcd_known:1;	/* drive supports READ_CD (0xbe) */
 	unsigned readcd_cdda:1;	/* reading audio data using READ_CD */
+	unsigned media_present:1;	/* media is present */
+
+	/* GET_EVENT spurious event handling, blk layer guarantees exclusion */
+	int tur_mismatch;		/* nr of get_event TUR mismatches */
+	bool tur_changed:1;		/* changed according to TUR */
+	bool get_event_changed:1;	/* changed according to GET_EVENT */
+	bool ignore_get_event:1;	/* GET_EVENT is unreliable, use TUR */
+
 	struct cdrom_device_info cdi;
 	/* We hold gendisk and scsi_device references on probe and use
 	 * the refs on this kref to decide when to release them */
 	struct kref kref;
 	struct gendisk *disk;
 } Scsi_CD;
+
+#define sr_printk(prefix, cd, fmt, a...) \
+	sdev_prefix_printk(prefix, (cd)->device, (cd)->cdi.name, fmt, ##a)
 
 int sr_do_ioctl(Scsi_CD *, struct packet_command *);
 
@@ -56,7 +71,6 @@ int sr_get_mcn(struct cdrom_device_info *, struct cdrom_mcn *);
 int sr_reset(struct cdrom_device_info *);
 int sr_select_speed(struct cdrom_device_info *cdi, int speed);
 int sr_audio_ioctl(struct cdrom_device_info *, unsigned int, void *);
-int sr_dev_ioctl(struct cdrom_device_info *, unsigned int, unsigned long);
 
 int sr_is_xa(Scsi_CD *);
 

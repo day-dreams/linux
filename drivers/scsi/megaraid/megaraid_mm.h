@@ -17,21 +17,20 @@
 
 #include <linux/spinlock.h>
 #include <linux/fs.h>
-#include <asm/uaccess.h>
-#include <linux/version.h>
+#include <linux/uaccess.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/pci.h>
 #include <linux/list.h>
-#include <linux/ioctl32.h>
+#include <linux/miscdevice.h>
 
 #include "mbox_defs.h"
 #include "megaraid_ioctl.h"
 
 
-#define LSI_COMMON_MOD_VERSION	"2.20.2.5"
+#define LSI_COMMON_MOD_VERSION	"2.20.2.7"
 #define LSI_COMMON_MOD_EXT_VERSION	\
-		"(Release Date: Fri Jan 21 00:01:03 EST 2005)"
+		"(Release Date: Sun Jul 16 00:01:03 EST 2006)"
 
 
 #define LSI_DBGLVL			dbglevel

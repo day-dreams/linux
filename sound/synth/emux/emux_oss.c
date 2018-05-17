@@ -22,28 +22,32 @@
  * 				midi emulation.
  */
 
-#include <sound/driver.h>
 
-#ifdef CONFIG_SND_SEQUENCER_OSS
-
-#include <asm/uaccess.h>
+#include <linux/export.h>
+#include <linux/uaccess.h>
 #include <sound/core.h>
 #include "emux_voice.h"
 #include <sound/asoundef.h>
 
-static int snd_emux_open_seq_oss(snd_seq_oss_arg_t *arg, void *closure);
-static int snd_emux_close_seq_oss(snd_seq_oss_arg_t *arg);
-static int snd_emux_ioctl_seq_oss(snd_seq_oss_arg_t *arg, unsigned int cmd, unsigned long ioarg);
-static int snd_emux_load_patch_seq_oss(snd_seq_oss_arg_t *arg, int format, const char __user *buf, int offs, int count);
-static int snd_emux_reset_seq_oss(snd_seq_oss_arg_t *arg);
-static int snd_emux_event_oss_input(snd_seq_event_t *ev, int direct, void *private, int atomic, int hop);
-static void reset_port_mode(snd_emux_port_t *port, int midi_mode);
-static void emuspec_control(snd_emux_t *emu, snd_emux_port_t *port, int cmd, unsigned char *event, int atomic, int hop);
-static void gusspec_control(snd_emux_t *emu, snd_emux_port_t *port, int cmd, unsigned char *event, int atomic, int hop);
-static void fake_event(snd_emux_t *emu, snd_emux_port_t *port, int ch, int param, int val, int atomic, int hop);
+static int snd_emux_open_seq_oss(struct snd_seq_oss_arg *arg, void *closure);
+static int snd_emux_close_seq_oss(struct snd_seq_oss_arg *arg);
+static int snd_emux_ioctl_seq_oss(struct snd_seq_oss_arg *arg, unsigned int cmd,
+				  unsigned long ioarg);
+static int snd_emux_load_patch_seq_oss(struct snd_seq_oss_arg *arg, int format,
+				       const char __user *buf, int offs, int count);
+static int snd_emux_reset_seq_oss(struct snd_seq_oss_arg *arg);
+static int snd_emux_event_oss_input(struct snd_seq_event *ev, int direct,
+				    void *private, int atomic, int hop);
+static void reset_port_mode(struct snd_emux_port *port, int midi_mode);
+static void emuspec_control(struct snd_emux *emu, struct snd_emux_port *port,
+			    int cmd, unsigned char *event, int atomic, int hop);
+static void gusspec_control(struct snd_emux *emu, struct snd_emux_port *port,
+			    int cmd, unsigned char *event, int atomic, int hop);
+static void fake_event(struct snd_emux *emu, struct snd_emux_port *port,
+		       int ch, int param, int val, int atomic, int hop);
 
 /* operators */
-static snd_seq_oss_callback_t oss_callback = {
+static struct snd_seq_oss_callback oss_callback = {
 	.owner = THIS_MODULE,
 	.open = snd_emux_open_seq_oss,
 	.close = snd_emux_close_seq_oss,
@@ -58,13 +62,14 @@ static snd_seq_oss_callback_t oss_callback = {
  */
 
 void
-snd_emux_init_seq_oss(snd_emux_t *emu)
+snd_emux_init_seq_oss(struct snd_emux *emu)
 {
-	snd_seq_oss_reg_t *arg;
-	snd_seq_device_t *dev;
+	struct snd_seq_oss_reg *arg;
+	struct snd_seq_device *dev;
 
-	if (snd_seq_device_new(emu->card, 0, SNDRV_SEQ_DEV_ID_OSS,
-			       sizeof(snd_seq_oss_reg_t), &dev) < 0)
+	/* using device#1 here for avoiding conflicts with OPL3 */
+	if (snd_seq_device_new(emu->card, 1, SNDRV_SEQ_DEV_ID_OSS,
+			       sizeof(struct snd_seq_oss_reg), &dev) < 0)
 		return;
 
 	emu->oss_synth = dev;
@@ -85,7 +90,7 @@ snd_emux_init_seq_oss(snd_emux_t *emu)
  * unregister
  */
 void
-snd_emux_detach_seq_oss(snd_emux_t *emu)
+snd_emux_detach_seq_oss(struct snd_emux *emu)
 {
 	if (emu->oss_synth) {
 		snd_device_free(emu->card, emu->oss_synth);
@@ -101,22 +106,19 @@ snd_emux_detach_seq_oss(snd_emux_t *emu)
  * open port for OSS sequencer
  */
 static int
-snd_emux_open_seq_oss(snd_seq_oss_arg_t *arg, void *closure)
+snd_emux_open_seq_oss(struct snd_seq_oss_arg *arg, void *closure)
 {
-	snd_emux_t *emu;
-	snd_emux_port_t *p;
-	snd_seq_port_callback_t callback;
+	struct snd_emux *emu;
+	struct snd_emux_port *p;
+	struct snd_seq_port_callback callback;
 	char tmpname[64];
 
 	emu = closure;
-	snd_assert(arg != NULL && emu != NULL, return -ENXIO);
+	if (snd_BUG_ON(!arg || !emu))
+		return -ENXIO;
 
-	down(&emu->register_mutex);
-
-	if (!snd_emux_inc_count(emu)) {
-		up(&emu->register_mutex);
+	if (!snd_emux_inc_count(emu))
 		return -EFAULT;
-	}
 
 	memset(&callback, 0, sizeof(callback));
 	callback.owner = THIS_MODULE;
@@ -126,9 +128,8 @@ snd_emux_open_seq_oss(snd_seq_oss_arg_t *arg, void *closure)
 	p = snd_emux_create_port(emu, tmpname, 32,
 				 1, &callback);
 	if (p == NULL) {
-		snd_printk("can't create port\n");
+		snd_printk(KERN_ERR "can't create port\n");
 		snd_emux_dec_count(emu);
-		up(&emu->register_mutex);
 		return -ENOMEM;
 	}
 
@@ -141,8 +142,6 @@ snd_emux_open_seq_oss(snd_seq_oss_arg_t *arg, void *closure)
 	reset_port_mode(p, arg->seq_mode);
 
 	snd_emux_reset_port(p);
-
-	up(&emu->register_mutex);
 	return 0;
 }
 
@@ -153,7 +152,7 @@ snd_emux_open_seq_oss(snd_seq_oss_arg_t *arg, void *closure)
  * reset port mode
  */
 static void
-reset_port_mode(snd_emux_port_t *port, int midi_mode)
+reset_port_mode(struct snd_emux_port *port, int midi_mode)
 {
 	if (midi_mode) {
 		port->port_mode = SNDRV_EMUX_PORT_MODE_OSS_MIDI;
@@ -173,25 +172,26 @@ reset_port_mode(snd_emux_port_t *port, int midi_mode)
  * close port
  */
 static int
-snd_emux_close_seq_oss(snd_seq_oss_arg_t *arg)
+snd_emux_close_seq_oss(struct snd_seq_oss_arg *arg)
 {
-	snd_emux_t *emu;
-	snd_emux_port_t *p;
+	struct snd_emux *emu;
+	struct snd_emux_port *p;
 
-	snd_assert(arg != NULL, return -ENXIO);
+	if (snd_BUG_ON(!arg))
+		return -ENXIO;
 	p = arg->private_data;
-	snd_assert(p != NULL, return -ENXIO);
+	if (snd_BUG_ON(!p))
+		return -ENXIO;
 
 	emu = p->emu;
-	snd_assert(emu != NULL, return -ENXIO);
+	if (snd_BUG_ON(!emu))
+		return -ENXIO;
 
-	down(&emu->register_mutex);
 	snd_emux_sounds_off_all(p);
 	snd_soundfont_close_check(emu->sflist, SF_CLIENT_NO(p->chset.port));
 	snd_seq_event_port_detach(p->chset.client, p->chset.port);
 	snd_emux_dec_count(emu);
 
-	up(&emu->register_mutex);
 	return 0;
 }
 
@@ -200,29 +200,32 @@ snd_emux_close_seq_oss(snd_seq_oss_arg_t *arg)
  * load patch
  */
 static int
-snd_emux_load_patch_seq_oss(snd_seq_oss_arg_t *arg, int format,
+snd_emux_load_patch_seq_oss(struct snd_seq_oss_arg *arg, int format,
 			    const char __user *buf, int offs, int count)
 {
-	snd_emux_t *emu;
-	snd_emux_port_t *p;
+	struct snd_emux *emu;
+	struct snd_emux_port *p;
 	int rc;
 
-	snd_assert(arg != NULL, return -ENXIO);
+	if (snd_BUG_ON(!arg))
+		return -ENXIO;
 	p = arg->private_data;
-	snd_assert(p != NULL, return -ENXIO);
+	if (snd_BUG_ON(!p))
+		return -ENXIO;
 
 	emu = p->emu;
-	snd_assert(emu != NULL, return -ENXIO);
+	if (snd_BUG_ON(!emu))
+		return -ENXIO;
 
 	if (format == GUS_PATCH)
 		rc = snd_soundfont_load_guspatch(emu->sflist, buf, count,
 						 SF_CLIENT_NO(p->chset.port));
 	else if (format == SNDRV_OSS_SOUNDFONT_PATCH) {
-		soundfont_patch_info_t patch;
+		struct soundfont_patch_info patch;
 		if (count < (int)sizeof(patch))
-			rc = -EINVAL;
+			return -EINVAL;
 		if (copy_from_user(&patch, buf, sizeof(patch)))
-			rc = -EFAULT;
+			return -EFAULT;
 		if (patch.type >= SNDRV_SFNT_LOAD_INFO &&
 		    patch.type <= SNDRV_SFNT_PROBE_DATA)
 			rc = snd_soundfont_load(emu->sflist, buf, count, SF_CLIENT_NO(p->chset.port));
@@ -242,17 +245,20 @@ snd_emux_load_patch_seq_oss(snd_seq_oss_arg_t *arg, int format,
  * ioctl
  */
 static int
-snd_emux_ioctl_seq_oss(snd_seq_oss_arg_t *arg, unsigned int cmd, unsigned long ioarg)
+snd_emux_ioctl_seq_oss(struct snd_seq_oss_arg *arg, unsigned int cmd, unsigned long ioarg)
 {
-	snd_emux_port_t *p;
-	snd_emux_t *emu;
+	struct snd_emux_port *p;
+	struct snd_emux *emu;
 
-	snd_assert(arg != NULL, return -ENXIO);
+	if (snd_BUG_ON(!arg))
+		return -ENXIO;
 	p = arg->private_data;
-	snd_assert(p != NULL, return -ENXIO);
+	if (snd_BUG_ON(!p))
+		return -ENXIO;
 
 	emu = p->emu;
-	snd_assert(emu != NULL, return -ENXIO);
+	if (snd_BUG_ON(!emu))
+		return -ENXIO;
 
 	switch (cmd) {
 	case SNDCTL_SEQ_RESETSAMPLES:
@@ -273,13 +279,15 @@ snd_emux_ioctl_seq_oss(snd_seq_oss_arg_t *arg, unsigned int cmd, unsigned long i
  * reset device
  */
 static int
-snd_emux_reset_seq_oss(snd_seq_oss_arg_t *arg)
+snd_emux_reset_seq_oss(struct snd_seq_oss_arg *arg)
 {
-	snd_emux_port_t *p;
+	struct snd_emux_port *p;
 
-	snd_assert(arg != NULL, return -ENXIO);
+	if (snd_BUG_ON(!arg))
+		return -ENXIO;
 	p = arg->private_data;
-	snd_assert(p != NULL, return -ENXIO);
+	if (snd_BUG_ON(!p))
+		return -ENXIO;
 	snd_emux_reset_port(p);
 	return 0;
 }
@@ -289,17 +297,19 @@ snd_emux_reset_seq_oss(snd_seq_oss_arg_t *arg)
  * receive raw events: only SEQ_PRIVATE is accepted.
  */
 static int
-snd_emux_event_oss_input(snd_seq_event_t *ev, int direct, void *private_data,
+snd_emux_event_oss_input(struct snd_seq_event *ev, int direct, void *private_data,
 			 int atomic, int hop)
 {
-	snd_emux_t *emu;
-	snd_emux_port_t *p;
+	struct snd_emux *emu;
+	struct snd_emux_port *p;
 	unsigned char cmd, *data;
 
 	p = private_data;
-	snd_assert(p != NULL, return -EINVAL);
+	if (snd_BUG_ON(!p))
+		return -EINVAL;
 	emu = p->emu;
-	snd_assert(emu != NULL, return -EINVAL);
+	if (snd_BUG_ON(!emu))
+		return -EINVAL;
 	if (ev->type != SNDRV_SEQ_EVENT_OSS)
 		return snd_emux_event_input(ev, direct, private_data, atomic, hop);
 
@@ -320,14 +330,14 @@ snd_emux_event_oss_input(snd_seq_event_t *ev, int direct, void *private_data,
  * OSS/AWE driver specific h/w controls
  */
 static void
-emuspec_control(snd_emux_t *emu, snd_emux_port_t *port, int cmd,
+emuspec_control(struct snd_emux *emu, struct snd_emux_port *port, int cmd,
 		unsigned char *event, int atomic, int hop)
 {
 	int voice;
 	unsigned short p1;
 	short p2;
 	int i;
-	snd_midi_channel_t *chan;
+	struct snd_midi_channel *chan;
 
 	voice = event[3];
 	if (voice < 0 || voice >= port->chset.max_channels)
@@ -415,14 +425,13 @@ emuspec_control(snd_emux_t *emu, snd_emux_port_t *port, int cmd,
 #include <linux/ultrasound.h>
 
 static void
-gusspec_control(snd_emux_t *emu, snd_emux_port_t *port, int cmd,
+gusspec_control(struct snd_emux *emu, struct snd_emux_port *port, int cmd,
 		unsigned char *event, int atomic, int hop)
 {
 	int voice;
 	unsigned short p1;
-	short p2;
 	int plong;
-	snd_midi_channel_t *chan;
+	struct snd_midi_channel *chan;
 
 	if (port->port_mode != SNDRV_EMUX_PORT_MODE_OSS_SYNTH)
 		return;
@@ -435,7 +444,6 @@ gusspec_control(snd_emux_t *emu, snd_emux_port_t *port, int cmd,
 	chan = &port->chset.channels[voice];
 
 	p1 = *(unsigned short *) &event[4];
-	p2 = *(short *) &event[6];
 	plong = *(int*) &event[4];
 
 	switch (cmd) {
@@ -483,9 +491,9 @@ gusspec_control(snd_emux_t *emu, snd_emux_port_t *port, int cmd,
  * send an event to midi emulation
  */
 static void
-fake_event(snd_emux_t *emu, snd_emux_port_t *port, int ch, int param, int val, int atomic, int hop)
+fake_event(struct snd_emux *emu, struct snd_emux_port *port, int ch, int param, int val, int atomic, int hop)
 {
-	snd_seq_event_t ev;
+	struct snd_seq_event ev;
 	memset(&ev, 0, sizeof(ev));
 	ev.type = SNDRV_SEQ_EVENT_CONTROLLER;
 	ev.data.control.channel = ch;
@@ -493,5 +501,3 @@ fake_event(snd_emux_t *emu, snd_emux_port_t *port, int ch, int param, int val, i
 	ev.data.control.value = val;
 	snd_emux_event_input(&ev, 0, port, atomic, hop);
 }
-
-#endif /* CONFIG_SND_SEQUENCER_OSS */

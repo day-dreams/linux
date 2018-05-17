@@ -13,13 +13,42 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 
-#include <asm/pci.h>
 #include <asm/io.h>
 #include <asm/gt64120.h>
 
-#include <asm/cobalt/cobalt.h>
+#include <cobalt.h>
+#include <irq.h>
 
-extern int cobalt_board_id;
+/*
+ * PCI slot numbers
+ */
+#define COBALT_PCICONF_CPU	0x06
+#define COBALT_PCICONF_ETH0	0x07
+#define COBALT_PCICONF_RAQSCSI	0x08
+#define COBALT_PCICONF_VIA	0x09
+#define COBALT_PCICONF_PCISLOT	0x0A
+#define COBALT_PCICONF_ETH1	0x0C
+
+/*
+ * The Cobalt board ID information.  The boards have an ID number wired
+ * into the VIA that is available in the high nibble of register 94.
+ */
+#define VIA_COBALT_BRD_ID_REG  0x94
+#define VIA_COBALT_BRD_REG_to_ID(reg)	((unsigned char)(reg) >> 4)
+
+static void qube_raq_galileo_early_fixup(struct pci_dev *dev)
+{
+	if (dev->devfn == PCI_DEVFN(0, 0) &&
+		(dev->class >> 8) == PCI_CLASS_MEMORY_OTHER) {
+
+		dev->class = (PCI_CLASS_BRIDGE_HOST << 8) | (dev->class & 0xff);
+
+		printk(KERN_INFO "Galileo: fixed bridge class\n");
+	}
+}
+
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_MARVELL, PCI_DEVICE_ID_MARVELL_GT64111,
+	 qube_raq_galileo_early_fixup);
 
 static void qube_raq_via_bmIDE_fixup(struct pci_dev *dev)
 {
@@ -38,7 +67,7 @@ static void qube_raq_via_bmIDE_fixup(struct pci_dev *dev)
 	pci_read_config_byte(dev, PCI_LATENCY_TIMER, &lt);
 	if (lt < 64)
 		pci_write_config_byte(dev, PCI_LATENCY_TIMER, 64);
-	pci_write_config_byte(dev, PCI_CACHE_LINE_SIZE, 7);
+	pci_write_config_byte(dev, PCI_CACHE_LINE_SIZE, 8);
 }
 
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_82C586_1,
@@ -46,59 +75,110 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_82C586_1,
 
 static void qube_raq_galileo_fixup(struct pci_dev *dev)
 {
-	unsigned short galileo_id;
+	if (dev->devfn != PCI_DEVFN(0, 0))
+		return;
 
 	/* Fix PCI latency-timer and cache-line-size values in Galileo
 	 * host bridge.
 	 */
 	pci_write_config_byte(dev, PCI_LATENCY_TIMER, 64);
-	pci_write_config_byte(dev, PCI_CACHE_LINE_SIZE, 7);
+	pci_write_config_byte(dev, PCI_CACHE_LINE_SIZE, 8);
 
 	/*
+	 * The code described by the comment below has been removed
+	 * as it causes bus mastering by the Ethernet controllers
+	 * to break under any kind of network load. We always set
+	 * the retry timeouts to their maximum.
+	 *
+	 * --x--x--x--x--x--x--x--x--x--x--x--x--x--x--x--x--x--x--x--x--
+	 *
 	 * On all machines prior to Q2, we had the STOP line disconnected
-	 * from Galileo to VIA on PCI.  The new Galileo does not function
+	 * from Galileo to VIA on PCI.	The new Galileo does not function
 	 * correctly unless we have it connected.
 	 *
 	 * Therefore we must set the disconnect/retry cycle values to
 	 * something sensible when using the new Galileo.
 	 */
-	pci_read_config_word(dev, PCI_REVISION_ID, &galileo_id);
-	galileo_id &= 0xff;	/* mask off class info */
-	if (galileo_id >= 0x10) {
+
+	printk(KERN_INFO "Galileo: revision %u\n", dev->revision);
+
+#if 0
+	if (dev->revision >= 0x10) {
 		/* New Galileo, assumes PCI stop line to VIA is connected. */
-		GALILEO_OUTL(0x4020, GT_PCI0_TOR_OFS);
-	} else if (galileo_id == 0x1 || galileo_id == 0x2) {
+		GT_WRITE(GT_PCI0_TOR_OFS, 0x4020);
+	} else if (dev->revision == 0x1 || dev->revision == 0x2)
+#endif
+	{
 		signed int timeo;
 		/* XXX WE MUST DO THIS ELSE GALILEO LOCKS UP! -DaveM */
-		timeo = GALILEO_INL(GT_PCI0_TOR_OFS);
+		timeo = GT_READ(GT_PCI0_TOR_OFS);
 		/* Old Galileo, assumes PCI STOP line to VIA is disconnected. */
-		GALILEO_OUTL(0xffff, GT_PCI0_TOR_OFS);
+		GT_WRITE(GT_PCI0_TOR_OFS,
+			(0xff << 16) |		/* retry count */
+			(0xff << 8) |		/* timeout 1   */
+			0xff);			/* timeout 0   */
+
+		/* enable PCI retry exceeded interrupt */
+		GT_WRITE(GT_INTRMASK_OFS, GT_INTR_RETRYCTR0_MSK | GT_READ(GT_INTRMASK_OFS));
 	}
 }
 
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_GALILEO, PCI_ANY_ID,
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL, PCI_DEVICE_ID_MARVELL_GT64111,
 	 qube_raq_galileo_fixup);
 
-static char irq_tab_cobalt[] __initdata = {
-  [COBALT_PCICONF_CPU]     = 0,
-  [COBALT_PCICONF_ETH0]    = COBALT_ETH0_IRQ,
-  [COBALT_PCICONF_RAQSCSI] = COBALT_SCSI_IRQ,
-  [COBALT_PCICONF_VIA]     = 0,
-  [COBALT_PCICONF_PCISLOT] = COBALT_QUBE_SLOT_IRQ,
-  [COBALT_PCICONF_ETH1]    = COBALT_ETH1_IRQ
-};
+int cobalt_board_id;
 
-static char irq_tab_raq2[] __initdata = {
-  [COBALT_PCICONF_CPU]     = 0,
-  [COBALT_PCICONF_ETH0]    = COBALT_ETH0_IRQ,
-  [COBALT_PCICONF_RAQSCSI] = COBALT_RAQ_SCSI_IRQ,
-  [COBALT_PCICONF_VIA]     = 0,
-  [COBALT_PCICONF_PCISLOT] = COBALT_QUBE_SLOT_IRQ,
-  [COBALT_PCICONF_ETH1]    = COBALT_ETH1_IRQ
-};
-
-int __init pcibios_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static void qube_raq_via_board_id_fixup(struct pci_dev *dev)
 {
+	u8 id;
+	int retval;
+
+	retval = pci_read_config_byte(dev, VIA_COBALT_BRD_ID_REG, &id);
+	if (retval) {
+		panic("Cannot read board ID");
+		return;
+	}
+
+	cobalt_board_id = VIA_COBALT_BRD_REG_to_ID(id);
+
+	printk(KERN_INFO "Cobalt board ID: %d\n", cobalt_board_id);
+}
+
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_82C586_0,
+	 qube_raq_via_board_id_fixup);
+
+static char irq_tab_qube1[] = {
+  [COBALT_PCICONF_CPU]	   = 0,
+  [COBALT_PCICONF_ETH0]	   = QUBE1_ETH0_IRQ,
+  [COBALT_PCICONF_RAQSCSI] = SCSI_IRQ,
+  [COBALT_PCICONF_VIA]	   = 0,
+  [COBALT_PCICONF_PCISLOT] = PCISLOT_IRQ,
+  [COBALT_PCICONF_ETH1]	   = 0
+};
+
+static char irq_tab_cobalt[] = {
+  [COBALT_PCICONF_CPU]	   = 0,
+  [COBALT_PCICONF_ETH0]	   = ETH0_IRQ,
+  [COBALT_PCICONF_RAQSCSI] = SCSI_IRQ,
+  [COBALT_PCICONF_VIA]	   = 0,
+  [COBALT_PCICONF_PCISLOT] = PCISLOT_IRQ,
+  [COBALT_PCICONF_ETH1]	   = ETH1_IRQ
+};
+
+static char irq_tab_raq2[] = {
+  [COBALT_PCICONF_CPU]	   = 0,
+  [COBALT_PCICONF_ETH0]	   = ETH0_IRQ,
+  [COBALT_PCICONF_RAQSCSI] = RAQ2_SCSI_IRQ,
+  [COBALT_PCICONF_VIA]	   = 0,
+  [COBALT_PCICONF_PCISLOT] = PCISLOT_IRQ,
+  [COBALT_PCICONF_ETH1]	   = ETH1_IRQ
+};
+
+int pcibios_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
+{
+	if (cobalt_board_id <= COBALT_BRD_ID_QUBE1)
+		return irq_tab_qube1[slot];
+
 	if (cobalt_board_id == COBALT_BRD_ID_RAQ2)
 		return irq_tab_raq2[slot];
 

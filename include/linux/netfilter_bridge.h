@@ -1,32 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __LINUX_BRIDGE_NETFILTER_H
 #define __LINUX_BRIDGE_NETFILTER_H
 
-/* bridge-specific defines for netfilter. 
- */
-
-#include <linux/config.h>
-#include <linux/netfilter.h>
-#if defined(__KERNEL__) && defined(CONFIG_BRIDGE_NETFILTER)
-#include <asm/atomic.h>
-#include <linux/if_ether.h>
-#endif
-
-/* Bridge Hooks */
-/* After promisc drops, checksum checks. */
-#define NF_BR_PRE_ROUTING	0
-/* If the packet is destined for this box. */
-#define NF_BR_LOCAL_IN		1
-/* If the packet is destined for another interface. */
-#define NF_BR_FORWARD		2
-/* Packets coming from a local process. */
-#define NF_BR_LOCAL_OUT		3
-/* Packets about to hit the wire. */
-#define NF_BR_POST_ROUTING	4
-/* Not really a hook, but used for the ebtables broute table */
-#define NF_BR_BROUTING		5
-#define NF_BR_NUMHOOKS		6
-
-#ifdef __KERNEL__
+#include <uapi/linux/netfilter_bridge.h>
+#include <linux/skbuff.h>
 
 enum nf_br_hook_priorities {
 	NF_BR_PRI_FIRST = INT_MIN,
@@ -39,75 +16,62 @@ enum nf_br_hook_priorities {
 	NF_BR_PRI_LAST = INT_MAX,
 };
 
-#ifdef CONFIG_BRIDGE_NETFILTER
+#if IS_ENABLED(CONFIG_BRIDGE_NETFILTER)
 
-#define BRNF_PKT_TYPE			0x01
-#define BRNF_BRIDGED_DNAT		0x02
-#define BRNF_DONT_TAKE_PARENT		0x04
-#define BRNF_BRIDGED			0x08
-#define BRNF_NF_BRIDGE_PREROUTING	0x10
+int br_handle_frame_finish(struct net *net, struct sock *sk, struct sk_buff *skb);
 
-static inline
-struct nf_bridge_info *nf_bridge_alloc(struct sk_buff *skb)
+static inline void br_drop_fake_rtable(struct sk_buff *skb)
 {
-	struct nf_bridge_info **nf_bridge = &(skb->nf_bridge);
+	struct dst_entry *dst = skb_dst(skb);
 
-	if ((*nf_bridge = kmalloc(sizeof(**nf_bridge), GFP_ATOMIC)) != NULL) {
-		atomic_set(&(*nf_bridge)->use, 1);
-		(*nf_bridge)->mask = 0;
-		(*nf_bridge)->physindev = (*nf_bridge)->physoutdev = NULL;
-#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
-		(*nf_bridge)->netoutdev = NULL;
-#endif
-	}
-
-	return *nf_bridge;
+	if (dst && (dst->flags & DST_FAKE_RTABLE))
+		skb_dst_drop(skb);
 }
 
-/* Only used in br_forward.c */
-static inline
-void nf_bridge_maybe_copy_header(struct sk_buff *skb)
+static inline int nf_bridge_get_physinif(const struct sk_buff *skb)
 {
-	if (skb->nf_bridge) {
-		if (skb->protocol == __constant_htons(ETH_P_8021Q)) {
-			memcpy(skb->data - 18, skb->nf_bridge->data, 18);
-			skb_push(skb, 4);
-		} else
-			memcpy(skb->data - 16, skb->nf_bridge->data, 16);
-	}
-}
+	struct nf_bridge_info *nf_bridge;
 
-static inline
-void nf_bridge_save_header(struct sk_buff *skb)
-{
-        int header_size = 16;
-
-	if (skb->protocol == __constant_htons(ETH_P_8021Q))
-		header_size = 18;
-
-	memcpy(skb->nf_bridge->data, skb->data - header_size, header_size);
-}
-
-/* This is called by the IP fragmenting code and it ensures there is
- * enough room for the encapsulating header (if there is one). */
-static inline
-int nf_bridge_pad(struct sk_buff *skb)
-{
-	if (skb->protocol == __constant_htons(ETH_P_IP))
+	if (skb->nf_bridge == NULL)
 		return 0;
-	if (skb->nf_bridge) {
-		if (skb->protocol == __constant_htons(ETH_P_8021Q))
-			return 4;
-	}
-	return 0;
+
+	nf_bridge = skb->nf_bridge;
+	return nf_bridge->physindev ? nf_bridge->physindev->ifindex : 0;
 }
 
-struct bridge_skb_cb {
-	union {
-		__u32 ipv4;
-	} daddr;
-};
+static inline int nf_bridge_get_physoutif(const struct sk_buff *skb)
+{
+	struct nf_bridge_info *nf_bridge;
+
+	if (skb->nf_bridge == NULL)
+		return 0;
+
+	nf_bridge = skb->nf_bridge;
+	return nf_bridge->physoutdev ? nf_bridge->physoutdev->ifindex : 0;
+}
+
+static inline struct net_device *
+nf_bridge_get_physindev(const struct sk_buff *skb)
+{
+	return skb->nf_bridge ? skb->nf_bridge->physindev : NULL;
+}
+
+static inline struct net_device *
+nf_bridge_get_physoutdev(const struct sk_buff *skb)
+{
+	return skb->nf_bridge ? skb->nf_bridge->physoutdev : NULL;
+}
+
+static inline bool nf_bridge_in_prerouting(const struct sk_buff *skb)
+{
+	return skb->nf_bridge && skb->nf_bridge->in_prerouting;
+}
+#else
+#define br_drop_fake_rtable(skb)	        do { } while (0)
+static inline bool nf_bridge_in_prerouting(const struct sk_buff *skb)
+{
+	return false;
+}
 #endif /* CONFIG_BRIDGE_NETFILTER */
 
-#endif /* __KERNEL__ */
 #endif

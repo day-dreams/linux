@@ -1,12 +1,12 @@
 /*
- * drivers/i2c/i2c-ibm_iic.h
+ * drivers/i2c/busses/i2c-ibm_iic.h
  *
  * Support for the IIC peripheral on IBM PPC 4xx
- * 
+ *
  * Copyright (c) 2003 Zultys Technologies.
  * Eugene Surovegin <eugene.surovegin@zultys.com> or <ebs@ebshome.net>
  *
- * Based on original work by 
+ * Based on original work by
  * 	Ian DaSilva  <idasilva@mvista.com>
  *      Armin Kuster <akuster@mvista.com>
  * 	Matt Porter  <mporter@mvista.com>
@@ -22,8 +22,7 @@
 #ifndef __I2C_IBM_IIC_H_
 #define __I2C_IBM_IIC_H_
 
-#include <linux/config.h>
-#include <linux/i2c.h> 
+#include <linux/i2c.h>
 
 struct iic_regs {
 	u16 mdbuf;
@@ -59,7 +58,7 @@ struct ibm_iic_private {
 #define CNTL_TCT_MASK	0x30
 #define CNTL_TCT_SHIFT	4
 #define CNTL_RPST	0x08
-#define CNTL_CHT	0x04 
+#define CNTL_CHT	0x04
 #define CNTL_RW		0x02
 #define CNTL_PT		0x01
 

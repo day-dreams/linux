@@ -1,5 +1,5 @@
 /*
- * mv64340.h - MV-64340 Internal registers definition file.
+ * mv643xx.h - MV-643XX Internal registers definition file.
  *
  * Copyright 2002 Momentum Computer, Inc.
  * 	Author: Matthew Dharm <mdharm@momenco.com>
@@ -10,14 +10,12 @@
  * Free Software Foundation;  either version 2 of the  License, or (at your
  * option) any later version.
  */
-#ifndef __ASM_MV64340_H
-#define __ASM_MV64340_H
+#ifndef __ASM_MV643XX_H
+#define __ASM_MV643XX_H
 
-#ifdef __MIPS__
-#include <asm/addrspace.h>
-#include <asm/marvell.h>
-#endif
 #include <asm/types.h>
+#include <linux/mv643xx_eth.h>
+#include <linux/mv643xx_i2c.h>
 
 /****************************************/
 /* Processor Address Space              */
@@ -662,117 +660,6 @@
 /*        Ethernet Unit Registers  		*/
 /****************************************/
 
-#define MV64340_ETH_PHY_ADDR_REG                                    0x2000
-#define MV64340_ETH_SMI_REG                                         0x2004
-#define MV64340_ETH_UNIT_DEFAULT_ADDR_REG                           0x2008
-#define MV64340_ETH_UNIT_DEFAULTID_REG                              0x200c
-#define MV64340_ETH_UNIT_INTERRUPT_CAUSE_REG                        0x2080
-#define MV64340_ETH_UNIT_INTERRUPT_MASK_REG                         0x2084
-#define MV64340_ETH_UNIT_INTERNAL_USE_REG                           0x24fc
-#define MV64340_ETH_UNIT_ERROR_ADDR_REG                             0x2094
-#define MV64340_ETH_BAR_0                                           0x2200
-#define MV64340_ETH_BAR_1                                           0x2208
-#define MV64340_ETH_BAR_2                                           0x2210
-#define MV64340_ETH_BAR_3                                           0x2218
-#define MV64340_ETH_BAR_4                                           0x2220
-#define MV64340_ETH_BAR_5                                           0x2228
-#define MV64340_ETH_SIZE_REG_0                                      0x2204
-#define MV64340_ETH_SIZE_REG_1                                      0x220c
-#define MV64340_ETH_SIZE_REG_2                                      0x2214
-#define MV64340_ETH_SIZE_REG_3                                      0x221c
-#define MV64340_ETH_SIZE_REG_4                                      0x2224
-#define MV64340_ETH_SIZE_REG_5                                      0x222c
-#define MV64340_ETH_HEADERS_RETARGET_BASE_REG                       0x2230
-#define MV64340_ETH_HEADERS_RETARGET_CONTROL_REG                    0x2234
-#define MV64340_ETH_HIGH_ADDR_REMAP_REG_0                           0x2280
-#define MV64340_ETH_HIGH_ADDR_REMAP_REG_1                           0x2284
-#define MV64340_ETH_HIGH_ADDR_REMAP_REG_2                           0x2288
-#define MV64340_ETH_HIGH_ADDR_REMAP_REG_3                           0x228c
-#define MV64340_ETH_BASE_ADDR_ENABLE_REG                            0x2290
-#define MV64340_ETH_ACCESS_PROTECTION_REG(port)                    (0x2294 + (port<<2))
-#define MV64340_ETH_MIB_COUNTERS_BASE(port)                        (0x3000 + (port<<7))
-#define MV64340_ETH_PORT_CONFIG_REG(port)                          (0x2400 + (port<<10))
-#define MV64340_ETH_PORT_CONFIG_EXTEND_REG(port)                   (0x2404 + (port<<10))
-#define MV64340_ETH_MII_SERIAL_PARAMETRS_REG(port)                 (0x2408 + (port<<10))
-#define MV64340_ETH_GMII_SERIAL_PARAMETRS_REG(port)                (0x240c + (port<<10))
-#define MV64340_ETH_VLAN_ETHERTYPE_REG(port)                       (0x2410 + (port<<10))
-#define MV64340_ETH_MAC_ADDR_LOW(port)                             (0x2414 + (port<<10))
-#define MV64340_ETH_MAC_ADDR_HIGH(port)                            (0x2418 + (port<<10))
-#define MV64340_ETH_SDMA_CONFIG_REG(port)                          (0x241c + (port<<10))
-#define MV64340_ETH_DSCP_0(port)                                   (0x2420 + (port<<10))
-#define MV64340_ETH_DSCP_1(port)                                   (0x2424 + (port<<10))
-#define MV64340_ETH_DSCP_2(port)                                   (0x2428 + (port<<10))
-#define MV64340_ETH_DSCP_3(port)                                   (0x242c + (port<<10))
-#define MV64340_ETH_DSCP_4(port)                                   (0x2430 + (port<<10))
-#define MV64340_ETH_DSCP_5(port)                                   (0x2434 + (port<<10))
-#define MV64340_ETH_DSCP_6(port)                                   (0x2438 + (port<<10))
-#define MV64340_ETH_PORT_SERIAL_CONTROL_REG(port)                  (0x243c + (port<<10))
-#define MV64340_ETH_VLAN_PRIORITY_TAG_TO_PRIORITY(port)            (0x2440 + (port<<10))
-#define MV64340_ETH_PORT_STATUS_REG(port)                          (0x2444 + (port<<10))
-#define MV64340_ETH_TRANSMIT_QUEUE_COMMAND_REG(port)               (0x2448 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_FIXED_PRIORITY(port)                  (0x244c + (port<<10))
-#define MV64340_ETH_PORT_TX_TOKEN_BUCKET_RATE_CONFIG(port)         (0x2450 + (port<<10))
-#define MV64340_ETH_MAXIMUM_TRANSMIT_UNIT(port)                    (0x2458 + (port<<10))
-#define MV64340_ETH_PORT_MAXIMUM_TOKEN_BUCKET_SIZE(port)           (0x245c + (port<<10))
-#define MV64340_ETH_INTERRUPT_CAUSE_REG(port)                      (0x2460 + (port<<10))
-#define MV64340_ETH_INTERRUPT_CAUSE_EXTEND_REG(port)               (0x2464 + (port<<10))
-#define MV64340_ETH_INTERRUPT_MASK_REG(port)                       (0x2468 + (port<<10))
-#define MV64340_ETH_INTERRUPT_EXTEND_MASK_REG(port)                (0x246c + (port<<10))
-#define MV64340_ETH_RX_FIFO_URGENT_THRESHOLD_REG(port)             (0x2470 + (port<<10))
-#define MV64340_ETH_TX_FIFO_URGENT_THRESHOLD_REG(port)             (0x2474 + (port<<10))
-#define MV64340_ETH_RX_MINIMAL_FRAME_SIZE_REG(port)                (0x247c + (port<<10))
-#define MV64340_ETH_RX_DISCARDED_FRAMES_COUNTER(port)              (0x2484 + (port<<10)
-#define MV64340_ETH_PORT_DEBUG_0_REG(port)                         (0x248c + (port<<10))
-#define MV64340_ETH_PORT_DEBUG_1_REG(port)                         (0x2490 + (port<<10))
-#define MV64340_ETH_PORT_INTERNAL_ADDR_ERROR_REG(port)             (0x2494 + (port<<10))
-#define MV64340_ETH_INTERNAL_USE_REG(port)                         (0x24fc + (port<<10))
-#define MV64340_ETH_RECEIVE_QUEUE_COMMAND_REG(port)                (0x2680 + (port<<10))
-#define MV64340_ETH_CURRENT_SERVED_TX_DESC_PTR(port)               (0x2684 + (port<<10))      
-#define MV64340_ETH_RX_CURRENT_QUEUE_DESC_PTR_0(port)              (0x260c + (port<<10))     
-#define MV64340_ETH_RX_CURRENT_QUEUE_DESC_PTR_1(port)              (0x261c + (port<<10))     
-#define MV64340_ETH_RX_CURRENT_QUEUE_DESC_PTR_2(port)              (0x262c + (port<<10))     
-#define MV64340_ETH_RX_CURRENT_QUEUE_DESC_PTR_3(port)              (0x263c + (port<<10))     
-#define MV64340_ETH_RX_CURRENT_QUEUE_DESC_PTR_4(port)              (0x264c + (port<<10))     
-#define MV64340_ETH_RX_CURRENT_QUEUE_DESC_PTR_5(port)              (0x265c + (port<<10))     
-#define MV64340_ETH_RX_CURRENT_QUEUE_DESC_PTR_6(port)              (0x266c + (port<<10))     
-#define MV64340_ETH_RX_CURRENT_QUEUE_DESC_PTR_7(port)              (0x267c + (port<<10))     
-#define MV64340_ETH_TX_CURRENT_QUEUE_DESC_PTR_0(port)              (0x26c0 + (port<<10))     
-#define MV64340_ETH_TX_CURRENT_QUEUE_DESC_PTR_1(port)              (0x26c4 + (port<<10))     
-#define MV64340_ETH_TX_CURRENT_QUEUE_DESC_PTR_2(port)              (0x26c8 + (port<<10))     
-#define MV64340_ETH_TX_CURRENT_QUEUE_DESC_PTR_3(port)              (0x26cc + (port<<10))     
-#define MV64340_ETH_TX_CURRENT_QUEUE_DESC_PTR_4(port)              (0x26d0 + (port<<10))     
-#define MV64340_ETH_TX_CURRENT_QUEUE_DESC_PTR_5(port)              (0x26d4 + (port<<10))     
-#define MV64340_ETH_TX_CURRENT_QUEUE_DESC_PTR_6(port)              (0x26d8 + (port<<10))     
-#define MV64340_ETH_TX_CURRENT_QUEUE_DESC_PTR_7(port)              (0x26dc + (port<<10))     
-#define MV64340_ETH_TX_QUEUE_0_TOKEN_BUCKET_COUNT(port)            (0x2700 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_1_TOKEN_BUCKET_COUNT(port)            (0x2710 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_2_TOKEN_BUCKET_COUNT(port)            (0x2720 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_3_TOKEN_BUCKET_COUNT(port)            (0x2730 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_4_TOKEN_BUCKET_COUNT(port)            (0x2740 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_5_TOKEN_BUCKET_COUNT(port)            (0x2750 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_6_TOKEN_BUCKET_COUNT(port)            (0x2760 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_7_TOKEN_BUCKET_COUNT(port)            (0x2770 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_0_TOKEN_BUCKET_CONFIG(port)           (0x2704 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_1_TOKEN_BUCKET_CONFIG(port)           (0x2714 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_2_TOKEN_BUCKET_CONFIG(port)           (0x2724 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_3_TOKEN_BUCKET_CONFIG(port)           (0x2734 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_4_TOKEN_BUCKET_CONFIG(port)           (0x2744 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_5_TOKEN_BUCKET_CONFIG(port)           (0x2754 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_6_TOKEN_BUCKET_CONFIG(port)           (0x2764 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_7_TOKEN_BUCKET_CONFIG(port)           (0x2774 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_0_ARBITER_CONFIG(port)                (0x2708 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_1_ARBITER_CONFIG(port)                (0x2718 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_2_ARBITER_CONFIG(port)                (0x2728 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_3_ARBITER_CONFIG(port)                (0x2738 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_4_ARBITER_CONFIG(port)                (0x2748 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_5_ARBITER_CONFIG(port)                (0x2758 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_6_ARBITER_CONFIG(port)                (0x2768 + (port<<10))
-#define MV64340_ETH_TX_QUEUE_7_ARBITER_CONFIG(port)                (0x2778 + (port<<10))
-#define MV64340_ETH_PORT_TX_TOKEN_BUCKET_COUNT(port)               (0x2780 + (port<<10))
-#define MV64340_ETH_DA_FILTER_SPECIAL_MULTICAST_TABLE_BASE(port)   (0x3400 + (port<<10))
-#define MV64340_ETH_DA_FILTER_OTHER_MULTICAST_TABLE_BASE(port)     (0x3500 + (port<<10))
-#define MV64340_ETH_DA_FILTER_UNICAST_TABLE_BASE(port)             (0x3600 + (port<<10))
-
 /*******************************************/
 /*          CUNIT  Registers               */
 /*******************************************/
@@ -977,12 +864,8 @@
 /* I2C Registers                        */
 /****************************************/
 
-#define MV64340_I2C_SLAVE_ADDR                                      0xc000
-#define MV64340_I2C_EXTENDED_SLAVE_ADDR                             0xc010
-#define MV64340_I2C_DATA                                            0xc004
-#define MV64340_I2C_CONTROL                                         0xc008
-#define MV64340_I2C_STATUS_BAUDE_RATE                               0xc00C
-#define MV64340_I2C_SOFT_RESET                                      0xc01c
+#define MV64XXX_I2C_OFFSET                                          0xc000
+#define MV64XXX_I2C_REG_BLOCK_SIZE                                  0x0020
 
 /****************************************/
 /* GPP Interface Registers              */
@@ -1085,4 +968,12 @@ struct mpsc_pdata {
 	u32	brg_clk_freq;
 };
 
-#endif /* __ASM_MV64340_H */
+/* Watchdog Platform Device, Driver Data */
+#define	MV64x60_WDT_NAME			"mv64x60_wdt"
+
+struct mv64x60_wdt_pdata {
+	int	timeout;	/* watchdog expiry in seconds, default 10 */
+	int	bus_clk;	/* bus clock in MHz, default 133 */
+};
+
+#endif /* __ASM_MV643XX_H */

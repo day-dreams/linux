@@ -53,7 +53,7 @@ a3dsrc_GetTimeConsts(a3dsrc_t * a, short *HrtfTrack, short *ItdTrack,
 }
 
 #endif
-/* Atmospheric absorbtion. */
+/* Atmospheric absorption. */
 
 static void
 a3dsrc_SetAtmosTarget(a3dsrc_t * a, short aa, short b, short c, short d,
@@ -462,9 +462,10 @@ static void a3dsrc_ZeroSliceIO(a3dsrc_t * a)
 /* Reset Single A3D source. */
 static void a3dsrc_ZeroState(a3dsrc_t * a)
 {
-
-	//printk("vortex: ZeroState slice: %d, source %d\n", a->slice, a->source);
-
+	/*
+	pr_debug( "vortex: ZeroState slice: %d, source %d\n",
+	       a->slice, a->source);
+	*/
 	a3dsrc_SetAtmosState(a, 0, 0, 0, 0);
 	a3dsrc_SetHrtfState(a, A3dHrirZeros, A3dHrirZeros);
 	a3dsrc_SetItdDline(a, A3dItdDlineZeros);
@@ -483,12 +484,13 @@ static void a3dsrc_ZeroState(a3dsrc_t * a)
 }
 
 /* Reset entire A3D engine */
-static void a3dsrc_ZeroStateA3D(a3dsrc_t * a)
+static void a3dsrc_ZeroStateA3D(a3dsrc_t *a, vortex_t *v)
 {
 	int i, var, var2;
 
 	if ((a->vortex) == NULL) {
-		printk("vortex: ZeroStateA3D: ERROR: a->vortex is NULL\n");
+		dev_err(v->card->dev,
+			"ZeroStateA3D: ERROR: a->vortex is NULL\n");
 		return;
 	}
 
@@ -593,24 +595,23 @@ static int Vort3DRend_Initialize(vortex_t * v, unsigned short mode)
 static int vortex_a3d_register_controls(vortex_t * vortex);
 static void vortex_a3d_unregister_controls(vortex_t * vortex);
 /* A3D base support init/shudown */
-static void vortex_Vort3D(vortex_t * v, int en)
+static void vortex_Vort3D_enable(vortex_t *v)
 {
 	int i;
-	if (en) {
-		Vort3DRend_Initialize(v, XT_HEADPHONE);
-		for (i = 0; i < NR_A3D; i++) {
-			vortex_A3dSourceHw_Initialize(v, i % 4, i >> 2);
-			a3dsrc_ZeroStateA3D(&(v->a3d[0]));
-		}
-	} else {
-		vortex_XtalkHw_Disable(v);
+
+	Vort3DRend_Initialize(v, XT_HEADPHONE);
+	for (i = 0; i < NR_A3D; i++) {
+		vortex_A3dSourceHw_Initialize(v, i % 4, i >> 2);
+		a3dsrc_ZeroStateA3D(&v->a3d[0], v);
 	}
 	/* Register ALSA controls */
-	if (en) {
-		vortex_a3d_register_controls(v);
-	} else {
-		vortex_a3d_unregister_controls(v);
-	}
+	vortex_a3d_register_controls(v);
+}
+
+static void vortex_Vort3D_disable(vortex_t * v)
+{
+	vortex_XtalkHw_Disable(v);
+	vortex_a3d_unregister_controls(v);
 }
 
 /* Make A3D subsystem connections. */
@@ -628,15 +629,15 @@ static void vortex_Vort3D_connect(vortex_t * v, int en)
 	v->mixxtlk[0] =
 	    vortex_adb_checkinout(v, v->fixed_res, en, VORTEX_RESOURCE_MIXIN);
 	if (v->mixxtlk[0] < 0) {
-		printk
-		    ("vortex: vortex_Vort3D: ERROR: not enough free mixer resources.\n");
+		dev_warn(v->card->dev,
+			 "vortex_Vort3D: ERROR: not enough free mixer resources.\n");
 		return;
 	}
 	v->mixxtlk[1] =
 	    vortex_adb_checkinout(v, v->fixed_res, en, VORTEX_RESOURCE_MIXIN);
 	if (v->mixxtlk[1] < 0) {
-		printk
-		    ("vortex: vortex_Vort3D: ERROR: not enough free mixer resources.\n");
+		dev_warn(v->card->dev,
+			 "vortex_Vort3D: ERROR: not enough free mixer resources.\n");
 		return;
 	}
 #endif
@@ -676,11 +677,11 @@ static void vortex_Vort3D_connect(vortex_t * v, int en)
 }
 
 /* Initialize one single A3D source. */
-static void vortex_Vort3D_InitializeSource(a3dsrc_t * a, int en)
+static void vortex_Vort3D_InitializeSource(a3dsrc_t *a, int en, vortex_t *v)
 {
 	if (a->vortex == NULL) {
-		printk
-		    ("vortex: Vort3D_InitializeSource: A3D source not initialized\n");
+		dev_warn(v->card->dev,
+			 "Vort3D_InitializeSource: A3D source not initialized\n");
 		return;
 	}
 	if (en) {
@@ -725,7 +726,7 @@ static void vortex_a3d_translate_filter(a3d_atmos_t filter, int *params)
 /* ALSA control interface.  */
 
 static int
-snd_vortex_a3d_hrtf_info(snd_kcontrol_t * kcontrol, snd_ctl_elem_info_t * uinfo)
+snd_vortex_a3d_hrtf_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo)
 {
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
 	uinfo->count = 6;
@@ -734,7 +735,7 @@ snd_vortex_a3d_hrtf_info(snd_kcontrol_t * kcontrol, snd_ctl_elem_info_t * uinfo)
 	return 0;
 }
 static int
-snd_vortex_a3d_itd_info(snd_kcontrol_t * kcontrol, snd_ctl_elem_info_t * uinfo)
+snd_vortex_a3d_itd_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo)
 {
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
 	uinfo->count = 2;
@@ -743,7 +744,7 @@ snd_vortex_a3d_itd_info(snd_kcontrol_t * kcontrol, snd_ctl_elem_info_t * uinfo)
 	return 0;
 }
 static int
-snd_vortex_a3d_ild_info(snd_kcontrol_t * kcontrol, snd_ctl_elem_info_t * uinfo)
+snd_vortex_a3d_ild_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo)
 {
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
 	uinfo->count = 2;
@@ -752,8 +753,8 @@ snd_vortex_a3d_ild_info(snd_kcontrol_t * kcontrol, snd_ctl_elem_info_t * uinfo)
 	return 0;
 }
 static int
-snd_vortex_a3d_filter_info(snd_kcontrol_t *
-			   kcontrol, snd_ctl_elem_info_t * uinfo)
+snd_vortex_a3d_filter_info(struct snd_kcontrol *kcontrol,
+			   struct snd_ctl_elem_info *uinfo)
 {
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
 	uinfo->count = 4;
@@ -763,7 +764,7 @@ snd_vortex_a3d_filter_info(snd_kcontrol_t *
 }
 
 static int
-snd_vortex_a3d_get(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
+snd_vortex_a3d_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
 	//a3dsrc_t *a = kcontrol->private_data;
 	/* No read yet. Would this be really useable/needed ? */
@@ -772,8 +773,8 @@ snd_vortex_a3d_get(snd_kcontrol_t * kcontrol, snd_ctl_elem_value_t * ucontrol)
 }
 
 static int
-snd_vortex_a3d_hrtf_put(snd_kcontrol_t *
-			kcontrol, snd_ctl_elem_value_t * ucontrol)
+snd_vortex_a3d_hrtf_put(struct snd_kcontrol *kcontrol,
+			struct snd_ctl_elem_value *ucontrol)
 {
 	a3dsrc_t *a = kcontrol->private_data;
 	int changed = 1, i;
@@ -789,8 +790,8 @@ snd_vortex_a3d_hrtf_put(snd_kcontrol_t *
 }
 
 static int
-snd_vortex_a3d_itd_put(snd_kcontrol_t *
-		       kcontrol, snd_ctl_elem_value_t * ucontrol)
+snd_vortex_a3d_itd_put(struct snd_kcontrol *kcontrol,
+		       struct snd_ctl_elem_value *ucontrol)
 {
 	a3dsrc_t *a = kcontrol->private_data;
 	int coord[6];
@@ -808,8 +809,8 @@ snd_vortex_a3d_itd_put(snd_kcontrol_t *
 }
 
 static int
-snd_vortex_a3d_ild_put(snd_kcontrol_t *
-		       kcontrol, snd_ctl_elem_value_t * ucontrol)
+snd_vortex_a3d_ild_put(struct snd_kcontrol *kcontrol,
+		       struct snd_ctl_elem_value *ucontrol)
 {
 	a3dsrc_t *a = kcontrol->private_data;
 	int changed = 1;
@@ -825,8 +826,8 @@ snd_vortex_a3d_ild_put(snd_kcontrol_t *
 }
 
 static int
-snd_vortex_a3d_filter_put(snd_kcontrol_t
-			  * kcontrol, snd_ctl_elem_value_t * ucontrol)
+snd_vortex_a3d_filter_put(struct snd_kcontrol *kcontrol,
+			  struct snd_ctl_elem_value *ucontrol)
 {
 	a3dsrc_t *a = kcontrol->private_data;
 	int i, changed = 1;
@@ -835,7 +836,7 @@ snd_vortex_a3d_filter_put(snd_kcontrol_t
 		params[i] = ucontrol->value.integer.value[i];
 	/* Translate generic filter params to a3d filter params. */
 	vortex_a3d_translate_filter(a->filter, params);
-	/* Atmospheric absorbtion and filtering. */
+	/* Atmospheric absorption and filtering. */
 	a3dsrc_SetAtmosTarget(a, a->filter[0],
 			      a->filter[1], a->filter[2],
 			      a->filter[3], a->filter[4]);
@@ -845,7 +846,7 @@ snd_vortex_a3d_filter_put(snd_kcontrol_t
 	return changed;
 }
 
-static snd_kcontrol_new_t vortex_a3d_kcontrol __devinitdata = {
+static const struct snd_kcontrol_new vortex_a3d_kcontrol = {
 	.iface = SNDRV_CTL_ELEM_IFACE_PCM,
 	.name = "Playback PCM advanced processing",
 	.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
@@ -855,9 +856,9 @@ static snd_kcontrol_new_t vortex_a3d_kcontrol __devinitdata = {
 };
 
 /* Control (un)registration. */
-static int vortex_a3d_register_controls(vortex_t * vortex)
+static int vortex_a3d_register_controls(vortex_t *vortex)
 {
-	snd_kcontrol_t *kcontrol;
+	struct snd_kcontrol *kcontrol;
 	int err, i;
 	/* HRTF controls. */
 	for (i = 0; i < NR_A3D; i++) {

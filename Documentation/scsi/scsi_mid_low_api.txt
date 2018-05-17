@@ -30,7 +30,7 @@ the motherboard (or both). Some aic7xxx based HBAs are dual controllers
 and thus represent two hosts. Like most modern HBAs, each aic7xxx host
 has its own PCI device address. [The one-to-one correspondence between
 a SCSI host and a PCI device is common but not required (e.g. with
-ISA or MCA adapters).]
+ISA adapters).]
 
 The SCSI mid level isolates an LLD from other layers such as the SCSI
 upper layer drivers and the block layer.
@@ -43,7 +43,7 @@ There is a SCSI documentation directory within the kernel source tree,
 typically Documentation/scsi . Most documents are in plain
 (i.e. ASCII) text. This file is named scsi_mid_low_api.txt and can be 
 found in that directory. A more recent copy of this document may be found
-at http://www.torque.net/scsi/scsi_mid_low_api.txt.gz . 
+at http://web.archive.org/web/20070107183357rn_1/sg.torque.net/scsi/. 
 Many LLDs are documented there (e.g. aic7xxx.txt). The SCSI mid-level is
 briefly described in scsi.txt which contains a url to a document 
 describing the SCSI subsystem in the lk 2.4 series. Two upper level 
@@ -54,11 +54,6 @@ Some documentation (or urls) for LLDs may be found in the C source code
 or in the same directory as the C source code. For example to find a url
 about the USB mass storage driver see the 
 /usr/src/linux/drivers/usb/storage directory.
-
-The Linux kernel source Documentation/DocBook/scsidrivers.tmpl file
-refers to this file. With the appropriate DocBook tool-set, this permits
-users to generate html, ps and pdf renderings of information within this
-file (e.g. the interface functions).
 
 Driver structure
 ================
@@ -150,10 +145,11 @@ scsi devices of which only the first 2 respond:
 LLD                   mid level                    LLD
 ===-------------------=========--------------------===------
 scsi_host_alloc()  -->
-scsi_add_host()  --------+
+scsi_add_host()  ---->
+scsi_scan_host()  -------+
                          |
                     slave_alloc()
-                    slave_configure() -->  scsi_adjust_queue_depth()
+                    slave_configure() -->  scsi_change_queue_depth()
                          |
                     slave_alloc()
                     slave_configure()
@@ -163,7 +159,7 @@ scsi_add_host()  --------+
 ------------------------------------------------------------
 
 If the LLD wants to adjust the default queue settings, it can invoke
-scsi_adjust_queue_depth() in its slave_configure() routine.
+scsi_change_queue_depth() in its slave_configure() routine.
 
 *** For scsi devices that the mid level tries to scan but do not
     respond, a slave_alloc(), slave_destroy() pair is called.
@@ -196,7 +192,7 @@ of the issues involved. See the section on reference counting below.
 
 
 The hotplug concept may be extended to SCSI devices. Currently, when an
-HBA is added, the scsi_add_host() function causes a scan for SCSI devices
+HBA is added, the scsi_scan_host() function causes a scan for SCSI devices
 attached to the HBA's SCSI transport. On newer SCSI transports the HBA
 may become aware of a new SCSI device _after_ the scan has completed.
 An LLD can use this sequence to make the mid level aware of a SCSI device:
@@ -207,7 +203,7 @@ LLD                   mid level                    LLD
 scsi_add_device()  ------+
                          |
                     slave_alloc()
-                    slave_configure()   [--> scsi_adjust_queue_depth()]
+                    slave_configure()   [--> scsi_change_queue_depth()]
 ------------------------------------------------------------
 
 In a similar fashion, an LLD may become aware that a SCSI device has been
@@ -265,7 +261,7 @@ init_this_scsi_driver() ----+
                             |                scsi_register()
                             |
                       slave_alloc()
-                      slave_configure()  -->  scsi_adjust_queue_depth()
+                      slave_configure()  -->  scsi_change_queue_depth()
                       slave_alloc()   ***
                       slave_destroy() ***
                             |
@@ -275,9 +271,9 @@ init_this_scsi_driver() ----+
                       slave_destroy() ***
 ------------------------------------------------------------
 
-The mid level invokes scsi_adjust_queue_depth() with tagged queuing off and
-"cmd_per_lun" for that host as the queue length. These settings can be
-overridden by a slave_configure() supplied by the LLD.
+The mid level invokes scsi_change_queue_depth() with "cmd_per_lun" for that
+host as the queue length. These settings can be overridden by a
+slave_configure() supplied by the LLD.
 
 *** For scsi devices that the mid level tries to scan but do not
     respond, a slave_alloc(), slave_destroy() pair is called.
@@ -323,12 +319,12 @@ struct Scsi_Host:
         instance. If the reference count reaches 0 then the given instance
         is freed
 
-The Scsi_device structure has had reference counting infrastructure added.
-This effectively spreads the ownership of struct Scsi_device instances
+The scsi_device structure has had reference counting infrastructure added.
+This effectively spreads the ownership of struct scsi_device instances
 across the various SCSI layers which use them. Previously such instances
 were exclusively owned by the mid level. See the access functions declared
 towards the end of include/scsi/scsi_device.h . If an LLD wants to keep
-a copy of a pointer to a Scsi_device instance it should use scsi_device_get()
+a copy of a pointer to a scsi_device instance it should use scsi_device_get()
 to bump its reference count. When it is finished with the pointer it can
 use scsi_device_put() to decrement its reference count (and potentially
 delete it).
@@ -340,13 +336,13 @@ in parallel by these functions.
 Conventions
 ===========
 First, Linus Torvalds's thoughts on C coding style can be found in the
-Documentation/CodingStyle file. 
+Documentation/process/coding-style.rst file.
 
 Next, there is a movement to "outlaw" typedefs introducing synonyms for 
 struct tags. Both can be still found in the SCSI subsystem, but
 the typedefs have been moved to a single file, scsi_typedefs.h to
 make their future removal easier, for example: 
-"typedef struct scsi_host_template Scsi_Host_Template;"
+"typedef struct scsi_cmnd Scsi_Cmnd;"
 
 Also, most C99 enhancements are encouraged to the extent they are supported
 by the relevant gcc compilers. So C99 style structure and array
@@ -370,16 +366,11 @@ is initialized. The functions below are listed alphabetically and their
 names all start with "scsi_".
 
 Summary:
-   scsi_activate_tcq - turn on tag command queueing
    scsi_add_device - creates new scsi device (lu) instance
-   scsi_add_host - perform sysfs registration and SCSI bus scan.
-   scsi_add_timer - (re-)start timer on a SCSI command.
-   scsi_adjust_queue_depth - change the queue depth on a SCSI device
-   scsi_assign_lock - replace default host_lock with given lock
+   scsi_add_host - perform sysfs registration and set up transport class
+   scsi_change_queue_depth - change the queue depth on a SCSI device
    scsi_bios_ptable - return copy of block device's partition table
    scsi_block_requests - prevent further commands being queued to given host
-   scsi_deactivate_tcq - turn off tag command queueing
-   scsi_delete_timer - cancel timer on a SCSI command.
    scsi_host_alloc - return a new scsi_host instance whose refcount==1
    scsi_host_get - increments Scsi_Host instance's refcount
    scsi_host_put - decrements Scsi_Host instance's refcount (free if 0)
@@ -388,33 +379,13 @@ Summary:
    scsi_remove_device - detach and remove a SCSI device
    scsi_remove_host - detach and remove all SCSI devices owned by host
    scsi_report_bus_reset - report scsi _bus_ reset observed
-   scsi_set_device - place device reference in host structure
-   scsi_to_pci_dma_dir - convert SCSI subsystem direction flag to PCI
-   scsi_to_sbus_dma_dir - convert SCSI subsystem direction flag to SBUS
+   scsi_scan_host - scan SCSI bus
    scsi_track_queue_full - track successive QUEUE_FULL events 
    scsi_unblock_requests - allow further commands to be queued to given host
    scsi_unregister - [calls scsi_host_put()]
 
 
 Details:
-
-/**
- * scsi_activate_tcq - turn on tag command queueing ("ordered" task attribute)
- * @sdev:       device to turn on TCQ for
- * @depth:      queue depth
- *
- *      Returns nothing
- *
- *      Might block: no
- *
- *      Notes: Eventually, it is hoped depth would be the maximum depth
- *      the device could cope with and the real queue depth
- *      would be adjustable from 0 to depth.
- *
- *      Defined (inline) in: include/scsi/scsi_tcq.h
- **/
-void scsi_activate_tcq(struct scsi_device *sdev, int depth)
-
 
 /**
  * scsi_add_device - creates new scsi device (lu) instance
@@ -430,10 +401,10 @@ void scsi_activate_tcq(struct scsi_device *sdev, int depth)
  *      Might block: yes
  *
  *      Notes: This call is usually performed internally during a scsi
- *      bus scan when an HBA is added (i.e. scsi_add_host()). So it
+ *      bus scan when an HBA is added (i.e. scsi_scan_host()). So it
  *      should only be called if the HBA becomes aware of a new scsi
- *      device (lu) after scsi_add_host() has completed. If successful
- *      this call we lead to slave_alloc() and slave_configure() callbacks
+ *      device (lu) after scsi_scan_host() has completed. If successful
+ *      this call can lead to slave_alloc() and slave_configure() callbacks
  *      into the LLD.
  *
  *      Defined in: drivers/scsi/scsi_scan.c
@@ -444,7 +415,7 @@ struct scsi_device * scsi_add_device(struct Scsi_Host *shost,
 
 
 /**
- * scsi_add_host - perform sysfs registration and SCSI bus scan.
+ * scsi_add_host - perform sysfs registration and set up transport class
  * @shost:   pointer to scsi host instance
  * @dev:     pointer to struct device of type scsi class
  *
@@ -453,7 +424,11 @@ struct scsi_device * scsi_add_device(struct Scsi_Host *shost,
  *      Might block: no
  *
  *      Notes: Only required in "hotplug initialization model" after a
- *      successful call to scsi_host_alloc().
+ *      successful call to scsi_host_alloc().  This function does not
+ *	scan the bus; this can be done by calling scsi_scan_host() or
+ *	in some other transport-specific way.  The LLD must set up
+ *	the transport template before calling this function and may only
+ *	access the transport class data after this function has been called.
  *
  *      Defined in: drivers/scsi/hosts.c
  **/
@@ -461,32 +436,8 @@ int scsi_add_host(struct Scsi_Host *shost, struct device * dev)
 
 
 /**
- * scsi_add_timer - (re-)start timer on a SCSI command.
- * @scmd:    pointer to scsi command instance
- * @timeout: duration of timeout in "jiffies"
- * @complete: pointer to function to call if timeout expires
- *
- *      Returns nothing
- *
- *      Might block: no
- *
- *      Notes: Each scsi command has its own timer, and as it is added
- *      to the queue, we set up the timer. When the command completes, 
- *      we cancel the timer. An LLD can use this function to change
- *      the existing timeout value.
- *
- *      Defined in: drivers/scsi/scsi_error.c
- **/
-void scsi_add_timer(struct scsi_cmnd *scmd, int timeout, 
-                    void (*complete)(struct scsi_cmnd *))
-
-
-/**
- * scsi_adjust_queue_depth - allow LLD to change queue depth on a SCSI device
+ * scsi_change_queue_depth - allow LLD to change queue depth on a SCSI device
  * @sdev:       pointer to SCSI device to change queue depth on
- * @tagged:     0 - no tagged queuing
- *              MSG_SIMPLE_TAG - simple tagged queuing
- *              MSG_ORDERED_TAG - ordered tagged queuing
  * @tags        Number of tags allowed if tagged queuing enabled,
  *              or number of commands the LLD can queue up
  *              in non-tagged mode (as per cmd_per_lun).
@@ -497,29 +448,12 @@ void scsi_add_timer(struct scsi_cmnd *scmd, int timeout,
  *
  *      Notes: Can be invoked any time on a SCSI device controlled by this
  *      LLD. [Specifically during and after slave_configure() and prior to
- *      slave_destroy().] Can safely be invoked from interrupt code. Actual
- *      queue depth change may be delayed until the next command is being
- *      processed. See also scsi_activate_tcq() and scsi_deactivate_tcq().
+ *      slave_destroy().] Can safely be invoked from interrupt code.
  *
  *      Defined in: drivers/scsi/scsi.c [see source code for more notes]
  *
  **/
-void scsi_adjust_queue_depth(struct scsi_device * sdev, int tagged, 
-                             int tags)
-
-
-/**
- * scsi_assign_lock - replace default host_lock with given lock
- * @shost: a pointer to a scsi host instance
- * @lock: pointer to lock to replace host_lock for this host
- *
- *      Returns nothing
- *
- *      Might block: no
- *
- *      Defined in: include/scsi/scsi_host.h .
- **/
-void scsi_assign_lock(struct Scsi_Host *shost, spinlock_t *lock)
+int scsi_change_queue_depth(struct scsi_device *sdev, int tags)
 
 
 /**
@@ -555,38 +489,6 @@ void scsi_block_requests(struct Scsi_Host * shost)
 
 
 /**
- * scsi_deactivate_tcq - turn off tag command queueing
- * @sdev:       device to turn off TCQ for
- * @depth:      queue depth (stored in sdev)
- *
- *      Returns nothing
- *
- *      Might block: no
- *
- *      Defined (inline) in: include/scsi/scsi_tcq.h
- **/
-void scsi_deactivate_tcq(struct scsi_device *sdev, int depth)
-
-
-/**
- * scsi_delete_timer - cancel timer on a SCSI command.
- * @scmd:    pointer to scsi command instance
- *
- *      Returns 1 if able to cancel timer else 0 (i.e. too late or already
- *      cancelled).
- *
- *      Might block: no [may in the future if it invokes del_timer_sync()]
- *
- *      Notes: All commands issued by upper levels already have a timeout
- *      associated with them. An LLD can use this function to cancel the
- *      timer.
- *
- *      Defined in: drivers/scsi/scsi_error.c
- **/
-int scsi_delete_timer(struct scsi_cmnd *scmd)
-
-
-/**
  * scsi_host_alloc - create a scsi host adapter instance and perform basic
  *                   initialization.
  * @sht:        pointer to scsi host template
@@ -603,7 +505,7 @@ int scsi_delete_timer(struct scsi_cmnd *scmd)
  *      area for the LLD's exclusive use.
  *      Both associated refcounting objects have their refcount set to 1.
  *      Full registration (in sysfs) and a bus scan are performed later when
- *      scsi_add_host() is called.
+ *      scsi_add_host() and scsi_scan_host() are called.
  *
  *      Defined in: drivers/scsi/hosts.c .
  **/
@@ -743,59 +645,16 @@ void scsi_report_bus_reset(struct Scsi_Host * shost, int channel)
 
 
 /**
- * scsi_set_device - place device reference in host structure
+ * scsi_scan_host - scan SCSI bus
  * @shost: a pointer to a scsi host instance
- * @pdev: pointer to device instance to assign
  *
- *      Returns nothing
+ *	Might block: yes
  *
- *      Might block: no
+ *	Notes: Should be called after scsi_add_host()
  *
- *      Defined in: include/scsi/scsi_host.h .
+ *	Defined in: drivers/scsi/scsi_scan.c
  **/
-void scsi_set_device(struct Scsi_Host * shost, struct device * dev)
-
-
-/**
- * scsi_to_pci_dma_dir - convert SCSI subsystem direction flag to PCI
- * @scsi_data_direction: SCSI subsystem direction flag
- *
- *      Returns DMA_TO_DEVICE given SCSI_DATA_WRITE,
- *              DMA_FROM_DEVICE given SCSI_DATA_READ
- *              DMA_BIDIRECTIONAL given SCSI_DATA_UNKNOWN
- *              else returns DMA_NONE
- *
- *      Might block: no
- *
- *      Notes: The SCSI subsystem now uses the same values for these
- *      constants as the PCI subsystem so this function is a nop.
- *      The recommendation is not to use this conversion function anymore
- *      (in the 2.6 kernel series) as it is not needed.
- *
- *      Defined in: drivers/scsi/scsi.h .
- **/
-int scsi_to_pci_dma_dir(unsigned char scsi_data_direction)
-
-
-/**
- * scsi_to_sbus_dma_dir - convert SCSI subsystem direction flag to SBUS
- * @scsi_data_direction: SCSI subsystem direction flag
- *
- *      Returns DMA_TO_DEVICE given SCSI_DATA_WRITE,
- *              FROM_DEVICE given SCSI_DATA_READ
- *              DMA_BIDIRECTIONAL given SCSI_DATA_UNKNOWN
- *              else returns DMA_NONE
- *
- *      Notes: The SCSI subsystem now uses the same values for these
- *      constants as the SBUS subsystem so this function is a nop.
- *      The recommendation is not to use this conversion function anymore
- *      (in the 2.6 kernel series) as it is not needed.
- *
- *      Might block: no
- *
- *      Defined in: drivers/scsi/scsi.h .
- **/
-int scsi_to_sbus_dma_dir(unsigned char scsi_data_direction)
+void scsi_scan_host(struct Scsi_Host *shost)
 
 
 /**
@@ -818,7 +677,7 @@ int scsi_to_sbus_dma_dir(unsigned char scsi_data_direction)
  *
  *      Defined in: drivers/scsi/scsi.c .
  **/
-int scsi_track_queue_full(Scsi_Device *sdev, int depth)
+int scsi_track_queue_full(struct scsi_device *sdev, int depth)
 
 
 /**
@@ -885,7 +744,6 @@ Summary:
    eh_bus_reset_handler - issue SCSI bus reset
    eh_device_reset_handler - issue SCSI device reset
    eh_host_reset_handler - reset host (host bus adapter)
-   eh_strategy_handler - driver supplied alternate to scsi_unjam_host()
    info - supply information about given host
    ioctl - driver can respond to ioctls
    proc_info - supports /proc/scsi/{driver_name}/{host_no}
@@ -980,13 +838,15 @@ Details:
  *
  *      Returns SUCCESS if command aborted else FAILED
  *
- *      Locks: struct Scsi_Host::host_lock held (with irqsave) on entry 
- *      and assumed to be held on return.
+ *      Locks: None held
  *
  *      Calling context: kernel thread
  *
- *      Notes: Invoked from scsi_eh thread. No other commands will be
- *      queued on current host during eh.
+ *      Notes: If 'no_async_abort' is defined this callback
+ *  	will be invoked from scsi_eh thread. No other commands
+ *	will then be queued on current host during eh.
+ *	Otherwise it will be called whenever scsi_times_out()
+ *      is called due to a command timeout.
  *
  *      Optionally defined in: LLD
  **/
@@ -999,8 +859,7 @@ Details:
  *
  *      Returns SUCCESS if command aborted else FAILED
  *
- *      Locks: struct Scsi_Host::host_lock held (with irqsave) on entry 
- *      and assumed to be held on return.
+ *      Locks: None held
  *
  *      Calling context: kernel thread
  *
@@ -1018,8 +877,7 @@ Details:
  *
  *      Returns SUCCESS if command aborted else FAILED
  *
- *      Locks: struct Scsi_Host::host_lock held (with irqsave) on entry
- *      and assumed to be held on return.
+ *      Locks: None held
  *
  *      Calling context: kernel thread
  *
@@ -1037,8 +895,7 @@ Details:
  *
  *      Returns SUCCESS if command aborted else FAILED
  *
- *      Locks: struct Scsi_Host::host_lock held (with irqsave) on entry
- *      and assumed to be held on return.
+ *      Locks: None held
  *
  *      Calling context: kernel thread
  *
@@ -1052,24 +909,6 @@ Details:
  *      Optionally defined in: LLD
  **/
      int eh_host_reset_handler(struct scsi_cmnd * scp)
-
-
-/**
- *      eh_strategy_handler - driver supplied alternate to scsi_unjam_host()
- *      @shp: host on which error has occurred
- *
- *      Returns TRUE if host unjammed, else FALSE.
- *
- *      Locks: none
- *
- *      Calling context: kernel thread
- *
- *      Notes: Invoked from scsi_eh thread. LLD supplied alternate to 
- *      scsi_unjam_host() found in scsi_error.c
- *
- *      Optionally defined in: LLD
- **/
-     int eh_strategy_handler(struct Scsi_Host * shp)
 
 
 /**
@@ -1163,9 +1002,9 @@ Details:
 
 
 /**
- *      queuecommand - queue scsi command, invoke 'done' on completion
+ *      queuecommand - queue scsi command, invoke scp->scsi_done on completion
+ *      @shost: pointer to the scsi host object
  *      @scp: pointer to scsi command object
- *      @done: function pointer to be invoked on completion
  *
  *      Returns 0 on success.
  *
@@ -1193,42 +1032,45 @@ Details:
  *
  *      Other types of errors that are detected immediately may be
  *      flagged by setting scp->result to an appropriate value,
- *      invoking the 'done' callback, and then returning 0 from this
- *      function. If the command is not performed immediately (and the
- *      LLD is starting (or will start) the given command) then this
- *      function should place 0 in scp->result and return 0.
+ *      invoking the scp->scsi_done callback, and then returning 0
+ *      from this function. If the command is not performed
+ *      immediately (and the LLD is starting (or will start) the given
+ *      command) then this function should place 0 in scp->result and
+ *      return 0.
  *
  *      Command ownership.  If the driver returns zero, it owns the
- *      command and must take responsibility for ensuring the 'done'
- *      callback is executed.  Note: the driver may call done before
- *      returning zero, but after it has called done, it may not
- *      return any value other than zero.  If the driver makes a
- *      non-zero return, it must not execute the command's done
- *      callback at any time.
+ *      command and must take responsibility for ensuring the
+ *      scp->scsi_done callback is executed.  Note: the driver may
+ *      call scp->scsi_done before returning zero, but after it has
+ *      called scp->scsi_done, it may not return any value other than
+ *      zero.  If the driver makes a non-zero return, it must not
+ *      execute the command's scsi_done callback at any time.
  *
- *      Locks: struct Scsi_Host::host_lock held on entry (with "irqsave")
- *             and is expected to be held on return.
+ *      Locks: up to and including 2.6.36, struct Scsi_Host::host_lock
+ *             held on entry (with "irqsave") and is expected to be
+ *             held on return. From 2.6.37 onwards, queuecommand is
+ *             called without any locks held.
  *
  *      Calling context: in interrupt (soft irq) or process context
  *
- *      Notes: This function should be relatively fast. Normally it will
- *      not wait for IO to complete. Hence the 'done' callback is invoked 
- *      (often directly from an interrupt service routine) some time after
- *      this function has returned. In some cases (e.g. pseudo adapter 
- *      drivers that manufacture the response to a SCSI INQUIRY)
- *      the 'done' callback may be invoked before this function returns.
- *      If the 'done' callback is not invoked within a certain period
- *      the SCSI mid level will commence error processing.
- *      If a status of CHECK CONDITION is placed in "result" when the
- *      'done' callback is invoked, then the LLD driver should 
- *      perform autosense and fill in the struct scsi_cmnd::sense_buffer
+ *      Notes: This function should be relatively fast. Normally it
+ *      will not wait for IO to complete. Hence the scp->scsi_done
+ *      callback is invoked (often directly from an interrupt service
+ *      routine) some time after this function has returned. In some
+ *      cases (e.g. pseudo adapter drivers that manufacture the
+ *      response to a SCSI INQUIRY) the scp->scsi_done callback may be
+ *      invoked before this function returns.  If the scp->scsi_done
+ *      callback is not invoked within a certain period the SCSI mid
+ *      level will commence error processing.  If a status of CHECK
+ *      CONDITION is placed in "result" when the scp->scsi_done
+ *      callback is invoked, then the LLD driver should perform
+ *      autosense and fill in the struct scsi_cmnd::sense_buffer
  *      array. The scsi_cmnd::sense_buffer array is zeroed prior to
  *      the mid level queuing a command to an LLD.
  *
  *      Defined in: LLD
  **/
-    int queuecommand(struct scsi_cmnd * scp, 
-                     void (*done)(struct scsi_cmnd *))
+    int queuecommand(struct Scsi_Host *shost, struct scsi_cmnd * scp)
 
 
 /**
@@ -1372,12 +1214,14 @@ of interest:
                    for disk firmware uploads.
     cmd_per_lun  - maximum number of commands that can be queued on devices
                    controlled by the host. Overridden by LLD calls to
-                   scsi_adjust_queue_depth().
+                   scsi_change_queue_depth().
     unchecked_isa_dma - 1=>only use bottom 16 MB of ram (ISA DMA addressing
                    restriction), 0=>can use full 32 bit (or better) DMA
                    address space
     use_clustering - 1=>SCSI commands in mid level's queue can be merged,
                      0=>disallow SCSI command merging
+    no_async_abort - 1=>Asynchronous aborts are not supported
+                     0=>Timed-out commands will be aborted asynchronously
     hostt        - pointer to driver's struct scsi_host_template from which
                    this struct Scsi_Host instance was spawned
     hostt->proc_name  - name of LLD. This is the driver name that sysfs uses
@@ -1390,6 +1234,11 @@ of interest:
     hostdata[0]  - area reserved for LLD at end of struct Scsi_Host. Size
                    is set by the second argument (named 'xtr_bytes') to
                    scsi_host_alloc() or scsi_register().
+    vendor_id    - a unique value that identifies the vendor supplying
+                   the LLD for the Scsi_Host.  Used most often in validating
+                   vendor-specific message requests.  Value consists of an
+                   identifier type and a vendor-specific value.
+                   See scsi_netlink.h for a description of valid formats.
 
 The scsi_host structure is defined in include/scsi/scsi_host.h
 
@@ -1405,7 +1254,7 @@ struct scsi_cmnd
 Instances of this structure convey SCSI commands to the LLD and responses
 back to the mid level. The SCSI mid level will ensure that no more SCSI
 commands become queued against the LLD than are indicated by
-scsi_adjust_queue_depth() (or struct Scsi_Host::cmd_per_lun). There will
+scsi_change_queue_depth() (or struct Scsi_Host::cmd_per_lun). There will
 be at least one instance of struct scsi_cmnd available for each SCSI device.
 Members of interest:
     cmnd         - array containing SCSI command
@@ -1420,7 +1269,7 @@ Members of interest:
     request_buffer - either contains data buffer or scatter gather list
                      depending on the setting of use_sg. Scatter gather
                      elements are defined by 'struct scatterlist' found
-                     in include/asm/scatterlist.h .
+                     in include/linux/scatterlist.h .
     done         - function pointer that should be invoked by LLD when the
                    SCSI command is completed (successfully or otherwise).
                    Should only be called by an LLD if the LLD has accepted
@@ -1454,13 +1303,25 @@ Members of interest:
                    underruns (overruns should be rare). If possible an LLD
                    should set 'resid' prior to invoking 'done'. The most
                    interesting case is data transfers from a SCSI target
-                   device device (i.e. READs) that underrun. 
+                   device (e.g. READs) that underrun.
     underflow    - LLD should place (DID_ERROR << 16) in 'result' if
                    actual number of bytes transferred is less than this
                    figure. Not many LLDs implement this check and some that
                    do just output an error message to the log rather than
                    report a DID_ERROR. Better for an LLD to implement
                    'resid'.
+
+It is recommended that a LLD set 'resid' on data transfers from a SCSI
+target device (e.g. READs). It is especially important that 'resid' is set
+when such data transfers have sense keys of MEDIUM ERROR and HARDWARE ERROR
+(and possibly RECOVERED ERROR). In these cases if a LLD is in doubt how much
+data has been received then the safest approach is to indicate no bytes have
+been received. For example: to indicate that no valid data has been received
+a LLD might use these helpers:
+    scsi_set_resid(SCpnt, scsi_bufflen(SCpnt));
+where 'SCpnt' is a pointer to a scsi_cmnd object. To indicate only three 512
+bytes blocks has been received 'resid' could be set like this:
+    scsi_set_resid(SCpnt, scsi_bufflen(SCpnt) - (3 * 512));
 
 The scsi_cmnd structure is defined in include/scsi/scsi_cmnd.h
 
@@ -1470,17 +1331,11 @@ Locks
 Each struct Scsi_Host instance has a spin_lock called struct 
 Scsi_Host::default_lock which is initialized in scsi_host_alloc() [found in 
 hosts.c]. Within the same function the struct Scsi_Host::host_lock pointer
-is initialized to point at default_lock with the scsi_assign_lock() function.
-Thereafter lock and unlock operations performed by the mid level use the
-struct Scsi_Host::host_lock pointer.
+is initialized to point at default_lock.  Thereafter lock and unlock
+operations performed by the mid level use the struct Scsi_Host::host_lock
+pointer.  Previously drivers could override the host_lock pointer but
+this is not allowed anymore.
 
-LLDs can override the use of struct Scsi_Host::default_lock by
-using scsi_assign_lock(). The earliest opportunity to do this would
-be in the detect() function after it has invoked scsi_register(). It
-could be replaced by a coarser grain lock (e.g. per driver) or a
-lock of equal granularity (i.e. per host). Using finer grain locks 
-(e.g. per SCSI device) may be possible by juggling locks in
-queuecommand().
 
 Autosense
 =========
@@ -1532,12 +1387,12 @@ Credits
 =======
 The following people have contributed to this document:
         Mike Anderson <andmike at us dot ibm dot com>
-        James Bottomley <James dot Bottomley at steeleye dot com> 
+        James Bottomley <James dot Bottomley at hansenpartnership dot com>
         Patrick Mansfield <patmans at us dot ibm dot com> 
         Christoph Hellwig <hch at infradead dot org>
         Doug Ledford <dledford at redhat dot com>
         Andries Brouwer <Andries dot Brouwer at cwi dot nl>
-        Randy Dunlap <rddunlap at osdl dot org>
+        Randy Dunlap <rdunlap at xenotime dot net>
         Alan Stern <stern at rowland dot harvard dot edu>
 
 

@@ -22,7 +22,6 @@
 #ifndef WD33C93_H
 #define WD33C93_H
 
-#include <linux/config.h>
 
 #define PROC_INTERFACE     /* add code for /proc/scsi/wd33c93/xxx interface */
 #ifdef  PROC_INTERFACE
@@ -156,6 +155,9 @@
 #define WD33C93_FS_12_15 OWNID_FS_12
 #define WD33C93_FS_16_20 OWNID_FS_16
 
+   /* pass input-clock explicitly. accepted mhz values are 8-10,12-20 */
+#define WD33C93_FS_MHZ(mhz) (mhz)
+
    /* Control register */
 #define CTRL_HSP     0x01
 #define CTRL_HA      0x02
@@ -254,6 +256,9 @@ struct WD33C93_hostdata {
     uchar            sync_stat[8];     /* status of sync negotiation per target */
     uchar            no_sync;          /* bitmask: don't do sync on these targets */
     uchar            no_dma;           /* set this flag to disable DMA */
+    uchar            dma_mode;         /* DMA Burst Mode or Single Byte DMA */
+    uchar            fast;             /* set this flag to enable Fast SCSI */
+    struct sx_period sx_table[9];      /* transfer periods for actual DTC-setting */
 #ifdef PROC_INTERFACE
     uchar            proc;             /* bitmask: what's in proc output */
 #ifdef PROC_STATISTICS
@@ -338,11 +343,10 @@ struct WD33C93_hostdata {
 void wd33c93_init (struct Scsi_Host *instance, const wd33c93_regs regs,
          dma_setup_t setup, dma_stop_t stop, int clock_freq);
 int wd33c93_abort (struct scsi_cmnd *cmd);
-int wd33c93_queuecommand (struct scsi_cmnd *cmd,
-		void (*done)(struct scsi_cmnd *));
+int wd33c93_queuecommand (struct Scsi_Host *h, struct scsi_cmnd *cmd);
 void wd33c93_intr (struct Scsi_Host *instance);
-int wd33c93_proc_info(struct Scsi_Host *, char *, char **, off_t, int, int);
+int wd33c93_show_info(struct seq_file *, struct Scsi_Host *);
+int wd33c93_write_info(struct Scsi_Host *, char *, int);
 int wd33c93_host_reset (struct scsi_cmnd *);
-void wd33c93_release(void);
 
 #endif /* WD33C93_H */

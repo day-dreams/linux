@@ -10,7 +10,7 @@
  * Author:	Lawrence V. Stefani, <stefani@lkg.dec.com>
  *
  *		fddidevice.h is based on previous trdevice.h work by
- *			Ross Biro, <bir7@leland.Stanford.Edu>
+ *			Ross Biro
  *			Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *			Alan Cox, <gw4pts@gw4pts.ampr.org>
  *
@@ -25,9 +25,8 @@
 #include <linux/if_fddi.h>
 
 #ifdef __KERNEL__
-extern unsigned short	fddi_type_trans(struct sk_buff *skb,
-				struct net_device *dev);
-extern struct net_device *alloc_fddidev(int sizeof_priv);
+__be16 fddi_type_trans(struct sk_buff *skb, struct net_device *dev);
+struct net_device *alloc_fddidev(int sizeof_priv);
 #endif
 
 #endif	/* _LINUX_FDDIDEVICE_H */

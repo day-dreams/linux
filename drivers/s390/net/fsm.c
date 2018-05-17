@@ -1,13 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
 /**
- * $Id: fsm.c,v 1.6 2003/10/15 11:37:29 mschwide Exp $
- *
  * A generic FSM based on fsm used in isdn4linux
  *
  */
 
 #include "fsm.h"
-#include <linux/config.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/timer.h>
 
 MODULE_AUTHOR("(C) 2000 IBM Corp. by Fritz Elfert (felfert@millenux.com)");
@@ -16,45 +15,42 @@ MODULE_LICENSE("GPL");
 
 fsm_instance *
 init_fsm(char *name, const char **state_names, const char **event_names, int nr_states,
-		int nr_events, const fsm_node *tmpl, int tmpl_len, int order)
+		int nr_events, const fsm_node *tmpl, int tmpl_len, gfp_t order)
 {
 	int i;
 	fsm_instance *this;
 	fsm_function_t *m;
 	fsm *f;
 
-	this = (fsm_instance *)kmalloc(sizeof(fsm_instance), order);
+	this = kzalloc(sizeof(fsm_instance), order);
 	if (this == NULL) {
 		printk(KERN_WARNING
 			"fsm(%s): init_fsm: Couldn't alloc instance\n", name);
 		return NULL;
 	}
-	memset(this, 0, sizeof(fsm_instance));
 	strlcpy(this->name, name, sizeof(this->name));
+	init_waitqueue_head(&this->wait_q);
 
-	f = (fsm *)kmalloc(sizeof(fsm), order);
+	f = kzalloc(sizeof(fsm), order);
 	if (f == NULL) {
 		printk(KERN_WARNING
 			"fsm(%s): init_fsm: Couldn't alloc fsm\n", name);
 		kfree_fsm(this);
 		return NULL;
 	}
-	memset(f, 0, sizeof(fsm));
 	f->nr_events = nr_events;
 	f->nr_states = nr_states;
 	f->event_names = event_names;
 	f->state_names = state_names;
 	this->f = f;
 
-	m = (fsm_function_t *)kmalloc(
-			sizeof(fsm_function_t) * nr_states * nr_events, order);
+	m = kcalloc(nr_states*nr_events, sizeof(fsm_function_t), order);
 	if (m == NULL) {
 		printk(KERN_WARNING
 			"fsm(%s): init_fsm: Couldn't alloc jumptable\n", name);
 		kfree_fsm(this);
 		return NULL;
 	}
-	memset(m, 0, sizeof(fsm_function_t) * f->nr_states * f->nr_events);
 	f->jumpmatrix = m;
 
 	for (i = 0; i < tmpl_len; i++) {
@@ -78,8 +74,7 @@ kfree_fsm(fsm_instance *this)
 {
 	if (this) {
 		if (this->f) {
-			if (this->f->jumpmatrix)
-				kfree(this->f->jumpmatrix);
+			kfree(this->f->jumpmatrix);
 			kfree(this->f);
 		}
 		kfree(this);
@@ -135,8 +130,9 @@ fsm_getstate_str(fsm_instance *fi)
 }
 
 static void
-fsm_expire_timer(fsm_timer *this)
+fsm_expire_timer(struct timer_list *t)
 {
+	fsm_timer *this = from_timer(this, t, tl);
 #if FSM_TIMER_DEBUG
 	printk(KERN_DEBUG "fsm(%s): Timer %p expired\n",
 	       this->fi->name, this);
@@ -148,13 +144,11 @@ void
 fsm_settimer(fsm_instance *fi, fsm_timer *this)
 {
 	this->fi = fi;
-	this->tl.function = (void *)fsm_expire_timer;
-	this->tl.data = (long)this;
 #if FSM_TIMER_DEBUG
 	printk(KERN_DEBUG "fsm(%s): Create timer %p\n", fi->name,
 	       this);
 #endif
-	init_timer(&this->tl);
+	timer_setup(&this->tl, fsm_expire_timer, 0);
 }
 
 void
@@ -176,9 +170,7 @@ fsm_addtimer(fsm_timer *this, int millisec, int event, void *arg)
 	       this->fi->name, this, millisec);
 #endif
 
-	init_timer(&this->tl);
-	this->tl.function = (void *)fsm_expire_timer;
-	this->tl.data = (long)this;
+	timer_setup(&this->tl, fsm_expire_timer, 0);
 	this->expire_event = event;
 	this->event_arg = arg;
 	this->tl.expires = jiffies + (millisec * HZ) / 1000;
@@ -197,9 +189,7 @@ fsm_modtimer(fsm_timer *this, int millisec, int event, void *arg)
 #endif
 
 	del_timer(&this->tl);
-	init_timer(&this->tl);
-	this->tl.function = (void *)fsm_expire_timer;
-	this->tl.data = (long)this;
+	timer_setup(&this->tl, fsm_expire_timer, 0);
 	this->expire_event = event;
 	this->event_arg = arg;
 	this->tl.expires = jiffies + (millisec * HZ) / 1000;

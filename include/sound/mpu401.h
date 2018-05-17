@@ -3,7 +3,7 @@
 
 /*
  *  Header file for MPU-401 and compatible cards
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -22,7 +22,7 @@
  *
  */
 
-#include "rawmidi.h"
+#include <sound/rawmidi.h>
 #include <linux/interrupt.h>
 
 #define MPU401_HW_MPU401		1	/* native MPU401 */
@@ -45,6 +45,16 @@
 #define MPU401_HW_PC98II		18	/* Roland PC98II */
 #define MPU401_HW_AUREAL		19	/* Aureal Vortex */
 
+#define MPU401_INFO_INPUT	(1 << 0)	/* input stream */
+#define MPU401_INFO_OUTPUT	(1 << 1)	/* output stream */
+#define MPU401_INFO_INTEGRATED	(1 << 2)	/* integrated h/w port */
+#define MPU401_INFO_MMIO	(1 << 3)	/* MMIO access */
+#define MPU401_INFO_TX_IRQ	(1 << 4)	/* independent TX irq */
+#define MPU401_INFO_IRQ_HOOK	(1 << 5)	/* mpu401 irq handler is called
+						   from driver irq handler */
+#define MPU401_INFO_NO_ACK	(1 << 6)	/* No ACK cmd needed */
+#define MPU401_INFO_USE_TIMER	(1 << 15)	/* internal */
+
 #define MPU401_MODE_BIT_INPUT		0
 #define MPU401_MODE_BIT_OUTPUT		1
 #define MPU401_MODE_BIT_INPUT_TRIGGER	2
@@ -58,41 +68,36 @@
 #define MPU401_MODE_INPUT_TIMER		(1<<0)
 #define MPU401_MODE_OUTPUT_TIMER	(1<<1)
 
-typedef struct _snd_mpu401 mpu401_t;
-
-struct _snd_mpu401 {
-	snd_rawmidi_t *rmidi;
+struct snd_mpu401 {
+	struct snd_rawmidi *rmidi;
 
 	unsigned short hardware;	/* MPU401_HW_XXXX */
+	unsigned int info_flags;	/* MPU401_INFO_XXX */
 	unsigned long port;		/* base port of MPU-401 chip */
 	unsigned long cport;		/* port + 1 (usually) */
 	struct resource *res;		/* port resource */
-	int irq;			/* IRQ number of MPU-401 chip (-1 = poll) */
-	int irq_flags;
+	int irq;			/* IRQ number of MPU-401 chip */
 
 	unsigned long mode;		/* MPU401_MODE_XXXX */
 	int timer_invoked;
 
-	int (*open_input) (mpu401_t * mpu);
-	void (*close_input) (mpu401_t * mpu);
-	int (*open_output) (mpu401_t * mpu);
-	void (*close_output) (mpu401_t * mpu);
+	int (*open_input) (struct snd_mpu401 * mpu);
+	void (*close_input) (struct snd_mpu401 * mpu);
+	int (*open_output) (struct snd_mpu401 * mpu);
+	void (*close_output) (struct snd_mpu401 * mpu);
 	void *private_data;
 
-	snd_rawmidi_substream_t *substream_input;
-	snd_rawmidi_substream_t *substream_output;
+	struct snd_rawmidi_substream *substream_input;
+	struct snd_rawmidi_substream *substream_output;
 
 	spinlock_t input_lock;
 	spinlock_t output_lock;
 	spinlock_t timer_lock;
 	
-	atomic_t rx_loop;
-	atomic_t tx_loop;
-
 	struct timer_list timer;
 
-	void (*write) (mpu401_t * mpu, unsigned char data, unsigned long addr);
-	unsigned char (*read) (mpu401_t * mpu, unsigned long addr);
+	void (*write) (struct snd_mpu401 * mpu, unsigned char data, unsigned long addr);
+	unsigned char (*read) (struct snd_mpu401 *mpu, unsigned long addr);
 };
 
 /* I/O ports */
@@ -101,18 +106,33 @@ struct _snd_mpu401 {
 #define MPU401D(mpu) (mpu)->port
 
 /*
+ * control register bits
+ */
+/* read MPU401C() */
+#define MPU401_RX_EMPTY		0x80
+#define MPU401_TX_FULL		0x40
+
+/* write MPU401C() */
+#define MPU401_RESET		0xff
+#define MPU401_ENTER_UART	0x3f
+
+/* read MPU401D() */
+#define MPU401_ACK		0xfe
+
+
+/*
 
  */
 
-irqreturn_t snd_mpu401_uart_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+irqreturn_t snd_mpu401_uart_interrupt(int irq, void *dev_id);
+irqreturn_t snd_mpu401_uart_interrupt_tx(int irq, void *dev_id);
 
-int snd_mpu401_uart_new(snd_card_t * card,
+int snd_mpu401_uart_new(struct snd_card *card,
 			int device,
 			unsigned short hardware,
 			unsigned long port,
-			int integrated,
+			unsigned int info_flags,
 			int irq,
-			int irq_flags,
-			snd_rawmidi_t ** rrawmidi);
+			struct snd_rawmidi ** rrawmidi);
 
 #endif /* __SOUND_MPU401_H */

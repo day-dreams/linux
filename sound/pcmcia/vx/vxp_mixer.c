@@ -20,9 +20,9 @@
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#include <sound/driver.h>
 #include <sound/core.h>
 #include <sound/control.h>
+#include <sound/tlv.h>
 #include "vxpocket.h"
 
 #define MIC_LEVEL_MIN	0
@@ -31,7 +31,7 @@
 /*
  * mic level control (for VXPocket)
  */
-static int vx_mic_level_info(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t *uinfo)
+static int vx_mic_level_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo)
 {
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
 	uinfo->count = 1;
@@ -40,73 +40,76 @@ static int vx_mic_level_info(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t *uinf
 	return 0;
 }
 
-static int vx_mic_level_get(snd_kcontrol_t *kcontrol, snd_ctl_elem_value_t *ucontrol)
+static int vx_mic_level_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	vx_core_t *_chip = snd_kcontrol_chip(kcontrol);
-	struct snd_vxpocket *chip = (struct snd_vxpocket *)_chip;
+	struct vx_core *_chip = snd_kcontrol_chip(kcontrol);
+	struct snd_vxpocket *chip = to_vxpocket(_chip);
 	ucontrol->value.integer.value[0] = chip->mic_level;
 	return 0;
 }
 
-static int vx_mic_level_put(snd_kcontrol_t *kcontrol, snd_ctl_elem_value_t *ucontrol)
+static int vx_mic_level_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	vx_core_t *_chip = snd_kcontrol_chip(kcontrol);
-	struct snd_vxpocket *chip = (struct snd_vxpocket *)_chip;
-	down(&_chip->mixer_mutex);
+	struct vx_core *_chip = snd_kcontrol_chip(kcontrol);
+	struct snd_vxpocket *chip = to_vxpocket(_chip);
+	unsigned int val = ucontrol->value.integer.value[0];
+
+	if (val > MIC_LEVEL_MAX)
+		return -EINVAL;
+	mutex_lock(&_chip->mixer_mutex);
 	if (chip->mic_level != ucontrol->value.integer.value[0]) {
 		vx_set_mic_level(_chip, ucontrol->value.integer.value[0]);
 		chip->mic_level = ucontrol->value.integer.value[0];
-		up(&_chip->mixer_mutex);
+		mutex_unlock(&_chip->mixer_mutex);
 		return 1;
 	}
-	up(&_chip->mixer_mutex);
+	mutex_unlock(&_chip->mixer_mutex);
 	return 0;
 }
 
-static snd_kcontrol_new_t vx_control_mic_level = {
+static const DECLARE_TLV_DB_SCALE(db_scale_mic, -21, 3, 0);
+
+static const struct snd_kcontrol_new vx_control_mic_level = {
 	.iface =	SNDRV_CTL_ELEM_IFACE_MIXER,
+	.access =	(SNDRV_CTL_ELEM_ACCESS_READWRITE |
+			 SNDRV_CTL_ELEM_ACCESS_TLV_READ),
 	.name =		"Mic Capture Volume",
 	.info =		vx_mic_level_info,
 	.get =		vx_mic_level_get,
 	.put =		vx_mic_level_put,
+	.tlv = { .p = db_scale_mic },
 };
 
 /*
  * mic boost level control (for VXP440)
  */
-static int vx_mic_boost_info(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t *uinfo)
-{
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_BOOLEAN;
-	uinfo->count = 1;
-	uinfo->value.integer.min = 0;
-	uinfo->value.integer.max = 1;
-	return 0;
-}
+#define vx_mic_boost_info		snd_ctl_boolean_mono_info
 
-static int vx_mic_boost_get(snd_kcontrol_t *kcontrol, snd_ctl_elem_value_t *ucontrol)
+static int vx_mic_boost_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	vx_core_t *_chip = snd_kcontrol_chip(kcontrol);
-	struct snd_vxpocket *chip = (struct snd_vxpocket *)_chip;
+	struct vx_core *_chip = snd_kcontrol_chip(kcontrol);
+	struct snd_vxpocket *chip = to_vxpocket(_chip);
 	ucontrol->value.integer.value[0] = chip->mic_level;
 	return 0;
 }
 
-static int vx_mic_boost_put(snd_kcontrol_t *kcontrol, snd_ctl_elem_value_t *ucontrol)
+static int vx_mic_boost_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
-	vx_core_t *_chip = snd_kcontrol_chip(kcontrol);
-	struct snd_vxpocket *chip = (struct snd_vxpocket *)_chip;
-	down(&_chip->mixer_mutex);
-	if (chip->mic_level != ucontrol->value.integer.value[0]) {
-		vx_set_mic_boost(_chip, ucontrol->value.integer.value[0]);
-		chip->mic_level = ucontrol->value.integer.value[0];
-		up(&_chip->mixer_mutex);
+	struct vx_core *_chip = snd_kcontrol_chip(kcontrol);
+	struct snd_vxpocket *chip = to_vxpocket(_chip);
+	int val = !!ucontrol->value.integer.value[0];
+	mutex_lock(&_chip->mixer_mutex);
+	if (chip->mic_level != val) {
+		vx_set_mic_boost(_chip, val);
+		chip->mic_level = val;
+		mutex_unlock(&_chip->mixer_mutex);
 		return 1;
 	}
-	up(&_chip->mixer_mutex);
+	mutex_unlock(&_chip->mixer_mutex);
 	return 0;
 }
 
-static snd_kcontrol_new_t vx_control_mic_boost = {
+static const struct snd_kcontrol_new vx_control_mic_boost = {
 	.iface =	SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name =		"Mic Boost",
 	.info =		vx_mic_boost_info,
@@ -115,9 +118,9 @@ static snd_kcontrol_new_t vx_control_mic_boost = {
 };
 
 
-int vxp_add_mic_controls(vx_core_t *_chip)
+int vxp_add_mic_controls(struct vx_core *_chip)
 {
-	struct snd_vxpocket *chip = (struct snd_vxpocket *)_chip;
+	struct snd_vxpocket *chip = to_vxpocket(_chip);
 	int err;
 
 	/* mute input levels */

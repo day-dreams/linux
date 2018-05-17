@@ -197,12 +197,6 @@ struct SYM_FWB_SCR {
 	u32 bad_status		[  7];
 	u32 wsr_ma_helper	[  4];
 
-#ifdef SYM_OPT_HANDLE_DIR_UNKNOWN
-	/* Unknown direction handling */
-	u32 data_io		[  2];
-	u32 data_io_com		[  8];
-	u32 data_io_out		[  7];
-#endif
 	/* Data area */
 	u32 zero		[  1];
 	u32 scratch		[  1];
@@ -1026,7 +1020,7 @@ static struct SYM_FWA_SCR SYM_FWA_SCR = {
 	 *  It shall be a tagged command.
 	 *  Read SIMPLE+TAG.
 	 *  The C code will deal with errors.
-	 *  Agressive optimization, is'nt it? :)
+	 *  Aggressive optimization, isn't it? :)
 	 */
 	SCR_MOVE_ABS (2) ^ SCR_MSG_IN,
 		HADDR_1 (msgin),
@@ -1050,7 +1044,7 @@ static struct SYM_FWA_SCR SYM_FWA_SCR = {
 		RADDR_1 (dsa),
 	/*
 	 *  The SIDL still contains the TAG value.
-	 *  Agressive optimization, isn't it? :):)
+	 *  Aggressive optimization, isn't it? :):)
 	 */
 	SCR_REG_SFBR (sidl, SCR_SHL, 0),
 		0,
@@ -1455,7 +1449,7 @@ static struct SYM_FWB_SCR SYM_FWB_SCR = {
 		PADDR_B (msg_weird_seen),
 	/*
 	 *  We donnot handle extended messages from SCRIPTS.
-	 *  Read the amount of data correponding to the 
+	 *  Read the amount of data corresponding to the 
 	 *  message length and call the C code.
 	 */
 	SCR_COPY (1),
@@ -1746,48 +1740,6 @@ static struct SYM_FWB_SCR SYM_FWB_SCR = {
 		offsetof (struct sym_ccb, phys.wresid),
 	SCR_JUMP,
 		PADDR_A (dispatch),
-
-#ifdef SYM_OPT_HANDLE_DIR_UNKNOWN
-}/*-------------------------< DATA_IO >--------------------------*/,{
-	/*
-	 *  We jump here if the data direction was unknown at the 
-	 *  time we had to queue the command to the scripts processor.
-	 *  Pointers had been set as follow in this situation:
-	 *    savep   -->   DATA_IO
-	 *    lastp   -->   start pointer when DATA_IN
-	 *    wlastp  -->   start pointer when DATA_OUT
-	 *  This script sets savep and lastp according to the 
-	 *  direction chosen by the target.
-	 */
-	SCR_JUMP ^ IFTRUE (WHEN (SCR_DATA_OUT)),
-		PADDR_B (data_io_out),
-}/*-------------------------< DATA_IO_COM >----------------------*/,{
-	/*
-	 *  Direction is DATA IN.
-	 */
-	SCR_COPY  (4),
-		HADDR_1 (ccb_head.lastp),
-		HADDR_1 (ccb_head.savep),
-	/*
-	 *  Jump to the SCRIPTS according to actual direction.
-	 */
-	SCR_COPY  (4),
-		HADDR_1 (ccb_head.savep),
-		RADDR_1 (temp),
-	SCR_RETURN,
-		0,
-}/*-------------------------< DATA_IO_OUT >----------------------*/,{
-	/*
-	 *  Direction is DATA OUT.
-	 */
-	SCR_REG_REG (HF_REG, SCR_AND, (~HF_DATA_IN)),
-		0,
-	SCR_COPY  (4),
-		HADDR_1 (ccb_head.wlastp),
-		HADDR_1 (ccb_head.lastp),
-	SCR_JUMP,
-		PADDR_B(data_io_com),
-#endif /* SYM_OPT_HANDLE_DIR_UNKNOWN */
 
 }/*-------------------------< ZERO >-----------------------------*/,{
 	SCR_DATA_ZERO,

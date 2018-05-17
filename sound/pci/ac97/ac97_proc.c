@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
  *  Universal interface for Audio Codec '97
  *
  *  For more details look to AC '97 component specification revision 2.2
@@ -22,8 +22,8 @@
  *
  */
 
-#include <sound/driver.h>
-#include <linux/slab.h>
+#include <linux/mutex.h>
+
 #include <sound/core.h>
 #include <sound/ac97_codec.h>
 #include <sound/asoundef.h>
@@ -34,7 +34,7 @@
  * proc interface
  */
 
-static void snd_ac97_proc_read_functions(ac97_t *ac97, snd_info_buffer_t *buffer)
+static void snd_ac97_proc_read_functions(struct snd_ac97 *ac97, struct snd_info_buffer *buffer)
 {
 	int header = 0, function;
 	unsigned short info, sense_info;
@@ -68,7 +68,43 @@ static void snd_ac97_proc_read_functions(ac97_t *ac97, snd_info_buffer_t *buffer
 	}
 }
 
-static void snd_ac97_proc_read_main(ac97_t *ac97, snd_info_buffer_t * buffer, int subidx)
+static const char *snd_ac97_stereo_enhancements[] =
+{
+  /*   0 */ "No 3D Stereo Enhancement",
+  /*   1 */ "Analog Devices Phat Stereo",
+  /*   2 */ "Creative Stereo Enhancement",
+  /*   3 */ "National Semi 3D Stereo Enhancement",
+  /*   4 */ "YAMAHA Ymersion",
+  /*   5 */ "BBE 3D Stereo Enhancement",
+  /*   6 */ "Crystal Semi 3D Stereo Enhancement",
+  /*   7 */ "Qsound QXpander",
+  /*   8 */ "Spatializer 3D Stereo Enhancement",
+  /*   9 */ "SRS 3D Stereo Enhancement",
+  /*  10 */ "Platform Tech 3D Stereo Enhancement",
+  /*  11 */ "AKM 3D Audio",
+  /*  12 */ "Aureal Stereo Enhancement",
+  /*  13 */ "Aztech 3D Enhancement",
+  /*  14 */ "Binaura 3D Audio Enhancement",
+  /*  15 */ "ESS Technology Stereo Enhancement",
+  /*  16 */ "Harman International VMAx",
+  /*  17 */ "Nvidea/IC Ensemble/KS Waves 3D Stereo Enhancement",
+  /*  18 */ "Philips Incredible Sound",
+  /*  19 */ "Texas Instruments 3D Stereo Enhancement",
+  /*  20 */ "VLSI Technology 3D Stereo Enhancement",
+  /*  21 */ "TriTech 3D Stereo Enhancement",
+  /*  22 */ "Realtek 3D Stereo Enhancement",
+  /*  23 */ "Samsung 3D Stereo Enhancement",
+  /*  24 */ "Wolfson Microelectronics 3D Enhancement",
+  /*  25 */ "Delta Integration 3D Enhancement",
+  /*  26 */ "SigmaTel 3D Enhancement",
+  /*  27 */ "IC Ensemble/KS Waves",
+  /*  28 */ "Rockwell 3D Stereo Enhancement",
+  /*  29 */ "Reserved 29",
+  /*  30 */ "Reserved 30",
+  /*  31 */ "Reserved 31"
+};
+
+static void snd_ac97_proc_read_main(struct snd_ac97 *ac97, struct snd_info_buffer *buffer, int subidx)
 {
 	char name[64];
 	unsigned short val, tmp, ext, mext;
@@ -79,8 +115,16 @@ static void snd_ac97_proc_read_main(ac97_t *ac97, snd_info_buffer_t * buffer, in
 
 	snd_ac97_get_name(NULL, ac97->id, name, 0);
 	snd_iprintf(buffer, "%d-%d/%d: %s\n\n", ac97->addr, ac97->num, subidx, name);
+
 	if ((ac97->scaps & AC97_SCAP_AUDIO) == 0)
 		goto __modem;
+
+        snd_iprintf(buffer, "PCI Subsys Vendor: 0x%04x\n",
+	            ac97->subsystem_vendor);
+        snd_iprintf(buffer, "PCI Subsys Device: 0x%04x\n\n",
+                    ac97->subsystem_device);
+
+	snd_iprintf(buffer, "Flags: %x\n", ac97->flags);
 
 	if ((ac97->ext_id & AC97_EI_REV_MASK) >= AC97_EI_REV_23) {
 		val = snd_ac97_read(ac97, AC97_INT_PAGING);
@@ -192,10 +236,14 @@ static void snd_ac97_proc_read_main(ac97_t *ac97, snd_info_buffer_t * buffer, in
 		val = snd_ac97_read(ac97, AC97_PCM_MIC_ADC_RATE);
 		snd_iprintf(buffer, "PCM MIC ADC      : %iHz\n", val);
 	}
-	if ((ext & AC97_EI_SPDIF) || (ac97->flags & AC97_CS_SPDIF)) {
+	if ((ext & AC97_EI_SPDIF) || (ac97->flags & AC97_CS_SPDIF) ||
+	    (ac97->id == AC97_ID_YMF743)) {
 	        if (ac97->flags & AC97_CS_SPDIF)
 			val = snd_ac97_read(ac97, AC97_CSR_SPDIF);
-		else
+		else if (ac97->id == AC97_ID_YMF743) {
+			val = snd_ac97_read(ac97, AC97_YMF7X3_DIT_CTRL);
+			val = 0x2000 | (val & 0xff00) >> 4 | (val & 0x38) >> 2;
+		} else
 			val = snd_ac97_read(ac97, AC97_SPDIF);
 
 		snd_iprintf(buffer, "SPDIF Control    :%s%s%s%s Category=0x%x Generation=%i%s%s%s\n",
@@ -292,11 +340,11 @@ static void snd_ac97_proc_read_main(ac97_t *ac97, snd_info_buffer_t * buffer, in
 	}
 }
 
-static void snd_ac97_proc_read(snd_info_entry_t *entry, snd_info_buffer_t * buffer)
+static void snd_ac97_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buffer)
 {
-	ac97_t *ac97 = entry->private_data;
+	struct snd_ac97 *ac97 = entry->private_data;
 	
-	down(&ac97->page_mutex);
+	mutex_lock(&ac97->page_mutex);
 	if ((ac97->id & 0xffffff40) == AC97_ID_AD1881) {	// Analog Devices AD1881/85/86
 		int idx;
 		for (idx = 0; idx < 3; idx++)
@@ -322,17 +370,17 @@ static void snd_ac97_proc_read(snd_info_entry_t *entry, snd_info_buffer_t * buff
 	} else {
 		snd_ac97_proc_read_main(ac97, buffer, 0);
 	}
-	up(&ac97->page_mutex);
+	mutex_unlock(&ac97->page_mutex);
 }
 
 #ifdef CONFIG_SND_DEBUG
 /* direct register write for debugging */
-static void snd_ac97_proc_regs_write(snd_info_entry_t *entry, snd_info_buffer_t *buffer)
+static void snd_ac97_proc_regs_write(struct snd_info_entry *entry, struct snd_info_buffer *buffer)
 {
-	ac97_t *ac97 = entry->private_data;
+	struct snd_ac97 *ac97 = entry->private_data;
 	char line[64];
 	unsigned int reg, val;
-	down(&ac97->page_mutex);
+	mutex_lock(&ac97->page_mutex);
 	while (!snd_info_get_line(buffer, line, sizeof(line))) {
 		if (sscanf(line, "%x %x", &reg, &val) != 2)
 			continue;
@@ -340,11 +388,11 @@ static void snd_ac97_proc_regs_write(snd_info_entry_t *entry, snd_info_buffer_t 
 		if (reg < 0x80 && (reg & 1) == 0 && val <= 0xffff)
 			snd_ac97_write_cache(ac97, reg, val);
 	}
-	up(&ac97->page_mutex);
+	mutex_unlock(&ac97->page_mutex);
 }
 #endif
 
-static void snd_ac97_proc_regs_read_main(ac97_t *ac97, snd_info_buffer_t * buffer, int subidx)
+static void snd_ac97_proc_regs_read_main(struct snd_ac97 *ac97, struct snd_info_buffer *buffer, int subidx)
 {
 	int reg, val;
 
@@ -354,12 +402,12 @@ static void snd_ac97_proc_regs_read_main(ac97_t *ac97, snd_info_buffer_t * buffe
 	}
 }
 
-static void snd_ac97_proc_regs_read(snd_info_entry_t *entry, 
-				    snd_info_buffer_t * buffer)
+static void snd_ac97_proc_regs_read(struct snd_info_entry *entry, 
+				    struct snd_info_buffer *buffer)
 {
-	ac97_t *ac97 = entry->private_data;
+	struct snd_ac97 *ac97 = entry->private_data;
 
-	down(&ac97->page_mutex);
+	mutex_lock(&ac97->page_mutex);
 	if ((ac97->id & 0xffffff40) == AC97_ID_AD1881) {	// Analog Devices AD1881/85/86
 
 		int idx;
@@ -375,12 +423,12 @@ static void snd_ac97_proc_regs_read(snd_info_entry_t *entry,
 	} else {
 		snd_ac97_proc_regs_read_main(ac97, buffer, 0);
 	}	
-	up(&ac97->page_mutex);
+	mutex_unlock(&ac97->page_mutex);
 }
 
-void snd_ac97_proc_init(ac97_t * ac97)
+void snd_ac97_proc_init(struct snd_ac97 * ac97)
 {
-	snd_info_entry_t *entry;
+	struct snd_info_entry *entry;
 	char name[32];
 	const char *prefix;
 
@@ -389,7 +437,7 @@ void snd_ac97_proc_init(ac97_t * ac97)
 	prefix = ac97_is_audio(ac97) ? "ac97" : "mc97";
 	sprintf(name, "%s#%d-%d", prefix, ac97->addr, ac97->num);
 	if ((entry = snd_info_create_card_entry(ac97->bus->card, name, ac97->bus->proc)) != NULL) {
-		snd_info_set_text_ops(entry, ac97, 1024, snd_ac97_proc_read);
+		snd_info_set_text_ops(entry, ac97, snd_ac97_proc_read);
 		if (snd_info_register(entry) < 0) {
 			snd_info_free_entry(entry);
 			entry = NULL;
@@ -398,10 +446,9 @@ void snd_ac97_proc_init(ac97_t * ac97)
 	ac97->proc = entry;
 	sprintf(name, "%s#%d-%d+regs", prefix, ac97->addr, ac97->num);
 	if ((entry = snd_info_create_card_entry(ac97->bus->card, name, ac97->bus->proc)) != NULL) {
-		snd_info_set_text_ops(entry, ac97, 1024, snd_ac97_proc_regs_read);
+		snd_info_set_text_ops(entry, ac97, snd_ac97_proc_regs_read);
 #ifdef CONFIG_SND_DEBUG
 		entry->mode |= S_IWUSR;
-		entry->c.text.write_size = 1024;
 		entry->c.text.write = snd_ac97_proc_regs_write;
 #endif
 		if (snd_info_register(entry) < 0) {
@@ -412,21 +459,17 @@ void snd_ac97_proc_init(ac97_t * ac97)
 	ac97->proc_regs = entry;
 }
 
-void snd_ac97_proc_done(ac97_t * ac97)
+void snd_ac97_proc_done(struct snd_ac97 * ac97)
 {
-	if (ac97->proc_regs) {
-		snd_info_unregister(ac97->proc_regs);
-		ac97->proc_regs = NULL;
-	}
-	if (ac97->proc) {
-		snd_info_unregister(ac97->proc);
-		ac97->proc = NULL;
-	}
+	snd_info_free_entry(ac97->proc_regs);
+	ac97->proc_regs = NULL;
+	snd_info_free_entry(ac97->proc);
+	ac97->proc = NULL;
 }
 
-void snd_ac97_bus_proc_init(ac97_bus_t * bus)
+void snd_ac97_bus_proc_init(struct snd_ac97_bus * bus)
 {
-	snd_info_entry_t *entry;
+	struct snd_info_entry *entry;
 	char name[32];
 
 	sprintf(name, "codec97#%d", bus->num);
@@ -440,10 +483,8 @@ void snd_ac97_bus_proc_init(ac97_bus_t * bus)
 	bus->proc = entry;
 }
 
-void snd_ac97_bus_proc_done(ac97_bus_t * bus)
+void snd_ac97_bus_proc_done(struct snd_ac97_bus * bus)
 {
-	if (bus->proc) {
-		snd_info_unregister(bus->proc);
-		bus->proc = NULL;
-	}
+	snd_info_free_entry(bus->proc);
+	bus->proc = NULL;
 }

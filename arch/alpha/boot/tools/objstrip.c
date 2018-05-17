@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/alpha/boot/tools/objstrip.c
  *
@@ -25,9 +26,11 @@
 #include <linux/a.out.h>
 #include <linux/coff.h>
 #include <linux/param.h>
-#include <linux/string.h>
 #ifdef __ELF__
 # include <linux/elf.h>
+# define elfhdr elf64_hdr
+# define elf_phdr elf64_phdr
+# define elf_check_arch(x) ((x)->e_machine == EM_ALPHA)
 #endif
 
 /* bootfile size must be multiple of BLOCK_SIZE: */
@@ -36,7 +39,7 @@
 const char * prog_name;
 
 
-void
+static void
 usage (void)
 {
     fprintf(stderr,
@@ -94,7 +97,7 @@ main (int argc, char *argv[])
     ofd = 1;
     if (i < argc) {
 	ofd = open(argv[i++], O_WRONLY | O_CREAT | O_TRUNC, 0666);
-	if (fd == -1) {
+	if (ofd == -1) {
 	    perror("open");
 	    exit(1);
 	}
@@ -145,7 +148,7 @@ main (int argc, char *argv[])
 #ifdef __ELF__
     elf = (struct elfhdr *) buf;
 
-    if (elf->e_ident[0] == 0x7f && strncmp(elf->e_ident + 1, "ELF", 3) == 0) {
+    if (elf->e_ident[0] == 0x7f && strncmp((char *)elf->e_ident + 1, "ELF", 3) == 0) {
 	if (elf->e_type != ET_EXEC) {
 	    fprintf(stderr, "%s: %s is not an ELF executable\n",
 		    prog_name, inname);

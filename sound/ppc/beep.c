@@ -18,33 +18,34 @@
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
-#include <sound/driver.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include <asm/irq.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/input.h>
+#include <linux/pci.h>
+#include <linux/dma-mapping.h>
 #include <sound/core.h>
 #include <sound/control.h>
 #include "pmac.h"
 
-struct snd_pmac_beep {
-	int running;	/* boolean */
-	int volume;	/* mixer volume: 0-100 */
+struct pmac_beep {
+	int running;		/* boolean */
+	int volume;		/* mixer volume: 0-100 */
 	int volume_play;	/* currently playing volume */
 	int hz;
 	int nsamples;
 	short *buf;		/* allocated wave buffer */
-	unsigned long addr;	/* physical address of buffer */
-	struct input_dev dev;
+	dma_addr_t addr;	/* physical address of buffer */
+	struct input_dev *dev;
 };
 
 /*
  * stop beep if running
  */
-void snd_pmac_beep_stop(pmac_t *chip)
+void snd_pmac_beep_stop(struct snd_pmac *chip)
 {
-	pmac_beep_t *beep = chip->beep;
+	struct pmac_beep *beep = chip->beep;
 	if (beep && beep->running) {
 		beep->running = 0;
 		snd_pmac_beep_dma_stop(chip);
@@ -95,10 +96,11 @@ static short beep_wform[256] = {
 #define BEEP_BUFLEN	512
 #define BEEP_VOLUME	15	/* 0 - 100 */
 
-static int snd_pmac_beep_event(struct input_dev *dev, unsigned int type, unsigned int code, int hz)
+static int snd_pmac_beep_event(struct input_dev *dev, unsigned int type,
+			       unsigned int code, int hz)
 {
-	pmac_t *chip;
-	pmac_beep_t *beep;
+	struct snd_pmac *chip;
+	struct pmac_beep *beep;
 	unsigned long flags;
 	int beep_speed = 0;
 	int srate;
@@ -115,7 +117,7 @@ static int snd_pmac_beep_event(struct input_dev *dev, unsigned int type, unsigne
 	default: return -1;
 	}
 
-	chip = dev->private;
+	chip = input_get_drvdata(dev);
 	if (! chip || (beep = chip->beep) == NULL)
 		return -1;
 
@@ -169,9 +171,8 @@ static int snd_pmac_beep_event(struct input_dev *dev, unsigned int type, unsigne
  * beep volume mixer
  */
 
-#define chip_t pmac_t
-
-static int snd_pmac_info_beep(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t *uinfo)
+static int snd_pmac_info_beep(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_info *uinfo)
 {
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
 	uinfo->count = 1;
@@ -180,25 +181,32 @@ static int snd_pmac_info_beep(snd_kcontrol_t *kcontrol, snd_ctl_elem_info_t *uin
 	return 0;
 }
 
-static int snd_pmac_get_beep(snd_kcontrol_t *kcontrol, snd_ctl_elem_value_t *ucontrol)
+static int snd_pmac_get_beep(struct snd_kcontrol *kcontrol,
+			     struct snd_ctl_elem_value *ucontrol)
 {
-	pmac_t *chip = snd_kcontrol_chip(kcontrol);
-	snd_assert(chip->beep, return -ENXIO);
+	struct snd_pmac *chip = snd_kcontrol_chip(kcontrol);
+	if (snd_BUG_ON(!chip->beep))
+		return -ENXIO;
 	ucontrol->value.integer.value[0] = chip->beep->volume;
 	return 0;
 }
 
-static int snd_pmac_put_beep(snd_kcontrol_t *kcontrol, snd_ctl_elem_value_t *ucontrol)
+static int snd_pmac_put_beep(struct snd_kcontrol *kcontrol,
+			     struct snd_ctl_elem_value *ucontrol)
 {
-	pmac_t *chip = snd_kcontrol_chip(kcontrol);
-	int oval;
-	snd_assert(chip->beep, return -ENXIO);
+	struct snd_pmac *chip = snd_kcontrol_chip(kcontrol);
+	unsigned int oval, nval;
+	if (snd_BUG_ON(!chip->beep))
+		return -ENXIO;
 	oval = chip->beep->volume;
-	chip->beep->volume = ucontrol->value.integer.value[0];
+	nval = ucontrol->value.integer.value[0];
+	if (nval > 100)
+		return -EINVAL;
+	chip->beep->volume = nval;
 	return oval != chip->beep->volume;
 }
 
-static snd_kcontrol_new_t snd_pmac_beep_mixer = {
+static const struct snd_kcontrol_new snd_pmac_beep_mixer = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "Beep Playback Volume",
 	.info = snd_pmac_info_beep,
@@ -207,55 +215,70 @@ static snd_kcontrol_new_t snd_pmac_beep_mixer = {
 };
 
 /* Initialize beep stuff */
-int __init snd_pmac_attach_beep(pmac_t *chip)
+int snd_pmac_attach_beep(struct snd_pmac *chip)
 {
-	pmac_beep_t *beep;
-	int err;
+	struct pmac_beep *beep;
+	struct input_dev *input_dev;
+	struct snd_kcontrol *beep_ctl;
+	void *dmabuf;
+	int err = -ENOMEM;
 
-	beep = kmalloc(sizeof(*beep), GFP_KERNEL);
+	beep = kzalloc(sizeof(*beep), GFP_KERNEL);
 	if (! beep)
 		return -ENOMEM;
-
-	memset(beep, 0, sizeof(*beep));
-	beep->buf = (short *) kmalloc(BEEP_BUFLEN * 4, GFP_KERNEL);
-	if (! beep->buf) {
-		kfree(beep);
-		return -ENOMEM;
-	}
-	beep->addr = virt_to_bus(beep->buf);
-
-	beep->dev.evbit[0] = BIT(EV_SND);
-	beep->dev.sndbit[0] = BIT(SND_BELL) | BIT(SND_TONE);
-	beep->dev.event = snd_pmac_beep_event;
-	beep->dev.private = chip;
+	dmabuf = dma_alloc_coherent(&chip->pdev->dev, BEEP_BUFLEN * 4,
+				    &beep->addr, GFP_KERNEL);
+	input_dev = input_allocate_device();
+	if (! dmabuf || ! input_dev)
+		goto fail1;
 
 	/* FIXME: set more better values */
-	beep->dev.name = "PowerMac Beep";
-	beep->dev.phys = "powermac/beep";
-	beep->dev.id.bustype = BUS_ADB;
-	beep->dev.id.vendor = 0x001f;
-	beep->dev.id.product = 0x0001;
-	beep->dev.id.version = 0x0100;
+	input_dev->name = "PowerMac Beep";
+	input_dev->phys = "powermac/beep";
+	input_dev->id.bustype = BUS_ADB;
+	input_dev->id.vendor = 0x001f;
+	input_dev->id.product = 0x0001;
+	input_dev->id.version = 0x0100;
 
+	input_dev->evbit[0] = BIT_MASK(EV_SND);
+	input_dev->sndbit[0] = BIT_MASK(SND_BELL) | BIT_MASK(SND_TONE);
+	input_dev->event = snd_pmac_beep_event;
+	input_dev->dev.parent = &chip->pdev->dev;
+	input_set_drvdata(input_dev, chip);
+
+	beep->dev = input_dev;
+	beep->buf = dmabuf;
 	beep->volume = BEEP_VOLUME;
 	beep->running = 0;
-	if ((err = snd_ctl_add(chip->card, snd_ctl_new1(&snd_pmac_beep_mixer, chip))) < 0) {
-		kfree(beep->buf);
-		kfree(beep);
-		return err;
-	}
+
+	beep_ctl = snd_ctl_new1(&snd_pmac_beep_mixer, chip);
+	err = snd_ctl_add(chip->card, beep_ctl);
+	if (err < 0)
+		goto fail1;
 
 	chip->beep = beep;
-	input_register_device(&beep->dev);
 
-	return 0;
+	err = input_register_device(beep->dev);
+	if (err)
+		goto fail2;
+ 
+ 	return 0;
+ 
+ fail2:	snd_ctl_remove(chip->card, beep_ctl);
+ fail1:	input_free_device(input_dev);
+	if (dmabuf)
+		dma_free_coherent(&chip->pdev->dev, BEEP_BUFLEN * 4,
+				  dmabuf, beep->addr);
+	kfree(beep);
+	return err;
 }
 
-void snd_pmac_detach_beep(pmac_t *chip)
+void snd_pmac_detach_beep(struct snd_pmac *chip)
 {
 	if (chip->beep) {
-		input_unregister_device(&chip->beep->dev);
-		kfree(chip->beep->buf);
+		input_unregister_device(chip->beep->dev);
+		dma_free_coherent(&chip->pdev->dev, BEEP_BUFLEN * 4,
+				  chip->beep->buf, chip->beep->addr);
 		kfree(chip->beep);
 		chip->beep = NULL;
 	}

@@ -10,6 +10,8 @@
  */
 
 #include <linux/sched.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/task.h>
 #include <linux/mm.h>
 #include <asm/tlbflush.h>
 
@@ -54,9 +56,9 @@ static unsigned get_cxn(mm_context_t *ctx)
 		/* find the first unallocated context number
 		 * - 0 is reserved for the kernel
 		 */
-		cxn = find_next_zero_bit(&cxn_bitmap, NR_CXN, 1);
+		cxn = find_next_zero_bit(cxn_bitmap, NR_CXN, 1);
 		if (cxn < NR_CXN) {
-			set_bit(cxn, &cxn_bitmap);
+			set_bit(cxn, cxn_bitmap);
 		}
 		else {
 			/* none remaining - need to steal someone else's cxn */
@@ -138,7 +140,7 @@ void destroy_context(struct mm_struct *mm)
 			cxn_pinned = -1;
 
 		list_del_init(&ctx->id_link);
-		clear_bit(ctx->id, &cxn_bitmap);
+		clear_bit(ctx->id, cxn_bitmap);
 		__flush_tlb_mm(ctx->id);
 		ctx->id = 0;
 	}
@@ -181,14 +183,14 @@ int cxn_pin_by_pid(pid_t pid)
 
 	/* get a handle on the mm_struct */
 	read_lock(&tasklist_lock);
-	tsk = find_task_by_pid(pid);
+	tsk = find_task_by_vpid(pid);
 	if (tsk) {
 		ret = -EINVAL;
 
 		task_lock(tsk);
 		if (tsk->mm) {
 			mm = tsk->mm;
-			atomic_inc(&mm->mm_users);
+			mmget(mm);
 			ret = 0;
 		}
 		task_unlock(tsk);

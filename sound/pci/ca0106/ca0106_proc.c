@@ -1,7 +1,7 @@
 /*
  *  Copyright (c) 2004 James Courtier-Dutton <James@superbug.demon.co.uk>
  *  Driver CA0106 chips. e.g. Sound Blaster Audigy LS and Live 24bit
- *  Version: 0.0.17
+ *  Version: 0.0.18
  *
  *  FEATURES currently supported:
  *    See ca0106_main.c for features.
@@ -39,8 +39,10 @@
  *    Modified Copyright message.
  *  0.0.17
  *    Add iec958 file in proc file system to show status of SPDIF in.
- *    
- *  This code was initally based on code from ALSA's emu10k1x.c which is:
+ *  0.0.18
+ *    Implement support for Line-in capture on SB Live 24bit.
+ *
+ *  This code was initially based on code from ALSA's emu10k1x.c which is:
  *  Copyright (c) by Francisco Moraes <fmoraes@nc.rr.com>
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -58,13 +60,11 @@
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  *
  */
-#include <sound/driver.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
-#include <linux/pci.h>
-#include <linux/slab.h>
 #include <linux/moduleparam.h>
+#include <linux/io.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
@@ -95,7 +95,7 @@ static struct snd_ca0106_category_str snd_ca0106_con_category[] = {
 };
 
 
-void snd_ca0106_proc_dump_iec958( snd_info_buffer_t *buffer, u32 value)
+static void snd_ca0106_proc_dump_iec958( struct snd_info_buffer *buffer, u32 value)
 {
 	int i;
 	u32 status[4];
@@ -230,7 +230,7 @@ void snd_ca0106_proc_dump_iec958( snd_info_buffer_t *buffer, u32 value)
 			snd_iprintf(buffer, "user-defined\n");
 			break;
 		default:
-			snd_iprintf(buffer, "unkown\n");
+			snd_iprintf(buffer, "unknown\n");
 			break;
 		}
 		snd_iprintf(buffer, "Sample Bits: ");
@@ -269,10 +269,10 @@ void snd_ca0106_proc_dump_iec958( snd_info_buffer_t *buffer, u32 value)
 	}
 }
 
-static void snd_ca0106_proc_iec958(snd_info_entry_t *entry, 
-				       snd_info_buffer_t * buffer)
+static void snd_ca0106_proc_iec958(struct snd_info_entry *entry, 
+				       struct snd_info_buffer *buffer)
 {
-	ca0106_t *emu = entry->private_data;
+	struct snd_ca0106 *emu = entry->private_data;
 	u32 value;
 
         value = snd_ca0106_ptr_read(emu, SAMPLE_RATE_TRACKER_STATUS, 0);
@@ -291,17 +291,17 @@ static void snd_ca0106_proc_iec958(snd_info_entry_t *entry,
 	snd_iprintf(buffer, "\n");
 }
 
-static void snd_ca0106_proc_reg_write32(snd_info_entry_t *entry, 
-				       snd_info_buffer_t * buffer)
+static void snd_ca0106_proc_reg_write32(struct snd_info_entry *entry, 
+				       struct snd_info_buffer *buffer)
 {
-	ca0106_t *emu = entry->private_data;
+	struct snd_ca0106 *emu = entry->private_data;
 	unsigned long flags;
         char line[64];
         u32 reg, val;
         while (!snd_info_get_line(buffer, line, sizeof(line))) {
                 if (sscanf(line, "%x %x", &reg, &val) != 2)
                         continue;
-                if ((reg < 0x40) && (reg >=0) && (val <= 0xffffffff) ) {
+		if (reg < 0x40 && val <= 0xffffffff) {
 			spin_lock_irqsave(&emu->emu_lock, flags);
 			outl(val, emu->port + (reg & 0xfffffffc));
 			spin_unlock_irqrestore(&emu->emu_lock, flags);
@@ -309,10 +309,10 @@ static void snd_ca0106_proc_reg_write32(snd_info_entry_t *entry,
         }
 }
 
-static void snd_ca0106_proc_reg_read32(snd_info_entry_t *entry, 
-				       snd_info_buffer_t * buffer)
+static void snd_ca0106_proc_reg_read32(struct snd_info_entry *entry, 
+				       struct snd_info_buffer *buffer)
 {
-	ca0106_t *emu = entry->private_data;
+	struct snd_ca0106 *emu = entry->private_data;
 	unsigned long value;
 	unsigned long flags;
 	int i;
@@ -325,10 +325,10 @@ static void snd_ca0106_proc_reg_read32(snd_info_entry_t *entry,
 	}
 }
 
-static void snd_ca0106_proc_reg_read16(snd_info_entry_t *entry, 
-				       snd_info_buffer_t * buffer)
+static void snd_ca0106_proc_reg_read16(struct snd_info_entry *entry, 
+				       struct snd_info_buffer *buffer)
 {
-	ca0106_t *emu = entry->private_data;
+	struct snd_ca0106 *emu = entry->private_data;
         unsigned int value;
 	unsigned long flags;
 	int i;
@@ -341,10 +341,10 @@ static void snd_ca0106_proc_reg_read16(snd_info_entry_t *entry,
 	}
 }
 
-static void snd_ca0106_proc_reg_read8(snd_info_entry_t *entry, 
-				       snd_info_buffer_t * buffer)
+static void snd_ca0106_proc_reg_read8(struct snd_info_entry *entry, 
+				       struct snd_info_buffer *buffer)
 {
-	ca0106_t *emu = entry->private_data;
+	struct snd_ca0106 *emu = entry->private_data;
 	unsigned int value;
 	unsigned long flags;
 	int i;
@@ -357,10 +357,10 @@ static void snd_ca0106_proc_reg_read8(snd_info_entry_t *entry,
 	}
 }
 
-static void snd_ca0106_proc_reg_read1(snd_info_entry_t *entry, 
-				       snd_info_buffer_t * buffer)
+static void snd_ca0106_proc_reg_read1(struct snd_info_entry *entry, 
+				       struct snd_info_buffer *buffer)
 {
-	ca0106_t *emu = entry->private_data;
+	struct snd_ca0106 *emu = entry->private_data;
 	unsigned long value;
 	int i,j;
 
@@ -375,10 +375,10 @@ static void snd_ca0106_proc_reg_read1(snd_info_entry_t *entry,
 	}
 }
 
-static void snd_ca0106_proc_reg_read2(snd_info_entry_t *entry, 
-				       snd_info_buffer_t * buffer)
+static void snd_ca0106_proc_reg_read2(struct snd_info_entry *entry, 
+				       struct snd_info_buffer *buffer)
 {
-	ca0106_t *emu = entry->private_data;
+	struct snd_ca0106 *emu = entry->private_data;
 	unsigned long value;
 	int i,j;
 
@@ -393,44 +393,61 @@ static void snd_ca0106_proc_reg_read2(snd_info_entry_t *entry,
 	}
 }
 
-static void snd_ca0106_proc_reg_write(snd_info_entry_t *entry, 
-				       snd_info_buffer_t * buffer)
+static void snd_ca0106_proc_reg_write(struct snd_info_entry *entry, 
+				       struct snd_info_buffer *buffer)
 {
-	ca0106_t *emu = entry->private_data;
+	struct snd_ca0106 *emu = entry->private_data;
         char line[64];
         unsigned int reg, channel_id , val;
         while (!snd_info_get_line(buffer, line, sizeof(line))) {
                 if (sscanf(line, "%x %x %x", &reg, &channel_id, &val) != 3)
                         continue;
-                if ((reg < 0x80) && (reg >=0) && (val <= 0xffffffff) && (channel_id >=0) && (channel_id <= 3) )
+		if (reg < 0x80 && val <= 0xffffffff && channel_id <= 3)
                         snd_ca0106_ptr_write(emu, reg, channel_id, val);
         }
 }
 
-
-int __devinit snd_ca0106_proc_init(ca0106_t * emu)
+static void snd_ca0106_proc_i2c_write(struct snd_info_entry *entry, 
+				       struct snd_info_buffer *buffer)
 {
-	snd_info_entry_t *entry;
-	
-	if(! snd_card_proc_new(emu->card, "iec958", &entry))
-		snd_info_set_text_ops(entry, emu, 1024, snd_ca0106_proc_iec958);
-	if(! snd_card_proc_new(emu->card, "ca0106_reg32", &entry)) {
-		snd_info_set_text_ops(entry, emu, 1024, snd_ca0106_proc_reg_read32);
-		entry->c.text.write_size = 64;
-		entry->c.text.write = snd_ca0106_proc_reg_write32;
-	}
-	if(! snd_card_proc_new(emu->card, "ca0106_reg16", &entry))
-		snd_info_set_text_ops(entry, emu, 1024, snd_ca0106_proc_reg_read16);
-	if(! snd_card_proc_new(emu->card, "ca0106_reg8", &entry))
-		snd_info_set_text_ops(entry, emu, 1024, snd_ca0106_proc_reg_read8);
-	if(! snd_card_proc_new(emu->card, "ca0106_regs1", &entry)) {
-		snd_info_set_text_ops(entry, emu, 1024, snd_ca0106_proc_reg_read1);
-		entry->c.text.write_size = 64;
-		entry->c.text.write = snd_ca0106_proc_reg_write;
-//		entry->private_data = emu;
-	}
-	if(! snd_card_proc_new(emu->card, "ca0106_regs2", &entry)) 
-		snd_info_set_text_ops(entry, emu, 1024, snd_ca0106_proc_reg_read2);
-	return 0;
+	struct snd_ca0106 *emu = entry->private_data;
+        char line[64];
+        unsigned int reg, val;
+        while (!snd_info_get_line(buffer, line, sizeof(line))) {
+                if (sscanf(line, "%x %x", &reg, &val) != 2)
+                        continue;
+                if ((reg <= 0x7f) || (val <= 0x1ff)) {
+                        snd_ca0106_i2c_write(emu, reg, val);
+		}
+        }
 }
 
+int snd_ca0106_proc_init(struct snd_ca0106 *emu)
+{
+	struct snd_info_entry *entry;
+	
+	if(! snd_card_proc_new(emu->card, "iec958", &entry))
+		snd_info_set_text_ops(entry, emu, snd_ca0106_proc_iec958);
+	if(! snd_card_proc_new(emu->card, "ca0106_reg32", &entry)) {
+		snd_info_set_text_ops(entry, emu, snd_ca0106_proc_reg_read32);
+		entry->c.text.write = snd_ca0106_proc_reg_write32;
+		entry->mode |= S_IWUSR;
+	}
+	if(! snd_card_proc_new(emu->card, "ca0106_reg16", &entry))
+		snd_info_set_text_ops(entry, emu, snd_ca0106_proc_reg_read16);
+	if(! snd_card_proc_new(emu->card, "ca0106_reg8", &entry))
+		snd_info_set_text_ops(entry, emu, snd_ca0106_proc_reg_read8);
+	if(! snd_card_proc_new(emu->card, "ca0106_regs1", &entry)) {
+		snd_info_set_text_ops(entry, emu, snd_ca0106_proc_reg_read1);
+		entry->c.text.write = snd_ca0106_proc_reg_write;
+		entry->mode |= S_IWUSR;
+	}
+	if(! snd_card_proc_new(emu->card, "ca0106_i2c", &entry)) {
+		entry->c.text.write = snd_ca0106_proc_i2c_write;
+		entry->private_data = emu;
+		entry->mode |= S_IWUSR;
+	}
+	if(! snd_card_proc_new(emu->card, "ca0106_regs2", &entry)) 
+		snd_info_set_text_ops(entry, emu, snd_ca0106_proc_reg_read2);
+	return 0;
+}

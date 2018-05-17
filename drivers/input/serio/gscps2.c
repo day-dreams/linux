@@ -1,12 +1,12 @@
 /*
  * drivers/input/serio/gscps2.c
  *
- * Copyright (c) 2004 Helge Deller <deller@gmx.de>
+ * Copyright (c) 2004-2006 Helge Deller <deller@gmx.de>
  * Copyright (c) 2002 Laurent Canet <canetl@esiee.fr>
- * Copyright (c) 2002 Thibaut Varene <varenet@esiee.fr>
+ * Copyright (c) 2002 Thibaut Varene <varenet@parisc-linux.org>
  *
  * Pieces of code based on linux-2.4's hp_mouse.c & hp_keyb.c
- * 	Copyright (c) 1999 Alex deVries <alex@onefishtwo.ca>
+ *	Copyright (c) 1999 Alex deVries <alex@onefishtwo.ca>
  *	Copyright (c) 1999-2000 Philipp Rumpf <prumpf@tux.org>
  *	Copyright (c) 2000 Xavier Debacker <debackex@esiee.fr>
  *	Copyright (c) 2000-2001 Thomas Marteau <marteaut@esiee.fr>
@@ -22,25 +22,23 @@
  *                 was usable/enabled ?)
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/serio.h>
 #include <linux/input.h>
 #include <linux/interrupt.h>
 #include <linux/spinlock.h>
 #include <linux/delay.h>
 #include <linux/ioport.h>
-#include <linux/pci_ids.h>
 
 #include <asm/irq.h>
 #include <asm/io.h>
 #include <asm/parisc-device.h>
 
-MODULE_AUTHOR("Laurent Canet <canetl@esiee.fr>, Thibaut Varene <varenet@esiee.fr>, Helge Deller <deller@gmx.de>");
-MODULE_DESCRIPTION("HP GSC PS/2 port driver");
+MODULE_AUTHOR("Laurent Canet <canetl@esiee.fr>, Thibaut Varene <varenet@parisc-linux.org>, Helge Deller <deller@gmx.de>");
+MODULE_DESCRIPTION("HP GSC PS2 port driver");
 MODULE_LICENSE("GPL");
-MODULE_DEVICE_TABLE(parisc, gscps2_device_tbl);
 
 #define PFX "gscps2.c: "
 
@@ -83,7 +81,7 @@ MODULE_DEVICE_TABLE(parisc, gscps2_device_tbl);
 #define GSC_ID_MOUSE		1
 
 
-static irqreturn_t gscps2_interrupt(int irq, void *dev, struct pt_regs *regs);
+static irqreturn_t gscps2_interrupt(int irq, void *dev);
 
 #define BUFFER_SIZE 0x0f
 
@@ -142,7 +140,7 @@ static void gscps2_flush(struct gscps2port *ps2port)
 /*
  * gscps2_writeb_output() - write a byte to the port
  *
- * returns 1 on sucess, 0 on error
+ * returns 1 on success, 0 on error
  */
 
 static inline int gscps2_writeb_output(struct gscps2port *ps2port, u8 data)
@@ -167,7 +165,7 @@ static inline int gscps2_writeb_output(struct gscps2port *ps2port, u8 data)
 
 	/* make sure any received data is returned as fast as possible */
 	/* this is important e.g. when we set the LEDs on the keyboard */
-	gscps2_interrupt(0, NULL, NULL);
+	gscps2_interrupt(0, NULL);
 
 	return 1;
 }
@@ -211,9 +209,6 @@ static void gscps2_reset(struct gscps2port *ps2port)
 	writeb(0xff, addr+GSC_RESET);
 	gscps2_flush(ps2port);
 	spin_unlock_irqrestore(&ps2port->lock, flags);
-
-	/* enable it */
-	gscps2_enable(ps2port, ENABLE);
 }
 
 static LIST_HEAD(ps2port_list);
@@ -230,7 +225,7 @@ static LIST_HEAD(ps2port_list);
  * later.
  */
 
-static irqreturn_t gscps2_interrupt(int irq, void *dev, struct pt_regs *regs)
+static irqreturn_t gscps2_interrupt(int irq, void *dev)
 {
 	struct gscps2port *ps2port;
 
@@ -271,7 +266,7 @@ static irqreturn_t gscps2_interrupt(int irq, void *dev, struct pt_regs *regs)
 	    rxflags =	((status & GSC_STAT_TERR) ? SERIO_TIMEOUT : 0 ) |
 			((status & GSC_STAT_PERR) ? SERIO_PARITY  : 0 );
 
-	    serio_interrupt(ps2port->port, data, rxflags, regs);
+	    serio_interrupt(ps2port->port, data, rxflags);
 
 	  } /* while() */
 
@@ -307,7 +302,10 @@ static int gscps2_open(struct serio *port)
 
 	gscps2_reset(ps2port);
 
-	gscps2_interrupt(0, NULL, NULL);
+	/* enable it */
+	gscps2_enable(ps2port, ENABLE);
+
+	gscps2_interrupt(0, NULL);
 
 	return 0;
 }
@@ -331,7 +329,7 @@ static int __init gscps2_probe(struct parisc_device *dev)
 {
 	struct gscps2port *ps2port;
 	struct serio *serio;
-	unsigned long hpa = dev->hpa;
+	unsigned long hpa = dev->hpa.start;
 	int ret;
 
 	if (!dev->irq)
@@ -341,8 +339,8 @@ static int __init gscps2_probe(struct parisc_device *dev)
 	if (dev->id.sversion == 0x96)
 		hpa += GSC_DINO_OFFSET;
 
-	ps2port = kmalloc(sizeof(struct gscps2port), GFP_KERNEL);
-	serio = kmalloc(sizeof(struct serio), GFP_KERNEL);
+	ps2port = kzalloc(sizeof(struct gscps2port), GFP_KERNEL);
+	serio = kzalloc(sizeof(struct serio), GFP_KERNEL);
 	if (!ps2port || !serio) {
 		ret = -ENOMEM;
 		goto fail_nomem;
@@ -350,34 +348,26 @@ static int __init gscps2_probe(struct parisc_device *dev)
 
 	dev_set_drvdata(&dev->dev, ps2port);
 
-	memset(ps2port, 0, sizeof(struct gscps2port));
-	memset(serio, 0, sizeof(struct serio));
 	ps2port->port = serio;
 	ps2port->padev = dev;
-	ps2port->addr = ioremap(hpa, GSC_STATUS + 4);
+	ps2port->addr = ioremap_nocache(hpa, GSC_STATUS + 4);
 	spin_lock_init(&ps2port->lock);
 
 	gscps2_reset(ps2port);
 	ps2port->id = readb(ps2port->addr + GSC_ID) & 0x0f;
 
-	snprintf(serio->name, sizeof(serio->name), "GSC PS/2 %s",
+	snprintf(serio->name, sizeof(serio->name), "gsc-ps2-%s",
 		 (ps2port->id == GSC_ID_KEYBOARD) ? "keyboard" : "mouse");
-	strlcpy(serio->phys, dev->dev.bus_id, sizeof(serio->phys));
-	serio->idbus		= BUS_GSC;
-	serio->idvendor		= PCI_VENDOR_ID_HP;
-	serio->idproduct	= 0x0001;
-	serio->idversion	= 0x0010;
-	serio->type		= SERIO_8042;
+	strlcpy(serio->phys, dev_name(&dev->dev), sizeof(serio->phys));
+	serio->id.type		= SERIO_8042;
 	serio->write		= gscps2_write;
 	serio->open		= gscps2_open;
 	serio->close		= gscps2_close;
 	serio->port_data	= ps2port;
 	serio->dev.parent	= &dev->dev;
 
-	list_add_tail(&ps2port->node, &ps2port_list);
-
 	ret = -EBUSY;
-	if (request_irq(dev->irq, gscps2_interrupt, SA_SHIRQ, ps2port->port->name, ps2port))
+	if (request_irq(dev->irq, gscps2_interrupt, IRQF_SHARED, ps2port->port->name, ps2port))
 		goto fail_miserably;
 
 	if (ps2port->id != GSC_ID_KEYBOARD && ps2port->id != GSC_ID_MOUSE) {
@@ -400,15 +390,16 @@ static int __init gscps2_probe(struct parisc_device *dev)
 
 	serio_register_port(ps2port->port);
 
+	list_add_tail(&ps2port->node, &ps2port_list);
+
 	return 0;
 
 fail:
 	free_irq(dev->irq, ps2port);
 
 fail_miserably:
-	list_del(&ps2port->node);
 	iounmap(ps2port->addr);
-	release_mem_region(dev->hpa, GSC_STATUS + 4);
+	release_mem_region(dev->hpa.start, GSC_STATUS + 4);
 
 fail_nomem:
 	kfree(ps2port);
@@ -421,7 +412,7 @@ fail_nomem:
  * @return: success/error report
  */
 
-static int __devexit gscps2_remove(struct parisc_device *dev)
+static int __exit gscps2_remove(struct parisc_device *dev)
 {
 	struct gscps2port *ps2port = dev_get_drvdata(&dev->dev);
 
@@ -439,19 +430,20 @@ static int __devexit gscps2_remove(struct parisc_device *dev)
 }
 
 
-static struct parisc_device_id gscps2_device_tbl[] = {
+static const struct parisc_device_id gscps2_device_tbl[] __initconst = {
 	{ HPHW_FIO, HVERSION_REV_ANY_ID, HVERSION_ANY_ID, 0x00084 }, /* LASI PS/2 */
 #ifdef DINO_TESTED
 	{ HPHW_FIO, HVERSION_REV_ANY_ID, HVERSION_ANY_ID, 0x00096 }, /* DINO PS/2 */
 #endif
 	{ 0, }	/* 0 terminated list */
 };
+MODULE_DEVICE_TABLE(parisc, gscps2_device_tbl);
 
-static struct parisc_driver parisc_ps2_driver = {
-	.name		= "GSC PS/2",
+static struct parisc_driver parisc_ps2_driver __refdata = {
+	.name		= "gsc_ps2",
 	.id_table	= gscps2_device_tbl,
 	.probe		= gscps2_probe,
-	.remove		= gscps2_remove,
+	.remove		= __exit_p(gscps2_remove),
 };
 
 static int __init gscps2_init(void)

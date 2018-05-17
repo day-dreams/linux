@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/arch/alpha/kernel/err_common.c
  *
@@ -7,7 +8,6 @@
  */
 
 #include <linux/init.h>
-#include <linux/pci.h>
 #include <linux/sched.h>
 
 #include <asm/io.h>

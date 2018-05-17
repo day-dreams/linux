@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * INET		An implementation of the TCP/IP protocol suite for the LINUX
  *		operating system.  INET is implemented using the  BSD Socket
@@ -5,15 +6,18 @@
  *
  *		The options processing module for ip.c
  *
- * Version:	$Id: ip_options.c,v 1.21 2001/09/01 00:31:50 davem Exp $
- *
  * Authors:	A.N.Kuznetsov
- *		
+ *
  */
 
+#define pr_fmt(fmt) "IPv4: " fmt
+
+#include <linux/capability.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/types.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
+#include <asm/unaligned.h>
 #include <linux/skbuff.h>
 #include <linux/ip.h>
 #include <linux/icmp.h>
@@ -22,8 +26,11 @@
 #include <net/sock.h>
 #include <net/ip.h>
 #include <net/icmp.h>
+#include <net/route.h>
+#include <net/cipso_ipv4.h>
+#include <net/ip_fib.h>
 
-/* 
+/*
  * Write options to IP header, record destination address to
  * source route option, address of outgoing interface
  * (we should already know it, so that this  function is allowed be
@@ -34,29 +41,27 @@
  * saddr is address of outgoing interface.
  */
 
-void ip_options_build(struct sk_buff * skb, struct ip_options * opt,
-			    u32 daddr, struct rtable *rt, int is_frag) 
+void ip_options_build(struct sk_buff *skb, struct ip_options *opt,
+		      __be32 daddr, struct rtable *rt, int is_frag)
 {
-	unsigned char * iph = skb->nh.raw;
+	unsigned char *iph = skb_network_header(skb);
 
 	memcpy(&(IPCB(skb)->opt), opt, sizeof(struct ip_options));
 	memcpy(iph+sizeof(struct iphdr), opt->__data, opt->optlen);
 	opt = &(IPCB(skb)->opt);
-	opt->is_data = 0;
 
 	if (opt->srr)
 		memcpy(iph+opt->srr+iph[opt->srr+1]-4, &daddr, 4);
 
 	if (!is_frag) {
 		if (opt->rr_needaddr)
-			ip_rt_get_source(iph+opt->rr+iph[opt->rr+2]-5, rt);
+			ip_rt_get_source(iph+opt->rr+iph[opt->rr+2]-5, skb, rt);
 		if (opt->ts_needaddr)
-			ip_rt_get_source(iph+opt->ts+iph[opt->ts+2]-9, rt);
+			ip_rt_get_source(iph+opt->ts+iph[opt->ts+2]-9, skb, rt);
 		if (opt->ts_needtime) {
-			struct timeval tv;
-			__u32 midtime;
-			do_gettimeofday(&tv);
-			midtime = htonl((tv.tv_sec % 86400) * 1000 + tv.tv_usec / 1000);
+			__be32 midtime;
+
+			midtime = inet_current_timestamp();
 			memcpy(iph+opt->ts+iph[opt->ts+2]-5, &midtime, 4);
 		}
 		return;
@@ -73,7 +78,7 @@ void ip_options_build(struct sk_buff * skb, struct ip_options * opt,
 	}
 }
 
-/* 
+/*
  * Provided (sopt, skb) points to received options,
  * build in dopt compiled option set appropriate for answering.
  * i.e. invert SRR option, copy anothers,
@@ -82,32 +87,20 @@ void ip_options_build(struct sk_buff * skb, struct ip_options * opt,
  * NOTE: dopt cannot point to skb.
  */
 
-int ip_options_echo(struct ip_options * dopt, struct sk_buff * skb) 
+int __ip_options_echo(struct net *net, struct ip_options *dopt,
+		      struct sk_buff *skb, const struct ip_options *sopt)
 {
-	struct ip_options *sopt;
 	unsigned char *sptr, *dptr;
 	int soffset, doffset;
 	int	optlen;
-	u32	daddr;
 
 	memset(dopt, 0, sizeof(struct ip_options));
 
-	dopt->is_data = 1;
-
-	sopt = &(IPCB(skb)->opt);
-
-	if (sopt->optlen == 0) {
-		dopt->optlen = 0;
+	if (sopt->optlen == 0)
 		return 0;
-	}
 
-	sptr = skb->nh.raw;
+	sptr = skb_network_header(skb);
 	dptr = dopt->__data;
-
-	if (skb->dst)
-		daddr = ((struct rtable*)skb->dst)->rt_spec_dst;
-	else
-		daddr = skb->nh.iph->daddr;
 
 	if (sopt->rr) {
 		optlen  = sptr[sopt->rr+1];
@@ -144,11 +137,11 @@ int ip_options_echo(struct ip_options * dopt, struct sk_buff * skb)
 				} else {
 					dopt->ts_needtime = 0;
 
-					if (soffset + 8 <= optlen) {
-						__u32 addr;
+					if (soffset + 7 <= optlen) {
+						__be32 addr;
 
-						memcpy(&addr, sptr+soffset-1, 4);
-						if (inet_addr_type(addr) != RTN_LOCAL) {
+						memcpy(&addr, dptr+soffset-1, 4);
+						if (inet_addr_type(net, addr) != RTN_UNICAST) {
 							dopt->ts_needtime = 1;
 							soffset += 8;
 						}
@@ -161,8 +154,8 @@ int ip_options_echo(struct ip_options * dopt, struct sk_buff * skb)
 		dopt->optlen += optlen;
 	}
 	if (sopt->srr) {
-		unsigned char * start = sptr+sopt->srr;
-		u32 faddr;
+		unsigned char *start = sptr+sopt->srr;
+		__be32 faddr;
 
 		optlen  = start[1];
 		soffset = start[2];
@@ -172,16 +165,16 @@ int ip_options_echo(struct ip_options * dopt, struct sk_buff * skb)
 		soffset -= 4;
 		if (soffset > 3) {
 			memcpy(&faddr, &start[soffset-1], 4);
-			for (soffset-=4, doffset=4; soffset > 3; soffset-=4, doffset+=4)
+			for (soffset -= 4, doffset = 4; soffset > 3; soffset -= 4, doffset += 4)
 				memcpy(&dptr[doffset-1], &start[soffset-1], 4);
 			/*
 			 * RFC1812 requires to fix illegal source routes.
 			 */
-			if (memcmp(&skb->nh.iph->saddr, &start[soffset+3], 4) == 0)
+			if (memcmp(&ip_hdr(skb)->saddr,
+				   &start[soffset + 3], 4) == 0)
 				doffset -= 4;
 		}
 		if (doffset > 3) {
-			memcpy(&start[doffset-1], &daddr, 4);
 			dopt->faddr = faddr;
 			dptr[0] = start[0];
 			dptr[1] = doffset+3;
@@ -191,6 +184,13 @@ int ip_options_echo(struct ip_options * dopt, struct sk_buff * skb)
 			dopt->optlen += doffset+3;
 			dopt->is_strictroute = sopt->is_strictroute;
 		}
+	}
+	if (sopt->cipso) {
+		optlen  = sptr[sopt->cipso+1];
+		dopt->cipso = dopt->optlen+sizeof(struct iphdr);
+		memcpy(dptr, sptr+sopt->cipso, optlen);
+		dptr += optlen;
+		dopt->optlen += optlen;
 	}
 	while (dopt->optlen & 3) {
 		*dptr++ = IPOPT_END;
@@ -205,10 +205,10 @@ int ip_options_echo(struct ip_options * dopt, struct sk_buff * skb)
  *	Simple and stupid 8), but the most efficient way.
  */
 
-void ip_options_fragment(struct sk_buff * skb) 
+void ip_options_fragment(struct sk_buff *skb)
 {
-	unsigned char * optptr = skb->nh.raw;
-	struct ip_options * opt = &(IPCB(skb)->opt);
+	unsigned char *optptr = skb_network_header(skb) + sizeof(struct iphdr);
+	struct ip_options *opt = &(IPCB(skb)->opt);
 	int  l = opt->optlen;
 	int  optlen;
 
@@ -222,7 +222,7 @@ void ip_options_fragment(struct sk_buff * skb)
 			continue;
 		}
 		optlen = optptr[1];
-		if (optlen<2 || optlen>l)
+		if (optlen < 2 || optlen > l)
 		  return;
 		if (!IPOPT_COPIED(*optptr))
 			memset(optptr, IPOPT_NOOP, optlen);
@@ -234,7 +234,15 @@ void ip_options_fragment(struct sk_buff * skb)
 	opt->rr_needaddr = 0;
 	opt->ts_needaddr = 0;
 	opt->ts_needtime = 0;
-	return;
+}
+
+/* helper used by ip_options_compile() to call fib_compute_spec_dst()
+ * at most one time.
+ */
+static void spec_dst_fill(__be32 *spec_dst, struct sk_buff *skb)
+{
+	if (*spec_dst == htonl(INADDR_ANY))
+		*spec_dst = fib_compute_spec_dst(skb);
 }
 
 /*
@@ -243,50 +251,50 @@ void ip_options_fragment(struct sk_buff * skb)
  * If opt == NULL, then skb->data should point to IP header.
  */
 
-int ip_options_compile(struct ip_options * opt, struct sk_buff * skb)
+int ip_options_compile(struct net *net,
+		       struct ip_options *opt, struct sk_buff *skb)
 {
-	int l;
-	unsigned char * iph;
-	unsigned char * optptr;
-	int optlen;
-	unsigned char * pp_ptr = NULL;
-	struct rtable *rt = skb ? (struct rtable*)skb->dst : NULL;
+	__be32 spec_dst = htonl(INADDR_ANY);
+	unsigned char *pp_ptr = NULL;
+	struct rtable *rt = NULL;
+	unsigned char *optptr;
+	unsigned char *iph;
+	int optlen, l;
 
-	if (!opt) {
-		opt = &(IPCB(skb)->opt);
-		memset(opt, 0, sizeof(struct ip_options));
-		iph = skb->nh.raw;
-		opt->optlen = ((struct iphdr *)iph)->ihl*4 - sizeof(struct iphdr);
-		optptr = iph + sizeof(struct iphdr);
-		opt->is_data = 0;
-	} else {
-		optptr = opt->is_data ? opt->__data : (unsigned char*)&(skb->nh.iph[1]);
-		iph = optptr - sizeof(struct iphdr);
-	}
+	if (skb) {
+		rt = skb_rtable(skb);
+		optptr = (unsigned char *)&(ip_hdr(skb)[1]);
+	} else
+		optptr = opt->__data;
+	iph = optptr - sizeof(struct iphdr);
 
 	for (l = opt->optlen; l > 0; ) {
 		switch (*optptr) {
-		      case IPOPT_END:
-			for (optptr++, l--; l>0; optptr++, l--) {
+		case IPOPT_END:
+			for (optptr++, l--; l > 0; optptr++, l--) {
 				if (*optptr != IPOPT_END) {
 					*optptr = IPOPT_END;
 					opt->is_changed = 1;
 				}
 			}
 			goto eol;
-		      case IPOPT_NOOP:
+		case IPOPT_NOOP:
 			l--;
 			optptr++;
 			continue;
 		}
+		if (unlikely(l < 2)) {
+			pp_ptr = optptr;
+			goto error;
+		}
 		optlen = optptr[1];
-		if (optlen<2 || optlen>l) {
+		if (optlen < 2 || optlen > l) {
 			pp_ptr = optptr;
 			goto error;
 		}
 		switch (*optptr) {
-		      case IPOPT_SSRR:
-		      case IPOPT_LSRR:
+		case IPOPT_SSRR:
+		case IPOPT_LSRR:
 			if (optlen < 3) {
 				pp_ptr = optptr + 1;
 				goto error;
@@ -312,7 +320,7 @@ int ip_options_compile(struct ip_options * opt, struct sk_buff * skb)
 			opt->is_strictroute = (optptr[0] == IPOPT_SSRR);
 			opt->srr = optptr - iph;
 			break;
-		      case IPOPT_RR:
+		case IPOPT_RR:
 			if (opt->rr) {
 				pp_ptr = optptr;
 				goto error;
@@ -330,8 +338,9 @@ int ip_options_compile(struct ip_options * opt, struct sk_buff * skb)
 					pp_ptr = optptr + 2;
 					goto error;
 				}
-				if (skb) {
-					memcpy(&optptr[optptr[2]-1], &rt->rt_spec_dst, 4);
+				if (rt) {
+					spec_dst_fill(&spec_dst, skb);
+					memcpy(&optptr[optptr[2]-1], &spec_dst, 4);
 					opt->is_changed = 1;
 				}
 				optptr[2] += 4;
@@ -339,7 +348,7 @@ int ip_options_compile(struct ip_options * opt, struct sk_buff * skb)
 			}
 			opt->rr = optptr - iph;
 			break;
-		      case IPOPT_TIMESTAMP:
+		case IPOPT_TIMESTAMP:
 			if (opt->ts) {
 				pp_ptr = optptr;
 				goto error;
@@ -353,79 +362,76 @@ int ip_options_compile(struct ip_options * opt, struct sk_buff * skb)
 				goto error;
 			}
 			if (optptr[2] <= optlen) {
-				__u32 * timeptr = NULL;
-				if (optptr[2]+3 > optptr[1]) {
+				unsigned char *timeptr = NULL;
+				if (optptr[2]+3 > optlen) {
 					pp_ptr = optptr + 2;
 					goto error;
 				}
 				switch (optptr[3]&0xF) {
-				      case IPOPT_TS_TSONLY:
-					opt->ts = optptr - iph;
-					if (skb) 
-						timeptr = (__u32*)&optptr[optptr[2]-1];
+				case IPOPT_TS_TSONLY:
+					if (skb)
+						timeptr = &optptr[optptr[2]-1];
 					opt->ts_needtime = 1;
 					optptr[2] += 4;
 					break;
-				      case IPOPT_TS_TSANDADDR:
-					if (optptr[2]+7 > optptr[1]) {
+				case IPOPT_TS_TSANDADDR:
+					if (optptr[2]+7 > optlen) {
 						pp_ptr = optptr + 2;
 						goto error;
 					}
-					opt->ts = optptr - iph;
-					if (skb) {
-						memcpy(&optptr[optptr[2]-1], &rt->rt_spec_dst, 4);
-						timeptr = (__u32*)&optptr[optptr[2]+3];
+					if (rt)  {
+						spec_dst_fill(&spec_dst, skb);
+						memcpy(&optptr[optptr[2]-1], &spec_dst, 4);
+						timeptr = &optptr[optptr[2]+3];
 					}
 					opt->ts_needaddr = 1;
 					opt->ts_needtime = 1;
 					optptr[2] += 8;
 					break;
-				      case IPOPT_TS_PRESPEC:
-					if (optptr[2]+7 > optptr[1]) {
+				case IPOPT_TS_PRESPEC:
+					if (optptr[2]+7 > optlen) {
 						pp_ptr = optptr + 2;
 						goto error;
 					}
-					opt->ts = optptr - iph;
 					{
-						u32 addr;
+						__be32 addr;
 						memcpy(&addr, &optptr[optptr[2]-1], 4);
-						if (inet_addr_type(addr) == RTN_UNICAST)
+						if (inet_addr_type(net, addr) == RTN_UNICAST)
 							break;
 						if (skb)
-							timeptr = (__u32*)&optptr[optptr[2]+3];
+							timeptr = &optptr[optptr[2]+3];
 					}
 					opt->ts_needtime = 1;
 					optptr[2] += 8;
 					break;
-				      default:
-					if (!skb && !capable(CAP_NET_RAW)) {
+				default:
+					if (!skb && !ns_capable(net->user_ns, CAP_NET_RAW)) {
 						pp_ptr = optptr + 3;
 						goto error;
 					}
 					break;
 				}
 				if (timeptr) {
-					struct timeval tv;
-					__u32  midtime;
-					do_gettimeofday(&tv);
-					midtime = htonl((tv.tv_sec % 86400) * 1000 + tv.tv_usec / 1000);
-					memcpy(timeptr, &midtime, sizeof(__u32));
+					__be32 midtime;
+
+					midtime = inet_current_timestamp();
+					memcpy(timeptr, &midtime, 4);
 					opt->is_changed = 1;
 				}
-			} else {
-				unsigned overflow = optptr[3]>>4;
+			} else if ((optptr[3]&0xF) != IPOPT_TS_PRESPEC) {
+				unsigned int overflow = optptr[3]>>4;
 				if (overflow == 15) {
 					pp_ptr = optptr + 3;
 					goto error;
 				}
-				opt->ts = optptr - iph;
 				if (skb) {
 					optptr[3] = (optptr[3]&0xF)|((overflow+1)<<4);
 					opt->is_changed = 1;
 				}
 			}
+			opt->ts = optptr - iph;
 			break;
-		      case IPOPT_RA:
+		case IPOPT_RA:
 			if (optlen < 4) {
 				pp_ptr = optptr + 1;
 				goto error;
@@ -433,10 +439,21 @@ int ip_options_compile(struct ip_options * opt, struct sk_buff * skb)
 			if (optptr[2] == 0 && optptr[3] == 0)
 				opt->router_alert = optptr - iph;
 			break;
-		      case IPOPT_SEC:
-		      case IPOPT_SID:
-		      default:
-			if (!skb && !capable(CAP_NET_RAW)) {
+		case IPOPT_CIPSO:
+			if ((!skb && !ns_capable(net->user_ns, CAP_NET_RAW)) || opt->cipso) {
+				pp_ptr = optptr;
+				goto error;
+			}
+			opt->cipso = optptr - iph;
+			if (cipso_v4_validate(skb, &optptr)) {
+				pp_ptr = optptr;
+				goto error;
+			}
+			break;
+		case IPOPT_SEC:
+		case IPOPT_SID:
+		default:
+			if (!skb && !ns_capable(net->user_ns, CAP_NET_RAW)) {
 				pp_ptr = optptr;
 				goto error;
 			}
@@ -456,26 +473,26 @@ error:
 	}
 	return -EINVAL;
 }
-
+EXPORT_SYMBOL(ip_options_compile);
 
 /*
  *	Undo all the changes done by ip_options_compile().
  */
 
-void ip_options_undo(struct ip_options * opt)
+void ip_options_undo(struct ip_options *opt)
 {
 	if (opt->srr) {
-		unsigned  char * optptr = opt->__data+opt->srr-sizeof(struct  iphdr);
+		unsigned  char *optptr = opt->__data+opt->srr-sizeof(struct  iphdr);
 		memmove(optptr+7, optptr+3, optptr[1]-7);
 		memcpy(optptr+3, &opt->faddr, 4);
 	}
 	if (opt->rr_needaddr) {
-		unsigned  char * optptr = opt->__data+opt->rr-sizeof(struct  iphdr);
+		unsigned  char *optptr = opt->__data+opt->rr-sizeof(struct  iphdr);
 		optptr[2] -= 4;
 		memset(&optptr[optptr[2]-1], 0, 4);
 	}
 	if (opt->ts) {
-		unsigned  char * optptr = opt->__data+opt->ts-sizeof(struct  iphdr);
+		unsigned  char *optptr = opt->__data+opt->ts-sizeof(struct  iphdr);
 		if (opt->ts_needtime) {
 			optptr[2] -= 4;
 			memset(&optptr[optptr[2]-1], 0, 4);
@@ -489,48 +506,63 @@ void ip_options_undo(struct ip_options * opt)
 	}
 }
 
-int ip_options_get(struct ip_options **optp, unsigned char *data, int optlen, int user)
+static struct ip_options_rcu *ip_options_get_alloc(const int optlen)
 {
-	struct ip_options *opt;
+	return kzalloc(sizeof(struct ip_options_rcu) + ((optlen + 3) & ~3),
+		       GFP_KERNEL);
+}
 
-	opt = kmalloc(sizeof(struct ip_options)+((optlen+3)&~3), GFP_KERNEL);
-	if (!opt)
-		return -ENOMEM;
-	memset(opt, 0, sizeof(struct ip_options));
-	if (optlen) {
-		if (user) {
-			if (copy_from_user(opt->__data, data, optlen)) {
-				kfree(opt);
-				return -EFAULT;
-			}
-		} else
-			memcpy(opt->__data, data, optlen);
-	}
+static int ip_options_get_finish(struct net *net, struct ip_options_rcu **optp,
+				 struct ip_options_rcu *opt, int optlen)
+{
 	while (optlen & 3)
-		opt->__data[optlen++] = IPOPT_END;
-	opt->optlen = optlen;
-	opt->is_data = 1;
-	opt->is_setbyuser = 1;
-	if (optlen && ip_options_compile(opt, NULL)) {
+		opt->opt.__data[optlen++] = IPOPT_END;
+	opt->opt.optlen = optlen;
+	if (optlen && ip_options_compile(net, &opt->opt, NULL)) {
 		kfree(opt);
 		return -EINVAL;
 	}
-	if (*optp)
-		kfree(*optp);
+	kfree(*optp);
 	*optp = opt;
 	return 0;
 }
 
+int ip_options_get_from_user(struct net *net, struct ip_options_rcu **optp,
+			     unsigned char __user *data, int optlen)
+{
+	struct ip_options_rcu *opt = ip_options_get_alloc(optlen);
+
+	if (!opt)
+		return -ENOMEM;
+	if (optlen && copy_from_user(opt->opt.__data, data, optlen)) {
+		kfree(opt);
+		return -EFAULT;
+	}
+	return ip_options_get_finish(net, optp, opt, optlen);
+}
+
+int ip_options_get(struct net *net, struct ip_options_rcu **optp,
+		   unsigned char *data, int optlen)
+{
+	struct ip_options_rcu *opt = ip_options_get_alloc(optlen);
+
+	if (!opt)
+		return -ENOMEM;
+	if (optlen)
+		memcpy(opt->opt.__data, data, optlen);
+	return ip_options_get_finish(net, optp, opt, optlen);
+}
+
 void ip_forward_options(struct sk_buff *skb)
 {
-	struct   ip_options * opt	= &(IPCB(skb)->opt);
-	unsigned char * optptr;
-	struct rtable *rt = (struct rtable*)skb->dst;
-	unsigned char *raw = skb->nh.raw;
+	struct   ip_options *opt	= &(IPCB(skb)->opt);
+	unsigned char *optptr;
+	struct rtable *rt = skb_rtable(skb);
+	unsigned char *raw = skb_network_header(skb);
 
 	if (opt->rr_needaddr) {
 		optptr = (unsigned char *)raw + opt->rr;
-		ip_rt_get_source(&optptr[optptr[2]-5], rt);
+		ip_rt_get_source(&optptr[optptr[2]-5], skb, rt);
 		opt->is_changed = 1;
 	}
 	if (opt->srr_is_hit) {
@@ -538,31 +570,33 @@ void ip_forward_options(struct sk_buff *skb)
 
 		optptr = raw + opt->srr;
 
-		for ( srrptr=optptr[2], srrspace = optptr[1];
+		for ( srrptr = optptr[2], srrspace = optptr[1];
 		     srrptr <= srrspace;
 		     srrptr += 4
 		     ) {
 			if (srrptr + 3 > srrspace)
 				break;
-			if (memcmp(&rt->rt_dst, &optptr[srrptr-1], 4) == 0)
+			if (memcmp(&opt->nexthop, &optptr[srrptr-1], 4) == 0)
 				break;
 		}
 		if (srrptr + 3 <= srrspace) {
 			opt->is_changed = 1;
-			ip_rt_get_source(&optptr[srrptr-1], rt);
-			skb->nh.iph->daddr = rt->rt_dst;
+			ip_hdr(skb)->daddr = opt->nexthop;
+			ip_rt_get_source(&optptr[srrptr-1], skb, rt);
 			optptr[2] = srrptr+4;
-		} else if (net_ratelimit())
-			printk(KERN_CRIT "ip_forward(): Argh! Destination lost!\n");
+		} else {
+			net_crit_ratelimited("%s(): Argh! Destination lost!\n",
+					     __func__);
+		}
 		if (opt->ts_needaddr) {
 			optptr = raw + opt->ts;
-			ip_rt_get_source(&optptr[optptr[2]-9], rt);
+			ip_rt_get_source(&optptr[optptr[2]-9], skb, rt);
 			opt->is_changed = 1;
 		}
 	}
 	if (opt->is_changed) {
 		opt->is_changed = 0;
-		ip_send_check(skb->nh.iph);
+		ip_send_check(ip_hdr(skb));
 	}
 }
 
@@ -570,14 +604,15 @@ int ip_options_rcv_srr(struct sk_buff *skb)
 {
 	struct ip_options *opt = &(IPCB(skb)->opt);
 	int srrspace, srrptr;
-	u32 nexthop;
-	struct iphdr *iph = skb->nh.iph;
-	unsigned char * optptr = skb->nh.raw + opt->srr;
-	struct rtable *rt = (struct rtable*)skb->dst;
+	__be32 nexthop;
+	struct iphdr *iph = ip_hdr(skb);
+	unsigned char *optptr = skb_network_header(skb) + opt->srr;
+	struct rtable *rt = skb_rtable(skb);
 	struct rtable *rt2;
+	unsigned long orefdst;
 	int err;
 
-	if (!opt->srr)
+	if (!rt)
 		return 0;
 
 	if (skb->pkt_type != PACKET_HOST)
@@ -591,35 +626,34 @@ int ip_options_rcv_srr(struct sk_buff *skb)
 	if (rt->rt_type != RTN_LOCAL)
 		return -EINVAL;
 
-	for (srrptr=optptr[2], srrspace = optptr[1]; srrptr <= srrspace; srrptr += 4) {
+	for (srrptr = optptr[2], srrspace = optptr[1]; srrptr <= srrspace; srrptr += 4) {
 		if (srrptr + 3 > srrspace) {
 			icmp_send(skb, ICMP_PARAMETERPROB, 0, htonl((opt->srr+2)<<24));
 			return -EINVAL;
 		}
 		memcpy(&nexthop, &optptr[srrptr-1], 4);
 
-		rt = (struct rtable*)skb->dst;
-		skb->dst = NULL;
+		orefdst = skb->_skb_refdst;
+		skb_dst_set(skb, NULL);
 		err = ip_route_input(skb, nexthop, iph->saddr, iph->tos, skb->dev);
-		rt2 = (struct rtable*)skb->dst;
+		rt2 = skb_rtable(skb);
 		if (err || (rt2->rt_type != RTN_UNICAST && rt2->rt_type != RTN_LOCAL)) {
-			ip_rt_put(rt2);
-			skb->dst = &rt->u.dst;
+			skb_dst_drop(skb);
+			skb->_skb_refdst = orefdst;
 			return -EINVAL;
 		}
-		ip_rt_put(rt);
+		refdst_drop(orefdst);
 		if (rt2->rt_type != RTN_LOCAL)
 			break;
 		/* Superfast 8) loopback forward */
-		memcpy(&iph->daddr, &optptr[srrptr-1], 4);
+		iph->daddr = nexthop;
 		opt->is_changed = 1;
 	}
 	if (srrptr <= srrspace) {
 		opt->srr_is_hit = 1;
+		opt->nexthop = nexthop;
 		opt->is_changed = 1;
 	}
 	return 0;
 }
-
-EXPORT_SYMBOL(ip_options_compile);
-EXPORT_SYMBOL(ip_options_undo);
+EXPORT_SYMBOL(ip_options_rcv_srr);

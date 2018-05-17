@@ -1,9 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- *  arch/s390/kernel/time.c
  *    Time of day based timer functions.
  *
  *  S390 version
- *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
+ *    Copyright IBM Corp. 1999, 2008
  *    Author(s): Hartmut Penner (hp@de.ibm.com),
  *               Martin Schwidefsky (schwidefsky@de.ibm.com),
  *               Denis Joseph Barrow (djbarrow@de.ibm.com,barrow_dj@yahoo.com)
@@ -12,16 +12,23 @@
  *    Copyright (C) 1991, 1992, 1995  Linus Torvalds
  */
 
-#include <linux/config.h>
+#define KMSG_COMPONENT "time"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
+#include <linux/kernel_stat.h>
 #include <linux/errno.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/sched.h>
+#include <linux/sched/clock.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
+#include <linux/cpu.h>
+#include <linux/stop_machine.h>
 #include <linux/time.h>
+#include <linux/device.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/smp.h>
@@ -29,294 +36,286 @@
 #include <linux/profile.h>
 #include <linux/timex.h>
 #include <linux/notifier.h>
-
-#include <asm/uaccess.h>
+#include <linux/timekeeper_internal.h>
+#include <linux/clockchips.h>
+#include <linux/gfp.h>
+#include <linux/kprobes.h>
+#include <linux/uaccess.h>
+#include <asm/facility.h>
 #include <asm/delay.h>
-#include <asm/s390_ext.h>
 #include <asm/div64.h>
+#include <asm/vdso.h>
 #include <asm/irq.h>
-#include <asm/timer.h>
+#include <asm/irq_regs.h>
+#include <asm/vtimer.h>
+#include <asm/stp.h>
+#include <asm/cio.h>
+#include "entry.h"
 
-/* change this if you have some constant time drift */
-#define USECS_PER_JIFFY     ((unsigned long) 1000000/HZ)
-#define CLK_TICKS_PER_JIFFY ((unsigned long) USECS_PER_JIFFY << 12)
+unsigned char tod_clock_base[16] __aligned(8) = {
+	/* Force to data section. */
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
+EXPORT_SYMBOL_GPL(tod_clock_base);
+
+u64 clock_comparator_max = -1ULL;
+EXPORT_SYMBOL_GPL(clock_comparator_max);
+
+static DEFINE_PER_CPU(struct clock_event_device, comparators);
+
+ATOMIC_NOTIFIER_HEAD(s390_epoch_delta_notifier);
+EXPORT_SYMBOL(s390_epoch_delta_notifier);
+
+unsigned char ptff_function_mask[16];
+
+static unsigned long long lpar_offset;
+static unsigned long long initial_leap_seconds;
+static unsigned long long tod_steering_end;
+static long long tod_steering_delta;
 
 /*
- * Create a small time difference between the timer interrupts
- * on the different cpus to avoid lock contention.
+ * Get time offsets with PTFF
  */
-#define CPU_DEVIATION       (smp_processor_id() << 12)
+void __init time_early_init(void)
+{
+	struct ptff_qto qto;
+	struct ptff_qui qui;
 
-#define TICK_SIZE tick
+	/* Initialize TOD steering parameters */
+	tod_steering_end = *(unsigned long long *) &tod_clock_base[1];
+	vdso_data->ts_end = tod_steering_end;
 
-u64 jiffies_64 = INITIAL_JIFFIES;
+	if (!test_facility(28))
+		return;
 
-EXPORT_SYMBOL(jiffies_64);
+	ptff(&ptff_function_mask, sizeof(ptff_function_mask), PTFF_QAF);
 
-static ext_int_info_t ext_int_info_cc;
-static u64 init_timer_cc;
-static u64 jiffies_timer_cc;
-static u64 xtime_cc;
+	/* get LPAR offset */
+	if (ptff_query(PTFF_QTO) && ptff(&qto, sizeof(qto), PTFF_QTO) == 0)
+		lpar_offset = qto.tod_epoch_difference;
 
-extern unsigned long wall_jiffies;
+	/* get initial leap seconds */
+	if (ptff_query(PTFF_QUI) && ptff(&qui, sizeof(qui), PTFF_QUI) == 0)
+		initial_leap_seconds = (unsigned long long)
+			((long) qui.old_leap * 4096000000L);
+}
 
 /*
  * Scheduler clock - returns current time in nanosec units.
  */
-unsigned long long sched_clock(void)
+unsigned long long notrace sched_clock(void)
 {
-	return ((get_clock() - jiffies_timer_cc) * 1000) >> 12;
+	return tod_to_ns(get_tod_clock_monotonic());
 }
-
-void tod_to_timeval(__u64 todval, struct timespec *xtime)
-{
-	unsigned long long sec;
-
-	sec = todval >> 12;
-	do_div(sec, 1000000);
-	xtime->tv_sec = sec;
-	todval -= (sec * 1000000) << 12;
-	xtime->tv_nsec = ((todval * 1000) >> 12);
-}
-
-static inline unsigned long do_gettimeoffset(void) 
-{
-	__u64 now;
-
-        now = (get_clock() - jiffies_timer_cc) >> 12;
-	/* We require the offset from the latest update of xtime */
-	now -= (__u64) wall_jiffies*USECS_PER_JIFFY;
-	return (unsigned long) now;
-}
+NOKPROBE_SYMBOL(sched_clock);
 
 /*
- * This version of gettimeofday has microsecond resolution.
+ * Monotonic_clock - returns # of nanoseconds passed since time_init()
  */
-void do_gettimeofday(struct timeval *tv)
+unsigned long long monotonic_clock(void)
 {
-	unsigned long flags;
-	unsigned long seq;
-	unsigned long usec, sec;
+	return sched_clock();
+}
+EXPORT_SYMBOL(monotonic_clock);
 
-	do {
-		seq = read_seqbegin_irqsave(&xtime_lock, flags);
+static void ext_to_timespec64(unsigned char *clk, struct timespec64 *xt)
+{
+	unsigned long long high, low, rem, sec, nsec;
 
-		sec = xtime.tv_sec;
-		usec = xtime.tv_nsec / 1000 + do_gettimeoffset();
-	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
+	/* Split extendnd TOD clock to micro-seconds and sub-micro-seconds */
+	high = (*(unsigned long long *) clk) >> 4;
+	low = (*(unsigned long long *)&clk[7]) << 4;
+	/* Calculate seconds and nano-seconds */
+	sec = high;
+	rem = do_div(sec, 1000000);
+	nsec = (((low >> 32) + (rem << 32)) * 1000) >> 32;
 
-	while (usec >= 1000000) {
-		usec -= 1000000;
-		sec++;
-	}
-
-	tv->tv_sec = sec;
-	tv->tv_usec = usec;
+	xt->tv_sec = sec;
+	xt->tv_nsec = nsec;
 }
 
-EXPORT_SYMBOL(do_gettimeofday);
-
-int do_settimeofday(struct timespec *tv)
+void clock_comparator_work(void)
 {
-	time_t wtm_sec, sec = tv->tv_sec;
-	long wtm_nsec, nsec = tv->tv_nsec;
+	struct clock_event_device *cd;
 
-	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
-		return -EINVAL;
+	S390_lowcore.clock_comparator = clock_comparator_max;
+	cd = this_cpu_ptr(&comparators);
+	cd->event_handler(cd);
+}
 
-	write_seqlock_irq(&xtime_lock);
-	/* This is revolting. We need to set the xtime.tv_nsec
-	 * correctly. However, the value in this location is
-	 * is value at the last tick.
-	 * Discover what correction gettimeofday
-	 * would have done, and then undo it!
-	 */
-	nsec -= do_gettimeoffset() * 1000;
-
-	wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
-	wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
-
-	set_normalized_timespec(&xtime, sec, nsec);
-	set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
-
-	time_adjust = 0;		/* stop active adjtime() */
-	time_status |= STA_UNSYNC;
-	time_maxerror = NTP_PHASE_LIMIT;
-	time_esterror = NTP_PHASE_LIMIT;
-	write_sequnlock_irq(&xtime_lock);
-	clock_was_set();
+static int s390_next_event(unsigned long delta,
+			   struct clock_event_device *evt)
+{
+	S390_lowcore.clock_comparator = get_tod_clock() + delta;
+	set_clock_comparator(S390_lowcore.clock_comparator);
 	return 0;
 }
 
-EXPORT_SYMBOL(do_settimeofday);
-
-
-#ifdef CONFIG_PROFILING
-#define s390_do_profile(regs)	profile_tick(CPU_PROFILING, regs)
-#else
-#define s390_do_profile(regs)  do { ; } while(0)
-#endif /* CONFIG_PROFILING */
-
-
 /*
- * timer_interrupt() needs to keep up the real-time clock,
- * as well as call the "do_timer()" routine every clocktick
- */
-void account_ticks(struct pt_regs *regs)
-{
-	__u64 tmp;
-	__u32 ticks, xticks;
-
-	/* Calculate how many ticks have passed. */
-	if (S390_lowcore.int_clock < S390_lowcore.jiffy_timer)
-		return;
-	tmp = S390_lowcore.int_clock - S390_lowcore.jiffy_timer;
-	if (tmp >= 2*CLK_TICKS_PER_JIFFY) {  /* more than two ticks ? */
-		ticks = __div(tmp, CLK_TICKS_PER_JIFFY) + 1;
-		S390_lowcore.jiffy_timer +=
-			CLK_TICKS_PER_JIFFY * (__u64) ticks;
-	} else if (tmp >= CLK_TICKS_PER_JIFFY) {
-		ticks = 2;
-		S390_lowcore.jiffy_timer += 2*CLK_TICKS_PER_JIFFY;
-	} else {
-		ticks = 1;
-		S390_lowcore.jiffy_timer += CLK_TICKS_PER_JIFFY;
-	}
-
-	/* set clock comparator for next tick */
-	tmp = S390_lowcore.jiffy_timer + CPU_DEVIATION;
-        asm volatile ("SCKC %0" : : "m" (tmp));
-
-#ifdef CONFIG_SMP
-	/*
-	 * Do not rely on the boot cpu to do the calls to do_timer.
-	 * Spread it over all cpus instead.
-	 */
-	write_seqlock(&xtime_lock);
-	if (S390_lowcore.jiffy_timer > xtime_cc) {
-		tmp = S390_lowcore.jiffy_timer - xtime_cc;
-		if (tmp >= 2*CLK_TICKS_PER_JIFFY) {
-			xticks = __div(tmp, CLK_TICKS_PER_JIFFY);
-			xtime_cc += (__u64) xticks * CLK_TICKS_PER_JIFFY;
-		} else {
-			xticks = 1;
-			xtime_cc += CLK_TICKS_PER_JIFFY;
-		}
-		while (xticks--)
-			do_timer(regs);
-	}
-	write_sequnlock(&xtime_lock);
-#else
-	for (xticks = ticks; xticks > 0; xticks--)
-		do_timer(regs);
-#endif
-
-#ifdef CONFIG_VIRT_CPU_ACCOUNTING
-	account_user_vtime(current);
-#else
-	while (ticks--)
-		update_process_times(user_mode(regs));
-#endif
-
-	s390_do_profile(regs);
-}
-
-#ifdef CONFIG_NO_IDLE_HZ
-
-#ifdef CONFIG_NO_IDLE_HZ_INIT
-int sysctl_hz_timer = 0;
-#else
-int sysctl_hz_timer = 1;
-#endif
-
-/*
- * Stop the HZ tick on the current CPU.
- * Only cpu_idle may call this function.
- */
-static inline void stop_hz_timer(void)
-{
-	__u64 timer;
-
-	if (sysctl_hz_timer != 0)
-		return;
-
-	cpu_set(smp_processor_id(), nohz_cpu_mask);
-
-	/*
-	 * Leave the clock comparator set up for the next timer
-	 * tick if either rcu or a softirq is pending.
-	 */
-	if (rcu_pending(smp_processor_id()) || local_softirq_pending()) {
-		cpu_clear(smp_processor_id(), nohz_cpu_mask);
-		return;
-	}
-
-	/*
-	 * This cpu is going really idle. Set up the clock comparator
-	 * for the next event.
-	 */
-	timer = (__u64) (next_timer_interrupt() - jiffies) + jiffies_64;
-	timer = jiffies_timer_cc + timer * CLK_TICKS_PER_JIFFY;
-	asm volatile ("SCKC %0" : : "m" (timer));
-}
-
-/*
- * Start the HZ tick on the current CPU.
- * Only cpu_idle may call this function.
- */
-static inline void start_hz_timer(void)
-{
-	if (!cpu_isset(smp_processor_id(), nohz_cpu_mask))
-		return;
-	account_ticks(__KSTK_PTREGS(current));
-	cpu_clear(smp_processor_id(), nohz_cpu_mask);
-}
-
-static int nohz_idle_notify(struct notifier_block *self,
-			    unsigned long action, void *hcpu)
-{
-	switch (action) {
-	case CPU_IDLE:
-		stop_hz_timer();
-		break;
-	case CPU_NOT_IDLE:
-		start_hz_timer();
-		break;
-	}
-	return NOTIFY_OK;
-}
-
-static struct notifier_block nohz_idle_nb = {
-	.notifier_call = nohz_idle_notify,
-};
-
-void __init nohz_init(void)
-{
-	if (register_idle_notifier(&nohz_idle_nb))
-		panic("Couldn't register idle notifier");
-}
-
-#endif
-
-/*
- * Start the clock comparator on the current CPU.
+ * Set up lowcore and control register of the current cpu to
+ * enable TOD clock and clock comparator interrupts.
  */
 void init_cpu_timer(void)
 {
-	unsigned long cr0;
-	__u64 timer;
+	struct clock_event_device *cd;
+	int cpu;
 
-	timer = jiffies_timer_cc + jiffies_64 * CLK_TICKS_PER_JIFFY;
-	S390_lowcore.jiffy_timer = timer + CLK_TICKS_PER_JIFFY;
-	timer += CLK_TICKS_PER_JIFFY + CPU_DEVIATION;
-	asm volatile ("SCKC %0" : : "m" (timer));
-        /* allow clock comparator timer interrupt */
-	__ctl_store(cr0, 0, 0);
-        cr0 |= 0x800;
-	__ctl_load(cr0, 0, 0);
+	S390_lowcore.clock_comparator = clock_comparator_max;
+	set_clock_comparator(S390_lowcore.clock_comparator);
+
+	cpu = smp_processor_id();
+	cd = &per_cpu(comparators, cpu);
+	cd->name		= "comparator";
+	cd->features		= CLOCK_EVT_FEAT_ONESHOT;
+	cd->mult		= 16777;
+	cd->shift		= 12;
+	cd->min_delta_ns	= 1;
+	cd->min_delta_ticks	= 1;
+	cd->max_delta_ns	= LONG_MAX;
+	cd->max_delta_ticks	= ULONG_MAX;
+	cd->rating		= 400;
+	cd->cpumask		= cpumask_of(cpu);
+	cd->set_next_event	= s390_next_event;
+
+	clockevents_register_device(cd);
+
+	/* Enable clock comparator timer interrupt. */
+	__ctl_set_bit(0,11);
+
+	/* Always allow the timing alert external interrupt. */
+	__ctl_set_bit(0, 4);
 }
 
-extern void vtime_init(void);
+static void clock_comparator_interrupt(struct ext_code ext_code,
+				       unsigned int param32,
+				       unsigned long param64)
+{
+	inc_irq_stat(IRQEXT_CLK);
+	if (S390_lowcore.clock_comparator == clock_comparator_max)
+		set_clock_comparator(S390_lowcore.clock_comparator);
+}
+
+static void stp_timing_alert(struct stp_irq_parm *);
+
+static void timing_alert_interrupt(struct ext_code ext_code,
+				   unsigned int param32, unsigned long param64)
+{
+	inc_irq_stat(IRQEXT_TLA);
+	if (param32 & 0x00038000)
+		stp_timing_alert((struct stp_irq_parm *) &param32);
+}
+
+static void stp_reset(void);
+
+void read_persistent_clock64(struct timespec64 *ts)
+{
+	unsigned char clk[STORE_CLOCK_EXT_SIZE];
+	__u64 delta;
+
+	delta = initial_leap_seconds + TOD_UNIX_EPOCH;
+	get_tod_clock_ext(clk);
+	*(__u64 *) &clk[1] -= delta;
+	if (*(__u64 *) &clk[1] > delta)
+		clk[0]--;
+	ext_to_timespec64(clk, ts);
+}
+
+void read_boot_clock64(struct timespec64 *ts)
+{
+	unsigned char clk[STORE_CLOCK_EXT_SIZE];
+	__u64 delta;
+
+	delta = initial_leap_seconds + TOD_UNIX_EPOCH;
+	memcpy(clk, tod_clock_base, 16);
+	*(__u64 *) &clk[1] -= delta;
+	if (*(__u64 *) &clk[1] > delta)
+		clk[0]--;
+	ext_to_timespec64(clk, ts);
+}
+
+static u64 read_tod_clock(struct clocksource *cs)
+{
+	unsigned long long now, adj;
+
+	preempt_disable(); /* protect from changes to steering parameters */
+	now = get_tod_clock();
+	adj = tod_steering_end - now;
+	if (unlikely((s64) adj >= 0))
+		/*
+		 * manually steer by 1 cycle every 2^16 cycles. This
+		 * corresponds to shifting the tod delta by 15. 1s is
+		 * therefore steered in ~9h. The adjust will decrease
+		 * over time, until it finally reaches 0.
+		 */
+		now += (tod_steering_delta < 0) ? (adj >> 15) : -(adj >> 15);
+	preempt_enable();
+	return now;
+}
+
+static struct clocksource clocksource_tod = {
+	.name		= "tod",
+	.rating		= 400,
+	.read		= read_tod_clock,
+	.mask		= -1ULL,
+	.mult		= 1000,
+	.shift		= 12,
+	.flags		= CLOCK_SOURCE_IS_CONTINUOUS,
+};
+
+struct clocksource * __init clocksource_default_clock(void)
+{
+	return &clocksource_tod;
+}
+
+void update_vsyscall(struct timekeeper *tk)
+{
+	u64 nsecps;
+
+	if (tk->tkr_mono.clock != &clocksource_tod)
+		return;
+
+	/* Make userspace gettimeofday spin until we're done. */
+	++vdso_data->tb_update_count;
+	smp_wmb();
+	vdso_data->xtime_tod_stamp = tk->tkr_mono.cycle_last;
+	vdso_data->xtime_clock_sec = tk->xtime_sec;
+	vdso_data->xtime_clock_nsec = tk->tkr_mono.xtime_nsec;
+	vdso_data->wtom_clock_sec =
+		tk->xtime_sec + tk->wall_to_monotonic.tv_sec;
+	vdso_data->wtom_clock_nsec = tk->tkr_mono.xtime_nsec +
+		+ ((u64) tk->wall_to_monotonic.tv_nsec << tk->tkr_mono.shift);
+	nsecps = (u64) NSEC_PER_SEC << tk->tkr_mono.shift;
+	while (vdso_data->wtom_clock_nsec >= nsecps) {
+		vdso_data->wtom_clock_nsec -= nsecps;
+		vdso_data->wtom_clock_sec++;
+	}
+
+	vdso_data->xtime_coarse_sec = tk->xtime_sec;
+	vdso_data->xtime_coarse_nsec =
+		(long)(tk->tkr_mono.xtime_nsec >> tk->tkr_mono.shift);
+	vdso_data->wtom_coarse_sec =
+		vdso_data->xtime_coarse_sec + tk->wall_to_monotonic.tv_sec;
+	vdso_data->wtom_coarse_nsec =
+		vdso_data->xtime_coarse_nsec + tk->wall_to_monotonic.tv_nsec;
+	while (vdso_data->wtom_coarse_nsec >= NSEC_PER_SEC) {
+		vdso_data->wtom_coarse_nsec -= NSEC_PER_SEC;
+		vdso_data->wtom_coarse_sec++;
+	}
+
+	vdso_data->tk_mult = tk->tkr_mono.mult;
+	vdso_data->tk_shift = tk->tkr_mono.shift;
+	smp_wmb();
+	++vdso_data->tb_update_count;
+}
+
+extern struct timezone sys_tz;
+
+void update_vsyscall_tz(void)
+{
+	vdso_data->tz_minuteswest = sys_tz.tz_minuteswest;
+	vdso_data->tz_dsttime = sys_tz.tz_dsttime;
+}
 
 /*
  * Initialize the TOD clock and the CPU timer of
@@ -324,50 +323,543 @@ extern void vtime_init(void);
  */
 void __init time_init(void)
 {
-	__u64 set_time_cc;
-	int cc;
-
-        /* kick the TOD clock */
-        asm volatile ("STCK 0(%1)\n\t"
-                      "IPM  %0\n\t"
-                      "SRL  %0,28" : "=r" (cc) : "a" (&init_timer_cc) 
-				   : "memory", "cc");
-        switch (cc) {
-        case 0: /* clock in set state: all is fine */
-                break;
-        case 1: /* clock in non-set state: FIXME */
-                printk("time_init: TOD clock in non-set state\n");
-                break;
-        case 2: /* clock in error state: FIXME */
-                printk("time_init: TOD clock in error state\n");
-                break;
-        case 3: /* clock in stopped or not-operational state: FIXME */
-                printk("time_init: TOD clock stopped/non-operational\n");
-                break;
-        }
-	jiffies_timer_cc = init_timer_cc - jiffies_64 * CLK_TICKS_PER_JIFFY;
-
-	/* set xtime */
-	xtime_cc = init_timer_cc + CLK_TICKS_PER_JIFFY;
-	set_time_cc = init_timer_cc - 0x8126d60e46000000LL +
-		(0x3c26700LL*1000000*4096);
-        tod_to_timeval(set_time_cc, &xtime);
-        set_normalized_timespec(&wall_to_monotonic,
-                                -xtime.tv_sec, -xtime.tv_nsec);
+	/* Reset time synchronization interfaces. */
+	stp_reset();
 
 	/* request the clock comparator external interrupt */
-        if (register_early_external_interrupt(0x1004, 0,
-					      &ext_int_info_cc) != 0)
-                panic("Couldn't request external interrupt 0x1004");
+	if (register_external_irq(EXT_IRQ_CLK_COMP, clock_comparator_interrupt))
+		panic("Couldn't request external interrupt 0x1004");
 
-        init_cpu_timer();
+	/* request the timing alert external interrupt */
+	if (register_external_irq(EXT_IRQ_TIMING_ALERT, timing_alert_interrupt))
+		panic("Couldn't request external interrupt 0x1406");
 
-#ifdef CONFIG_NO_IDLE_HZ
-	nohz_init();
-#endif
+	if (__clocksource_register(&clocksource_tod) != 0)
+		panic("Could not register TOD clock source");
 
-#ifdef CONFIG_VIRT_TIMER
+	/* Enable TOD clock interrupts on the boot cpu. */
+	init_cpu_timer();
+
+	/* Enable cpu timer interrupts on the boot cpu. */
 	vtime_init();
-#endif
 }
 
+static DEFINE_PER_CPU(atomic_t, clock_sync_word);
+static DEFINE_MUTEX(clock_sync_mutex);
+static unsigned long clock_sync_flags;
+
+#define CLOCK_SYNC_HAS_STP	0
+#define CLOCK_SYNC_STP		1
+
+/*
+ * The get_clock function for the physical clock. It will get the current
+ * TOD clock, subtract the LPAR offset and write the result to *clock.
+ * The function returns 0 if the clock is in sync with the external time
+ * source. If the clock mode is local it will return -EOPNOTSUPP and
+ * -EAGAIN if the clock is not in sync with the external reference.
+ */
+int get_phys_clock(unsigned long *clock)
+{
+	atomic_t *sw_ptr;
+	unsigned int sw0, sw1;
+
+	sw_ptr = &get_cpu_var(clock_sync_word);
+	sw0 = atomic_read(sw_ptr);
+	*clock = get_tod_clock() - lpar_offset;
+	sw1 = atomic_read(sw_ptr);
+	put_cpu_var(clock_sync_word);
+	if (sw0 == sw1 && (sw0 & 0x80000000U))
+		/* Success: time is in sync. */
+		return 0;
+	if (!test_bit(CLOCK_SYNC_HAS_STP, &clock_sync_flags))
+		return -EOPNOTSUPP;
+	if (!test_bit(CLOCK_SYNC_STP, &clock_sync_flags))
+		return -EACCES;
+	return -EAGAIN;
+}
+EXPORT_SYMBOL(get_phys_clock);
+
+/*
+ * Make get_phys_clock() return -EAGAIN.
+ */
+static void disable_sync_clock(void *dummy)
+{
+	atomic_t *sw_ptr = this_cpu_ptr(&clock_sync_word);
+	/*
+	 * Clear the in-sync bit 2^31. All get_phys_clock calls will
+	 * fail until the sync bit is turned back on. In addition
+	 * increase the "sequence" counter to avoid the race of an
+	 * stp event and the complete recovery against get_phys_clock.
+	 */
+	atomic_andnot(0x80000000, sw_ptr);
+	atomic_inc(sw_ptr);
+}
+
+/*
+ * Make get_phys_clock() return 0 again.
+ * Needs to be called from a context disabled for preemption.
+ */
+static void enable_sync_clock(void)
+{
+	atomic_t *sw_ptr = this_cpu_ptr(&clock_sync_word);
+	atomic_or(0x80000000, sw_ptr);
+}
+
+/*
+ * Function to check if the clock is in sync.
+ */
+static inline int check_sync_clock(void)
+{
+	atomic_t *sw_ptr;
+	int rc;
+
+	sw_ptr = &get_cpu_var(clock_sync_word);
+	rc = (atomic_read(sw_ptr) & 0x80000000U) != 0;
+	put_cpu_var(clock_sync_word);
+	return rc;
+}
+
+/*
+ * Apply clock delta to the global data structures.
+ * This is called once on the CPU that performed the clock sync.
+ */
+static void clock_sync_global(unsigned long long delta)
+{
+	unsigned long now, adj;
+	struct ptff_qto qto;
+
+	/* Fixup the monotonic sched clock. */
+	*(unsigned long long *) &tod_clock_base[1] += delta;
+	if (*(unsigned long long *) &tod_clock_base[1] < delta)
+		/* Epoch overflow */
+		tod_clock_base[0]++;
+	/* Adjust TOD steering parameters. */
+	vdso_data->tb_update_count++;
+	now = get_tod_clock();
+	adj = tod_steering_end - now;
+	if (unlikely((s64) adj >= 0))
+		/* Calculate how much of the old adjustment is left. */
+		tod_steering_delta = (tod_steering_delta < 0) ?
+			-(adj >> 15) : (adj >> 15);
+	tod_steering_delta += delta;
+	if ((abs(tod_steering_delta) >> 48) != 0)
+		panic("TOD clock sync offset %lli is too large to drift\n",
+		      tod_steering_delta);
+	tod_steering_end = now + (abs(tod_steering_delta) << 15);
+	vdso_data->ts_dir = (tod_steering_delta < 0) ? 0 : 1;
+	vdso_data->ts_end = tod_steering_end;
+	vdso_data->tb_update_count++;
+	/* Update LPAR offset. */
+	if (ptff_query(PTFF_QTO) && ptff(&qto, sizeof(qto), PTFF_QTO) == 0)
+		lpar_offset = qto.tod_epoch_difference;
+	/* Call the TOD clock change notifier. */
+	atomic_notifier_call_chain(&s390_epoch_delta_notifier, 0, &delta);
+}
+
+/*
+ * Apply clock delta to the per-CPU data structures of this CPU.
+ * This is called for each online CPU after the call to clock_sync_global.
+ */
+static void clock_sync_local(unsigned long long delta)
+{
+	/* Add the delta to the clock comparator. */
+	if (S390_lowcore.clock_comparator != clock_comparator_max) {
+		S390_lowcore.clock_comparator += delta;
+		set_clock_comparator(S390_lowcore.clock_comparator);
+	}
+	/* Adjust the last_update_clock time-stamp. */
+	S390_lowcore.last_update_clock += delta;
+}
+
+/* Single threaded workqueue used for stp sync events */
+static struct workqueue_struct *time_sync_wq;
+
+static void __init time_init_wq(void)
+{
+	if (time_sync_wq)
+		return;
+	time_sync_wq = create_singlethread_workqueue("timesync");
+}
+
+struct clock_sync_data {
+	atomic_t cpus;
+	int in_sync;
+	unsigned long long clock_delta;
+};
+
+/*
+ * Server Time Protocol (STP) code.
+ */
+static bool stp_online;
+static struct stp_sstpi stp_info;
+static void *stp_page;
+
+static void stp_work_fn(struct work_struct *work);
+static DEFINE_MUTEX(stp_work_mutex);
+static DECLARE_WORK(stp_work, stp_work_fn);
+static struct timer_list stp_timer;
+
+static int __init early_parse_stp(char *p)
+{
+	return kstrtobool(p, &stp_online);
+}
+early_param("stp", early_parse_stp);
+
+/*
+ * Reset STP attachment.
+ */
+static void __init stp_reset(void)
+{
+	int rc;
+
+	stp_page = (void *) get_zeroed_page(GFP_ATOMIC);
+	rc = chsc_sstpc(stp_page, STP_OP_CTRL, 0x0000, NULL);
+	if (rc == 0)
+		set_bit(CLOCK_SYNC_HAS_STP, &clock_sync_flags);
+	else if (stp_online) {
+		pr_warn("The real or virtual hardware system does not provide an STP interface\n");
+		free_page((unsigned long) stp_page);
+		stp_page = NULL;
+		stp_online = false;
+	}
+}
+
+static void stp_timeout(struct timer_list *unused)
+{
+	queue_work(time_sync_wq, &stp_work);
+}
+
+static int __init stp_init(void)
+{
+	if (!test_bit(CLOCK_SYNC_HAS_STP, &clock_sync_flags))
+		return 0;
+	timer_setup(&stp_timer, stp_timeout, 0);
+	time_init_wq();
+	if (!stp_online)
+		return 0;
+	queue_work(time_sync_wq, &stp_work);
+	return 0;
+}
+
+arch_initcall(stp_init);
+
+/*
+ * STP timing alert. There are three causes:
+ * 1) timing status change
+ * 2) link availability change
+ * 3) time control parameter change
+ * In all three cases we are only interested in the clock source state.
+ * If a STP clock source is now available use it.
+ */
+static void stp_timing_alert(struct stp_irq_parm *intparm)
+{
+	if (intparm->tsc || intparm->lac || intparm->tcpc)
+		queue_work(time_sync_wq, &stp_work);
+}
+
+/*
+ * STP sync check machine check. This is called when the timing state
+ * changes from the synchronized state to the unsynchronized state.
+ * After a STP sync check the clock is not in sync. The machine check
+ * is broadcasted to all cpus at the same time.
+ */
+int stp_sync_check(void)
+{
+	disable_sync_clock(NULL);
+	return 1;
+}
+
+/*
+ * STP island condition machine check. This is called when an attached
+ * server  attempts to communicate over an STP link and the servers
+ * have matching CTN ids and have a valid stratum-1 configuration
+ * but the configurations do not match.
+ */
+int stp_island_check(void)
+{
+	disable_sync_clock(NULL);
+	return 1;
+}
+
+void stp_queue_work(void)
+{
+	queue_work(time_sync_wq, &stp_work);
+}
+
+static int stp_sync_clock(void *data)
+{
+	struct clock_sync_data *sync = data;
+	unsigned long long clock_delta;
+	static int first;
+	int rc;
+
+	enable_sync_clock();
+	if (xchg(&first, 1) == 0) {
+		/* Wait until all other cpus entered the sync function. */
+		while (atomic_read(&sync->cpus) != 0)
+			cpu_relax();
+		rc = 0;
+		if (stp_info.todoff[0] || stp_info.todoff[1] ||
+		    stp_info.todoff[2] || stp_info.todoff[3] ||
+		    stp_info.tmd != 2) {
+			rc = chsc_sstpc(stp_page, STP_OP_SYNC, 0,
+					&clock_delta);
+			if (rc == 0) {
+				sync->clock_delta = clock_delta;
+				clock_sync_global(clock_delta);
+				rc = chsc_sstpi(stp_page, &stp_info,
+						sizeof(struct stp_sstpi));
+				if (rc == 0 && stp_info.tmd != 2)
+					rc = -EAGAIN;
+			}
+		}
+		sync->in_sync = rc ? -EAGAIN : 1;
+		xchg(&first, 0);
+	} else {
+		/* Slave */
+		atomic_dec(&sync->cpus);
+		/* Wait for in_sync to be set. */
+		while (READ_ONCE(sync->in_sync) == 0)
+			__udelay(1);
+	}
+	if (sync->in_sync != 1)
+		/* Didn't work. Clear per-cpu in sync bit again. */
+		disable_sync_clock(NULL);
+	/* Apply clock delta to per-CPU fields of this CPU. */
+	clock_sync_local(sync->clock_delta);
+
+	return 0;
+}
+
+/*
+ * STP work. Check for the STP state and take over the clock
+ * synchronization if the STP clock source is usable.
+ */
+static void stp_work_fn(struct work_struct *work)
+{
+	struct clock_sync_data stp_sync;
+	int rc;
+
+	/* prevent multiple execution. */
+	mutex_lock(&stp_work_mutex);
+
+	if (!stp_online) {
+		chsc_sstpc(stp_page, STP_OP_CTRL, 0x0000, NULL);
+		del_timer_sync(&stp_timer);
+		goto out_unlock;
+	}
+
+	rc = chsc_sstpc(stp_page, STP_OP_CTRL, 0xb0e0, NULL);
+	if (rc)
+		goto out_unlock;
+
+	rc = chsc_sstpi(stp_page, &stp_info, sizeof(struct stp_sstpi));
+	if (rc || stp_info.c == 0)
+		goto out_unlock;
+
+	/* Skip synchronization if the clock is already in sync. */
+	if (check_sync_clock())
+		goto out_unlock;
+
+	memset(&stp_sync, 0, sizeof(stp_sync));
+	cpus_read_lock();
+	atomic_set(&stp_sync.cpus, num_online_cpus() - 1);
+	stop_machine_cpuslocked(stp_sync_clock, &stp_sync, cpu_online_mask);
+	cpus_read_unlock();
+
+	if (!check_sync_clock())
+		/*
+		 * There is a usable clock but the synchonization failed.
+		 * Retry after a second.
+		 */
+		mod_timer(&stp_timer, jiffies + HZ);
+
+out_unlock:
+	mutex_unlock(&stp_work_mutex);
+}
+
+/*
+ * STP subsys sysfs interface functions
+ */
+static struct bus_type stp_subsys = {
+	.name		= "stp",
+	.dev_name	= "stp",
+};
+
+static ssize_t stp_ctn_id_show(struct device *dev,
+				struct device_attribute *attr,
+				char *buf)
+{
+	if (!stp_online)
+		return -ENODATA;
+	return sprintf(buf, "%016llx\n",
+		       *(unsigned long long *) stp_info.ctnid);
+}
+
+static DEVICE_ATTR(ctn_id, 0400, stp_ctn_id_show, NULL);
+
+static ssize_t stp_ctn_type_show(struct device *dev,
+				struct device_attribute *attr,
+				char *buf)
+{
+	if (!stp_online)
+		return -ENODATA;
+	return sprintf(buf, "%i\n", stp_info.ctn);
+}
+
+static DEVICE_ATTR(ctn_type, 0400, stp_ctn_type_show, NULL);
+
+static ssize_t stp_dst_offset_show(struct device *dev,
+				   struct device_attribute *attr,
+				   char *buf)
+{
+	if (!stp_online || !(stp_info.vbits & 0x2000))
+		return -ENODATA;
+	return sprintf(buf, "%i\n", (int)(s16) stp_info.dsto);
+}
+
+static DEVICE_ATTR(dst_offset, 0400, stp_dst_offset_show, NULL);
+
+static ssize_t stp_leap_seconds_show(struct device *dev,
+					struct device_attribute *attr,
+					char *buf)
+{
+	if (!stp_online || !(stp_info.vbits & 0x8000))
+		return -ENODATA;
+	return sprintf(buf, "%i\n", (int)(s16) stp_info.leaps);
+}
+
+static DEVICE_ATTR(leap_seconds, 0400, stp_leap_seconds_show, NULL);
+
+static ssize_t stp_stratum_show(struct device *dev,
+				struct device_attribute *attr,
+				char *buf)
+{
+	if (!stp_online)
+		return -ENODATA;
+	return sprintf(buf, "%i\n", (int)(s16) stp_info.stratum);
+}
+
+static DEVICE_ATTR(stratum, 0400, stp_stratum_show, NULL);
+
+static ssize_t stp_time_offset_show(struct device *dev,
+				struct device_attribute *attr,
+				char *buf)
+{
+	if (!stp_online || !(stp_info.vbits & 0x0800))
+		return -ENODATA;
+	return sprintf(buf, "%i\n", (int) stp_info.tto);
+}
+
+static DEVICE_ATTR(time_offset, 0400, stp_time_offset_show, NULL);
+
+static ssize_t stp_time_zone_offset_show(struct device *dev,
+				struct device_attribute *attr,
+				char *buf)
+{
+	if (!stp_online || !(stp_info.vbits & 0x4000))
+		return -ENODATA;
+	return sprintf(buf, "%i\n", (int)(s16) stp_info.tzo);
+}
+
+static DEVICE_ATTR(time_zone_offset, 0400,
+			 stp_time_zone_offset_show, NULL);
+
+static ssize_t stp_timing_mode_show(struct device *dev,
+				struct device_attribute *attr,
+				char *buf)
+{
+	if (!stp_online)
+		return -ENODATA;
+	return sprintf(buf, "%i\n", stp_info.tmd);
+}
+
+static DEVICE_ATTR(timing_mode, 0400, stp_timing_mode_show, NULL);
+
+static ssize_t stp_timing_state_show(struct device *dev,
+				struct device_attribute *attr,
+				char *buf)
+{
+	if (!stp_online)
+		return -ENODATA;
+	return sprintf(buf, "%i\n", stp_info.tst);
+}
+
+static DEVICE_ATTR(timing_state, 0400, stp_timing_state_show, NULL);
+
+static ssize_t stp_online_show(struct device *dev,
+				struct device_attribute *attr,
+				char *buf)
+{
+	return sprintf(buf, "%i\n", stp_online);
+}
+
+static ssize_t stp_online_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	unsigned int value;
+
+	value = simple_strtoul(buf, NULL, 0);
+	if (value != 0 && value != 1)
+		return -EINVAL;
+	if (!test_bit(CLOCK_SYNC_HAS_STP, &clock_sync_flags))
+		return -EOPNOTSUPP;
+	mutex_lock(&clock_sync_mutex);
+	stp_online = value;
+	if (stp_online)
+		set_bit(CLOCK_SYNC_STP, &clock_sync_flags);
+	else
+		clear_bit(CLOCK_SYNC_STP, &clock_sync_flags);
+	queue_work(time_sync_wq, &stp_work);
+	mutex_unlock(&clock_sync_mutex);
+	return count;
+}
+
+/*
+ * Can't use DEVICE_ATTR because the attribute should be named
+ * stp/online but dev_attr_online already exists in this file ..
+ */
+static struct device_attribute dev_attr_stp_online = {
+	.attr = { .name = "online", .mode = 0600 },
+	.show	= stp_online_show,
+	.store	= stp_online_store,
+};
+
+static struct device_attribute *stp_attributes[] = {
+	&dev_attr_ctn_id,
+	&dev_attr_ctn_type,
+	&dev_attr_dst_offset,
+	&dev_attr_leap_seconds,
+	&dev_attr_stp_online,
+	&dev_attr_stratum,
+	&dev_attr_time_offset,
+	&dev_attr_time_zone_offset,
+	&dev_attr_timing_mode,
+	&dev_attr_timing_state,
+	NULL
+};
+
+static int __init stp_init_sysfs(void)
+{
+	struct device_attribute **attr;
+	int rc;
+
+	rc = subsys_system_register(&stp_subsys, NULL);
+	if (rc)
+		goto out;
+	for (attr = stp_attributes; *attr; attr++) {
+		rc = device_create_file(stp_subsys.dev_root, *attr);
+		if (rc)
+			goto out_unreg;
+	}
+	return 0;
+out_unreg:
+	for (; attr >= stp_attributes; attr--)
+		device_remove_file(stp_subsys.dev_root, *attr);
+	bus_unregister(&stp_subsys);
+out:
+	return rc;
+}
+
+device_initcall(stp_init_sysfs);

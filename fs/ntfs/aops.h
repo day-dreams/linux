@@ -40,7 +40,7 @@
 static inline void ntfs_unmap_page(struct page *page)
 {
 	kunmap(page);
-	page_cache_release(page);
+	put_page(page);
 }
 
 /**
@@ -49,7 +49,7 @@ static inline void ntfs_unmap_page(struct page *page)
  * @index:	index into the page cache for @mapping of the page to map
  *
  * Read a page from the page cache of the address space @mapping at position
- * @index, where @index is in units of PAGE_CACHE_SIZE, and not in bytes.
+ * @index, where @index is in units of PAGE_SIZE, and not in bytes.
  *
  * If the page is not in memory it is loaded from disk first using the readpage
  * method defined in the address space operations of @mapping and the page is
@@ -80,19 +80,17 @@ static inline void ntfs_unmap_page(struct page *page)
  *
  * The unlocked and uptodate page is returned on success or an encoded error
  * on failure. Caller has to test for error using the IS_ERR() macro on the
- * return value. If that evaluates to TRUE, the negative error code can be
+ * return value. If that evaluates to 'true', the negative error code can be
  * obtained using PTR_ERR() on the return value of ntfs_map_page().
  */
 static inline struct page *ntfs_map_page(struct address_space *mapping,
 		unsigned long index)
 {
-	struct page *page = read_cache_page(mapping, index,
-			(filler_t*)mapping->a_ops->readpage, NULL);
+	struct page *page = read_mapping_page(mapping, index, NULL);
 
 	if (!IS_ERR(page)) {
-		wait_on_page_locked(page);
 		kmap(page);
-		if (PageUptodate(page) && !PageError(page))
+		if (!PageError(page))
 			return page;
 		ntfs_unmap_page(page);
 		return ERR_PTR(-EIO);

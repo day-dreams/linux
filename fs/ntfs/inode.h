@@ -2,7 +2,7 @@
  * inode.h - Defines for inode structures NTFS Linux kernel driver. Part of
  *	     the Linux-NTFS project.
  *
- * Copyright (c) 2001-2004 Anton Altaparmakov
+ * Copyright (c) 2001-2007 Anton Altaparmakov
  * Copyright (c) 2002 Richard Russon
  *
  * This program/include file is free software; you can redistribute it and/or
@@ -24,12 +24,13 @@
 #ifndef _LINUX_NTFS_INODE_H
 #define _LINUX_NTFS_INODE_H
 
-#include <linux/mm.h>
+#include <linux/atomic.h>
+
 #include <linux/fs.h>
-#include <linux/seq_file.h>
 #include <linux/list.h>
-#include <asm/atomic.h>
-#include <asm/semaphore.h>
+#include <linux/mm.h>
+#include <linux/mutex.h>
+#include <linux/seq_file.h>
 
 #include "layout.h"
 #include "volume.h"
@@ -44,6 +45,7 @@ typedef struct _ntfs_inode ntfs_inode;
  * fields already provided in the VFS inode.
  */
 struct _ntfs_inode {
+	rwlock_t size_lock;	/* Lock serializing access to inode sizes. */
 	s64 initialized_size;	/* Copy from the attribute record. */
 	s64 allocated_size;	/* Copy from the attribute record. */
 	unsigned long state;	/* NTFS specific flags describing this inode.
@@ -80,7 +82,7 @@ struct _ntfs_inode {
 	 * The following fields are only valid for real inodes and extent
 	 * inodes.
 	 */
-	struct semaphore mrec_lock; /* Lock for serializing access to the
+	struct mutex mrec_lock;	/* Lock for serializing access to the
 				   mft record belonging to this inode. */
 	struct page *page;	/* The page containing the mft record of the
 				   inode. This should only be touched by the
@@ -99,8 +101,6 @@ struct _ntfs_inode {
 	runlist attr_list_rl;	/* Run list for the attribute list value. */
 	union {
 		struct { /* It is a directory, $MFT, or an index inode. */
-			struct inode *bmp_ino;	/* Attribute inode for the
-						   index $BITMAP. */
 			u32 block_size;		/* Size of an index block. */
 			u32 vcn_size;		/* Size of a vcn in this
 						   index. */
@@ -109,7 +109,7 @@ struct _ntfs_inode {
 			u8 block_size_bits; 	/* Log2 of the above. */
 			u8 vcn_size_bits;	/* Log2 of the above. */
 		} index;
-		struct { /* It is a compressed file or an attribute inode. */
+		struct { /* It is a compressed/sparse file/attribute inode. */
 			s64 size;		/* Copy of compressed_size from
 						   $DATA. */
 			u32 block_size;		/* Size of a compression block
@@ -118,7 +118,7 @@ struct _ntfs_inode {
 			u8 block_clusters;	/* Number of clusters per cb. */
 		} compressed;
 	} itype;
-	struct semaphore extent_lock;	/* Lock for accessing/modifying the
+	struct mutex extent_lock;	/* Lock for accessing/modifying the
 					   below . */
 	s32 nr_extents;	/* For a base mft record, the number of attached extent
 			   inodes (0 if none), for extent records and for fake
@@ -165,6 +165,7 @@ typedef enum {
 	NI_Sparse,		/* 1: Unnamed data attr is sparse (f).
 				   1: Create sparse files by default (d).
 				   1: Attribute is sparse (a). */
+	NI_SparseDisabled,	/* 1: May not create sparse regions. */
 	NI_TruncateFailed,	/* 1: Last ntfs_truncate() call failed. */
 } ntfs_inode_state_bits;
 
@@ -217,6 +218,7 @@ NINO_FNS(IndexAllocPresent)
 NINO_FNS(Compressed)
 NINO_FNS(Encrypted)
 NINO_FNS(Sparse)
+NINO_FNS(SparseDisabled)
 NINO_FNS(TruncateFailed)
 
 /*
@@ -237,7 +239,7 @@ typedef struct {
  */
 static inline ntfs_inode *NTFS_I(struct inode *inode)
 {
-	return (ntfs_inode *)list_entry(inode, big_ntfs_inode, vfs_inode);
+	return (ntfs_inode *)container_of(inode, big_ntfs_inode, vfs_inode);
 }
 
 static inline struct inode *VFS_I(ntfs_inode *ni)
@@ -277,7 +279,7 @@ extern struct inode *ntfs_index_iget(struct inode *base_vi, ntfschar *name,
 
 extern struct inode *ntfs_alloc_big_inode(struct super_block *sb);
 extern void ntfs_destroy_big_inode(struct inode *inode);
-extern void ntfs_clear_big_inode(struct inode *vi);
+extern void ntfs_evict_big_inode(struct inode *vi);
 
 extern void __ntfs_init_inode(struct super_block *sb, ntfs_inode *ni);
 
@@ -296,9 +298,7 @@ extern void ntfs_clear_extent_inode(ntfs_inode *ni);
 
 extern int ntfs_read_inode_mount(struct inode *vi);
 
-extern void ntfs_put_inode(struct inode *vi);
-
-extern int ntfs_show_options(struct seq_file *sf, struct vfsmount *mnt);
+extern int ntfs_show_options(struct seq_file *sf, struct dentry *root);
 
 #ifdef NTFS_RW
 
@@ -307,14 +307,18 @@ extern void ntfs_truncate_vfs(struct inode *vi);
 
 extern int ntfs_setattr(struct dentry *dentry, struct iattr *attr);
 
-extern int ntfs_write_inode(struct inode *vi, int sync);
+extern int __ntfs_write_inode(struct inode *vi, int sync);
 
 static inline void ntfs_commit_inode(struct inode *vi)
 {
 	if (!is_bad_inode(vi))
-		ntfs_write_inode(vi, 1);
+		__ntfs_write_inode(vi, 1);
 	return;
 }
+
+#else
+
+static inline void ntfs_truncate_vfs(struct inode *vi) {}
 
 #endif /* NTFS_RW */
 

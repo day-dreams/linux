@@ -2,25 +2,35 @@
  * A policy database (policydb) specifies the
  * configuration data for the security policy.
  *
- * Author : Stephen Smalley, <sds@epoch.ncsc.mil>
+ * Author : Stephen Smalley, <sds@tycho.nsa.gov>
  */
 
-/* Updated: Frank Mayer <mayerf@tresys.com> and Karl MacMillan <kmacmillan@tresys.com>
+/*
+ * Updated: Trusted Computer Solutions, Inc. <dgoeddel@trustedcs.com>
  *
- * 	Added conditional policy language extensions
+ *	Support for enhanced MLS infrastructure.
  *
+ * Updated: Frank Mayer <mayerf@tresys.com> and Karl MacMillan <kmacmillan@tresys.com>
+ *
+ *	Added conditional policy language extensions
+ *
+ * Copyright (C) 2004-2005 Trusted Computer Solutions, Inc.
  * Copyright (C) 2003 - 2004 Tresys Technology, LLC
  *	This program is free software; you can redistribute it and/or modify
- *  	it under the terms of the GNU General Public License as published by
+ *	it under the terms of the GNU General Public License as published by
  *	the Free Software Foundation, version 2.
  */
 
 #ifndef _SS_POLICYDB_H_
 #define _SS_POLICYDB_H_
 
+#include <linux/flex_array.h>
+
 #include "symtab.h"
 #include "avtab.h"
 #include "sidtab.h"
+#include "ebitmap.h"
+#include "mls_types.h"
 #include "context.h"
 #include "constraint.h"
 
@@ -34,13 +44,6 @@
 /* Permission attributes */
 struct perm_datum {
 	u32 value;		/* permission bit + 1 */
-#ifdef CONFIG_SECURITY_SELINUX_MLS
-#define MLS_BASE_READ    1	/* MLS base permission `read' */
-#define MLS_BASE_WRITE   2	/* MLS base permission `write' */
-#define MLS_BASE_READBY  4	/* MLS base permission `readby' */
-#define MLS_BASE_WRITEBY 8	/* MLS base permission `writeby' */
-	u32 base_perms;		/* MLS base permission mask */
-#endif
 };
 
 /* Attributes of a common prefix for access vectors */
@@ -56,23 +59,48 @@ struct class_datum {
 	struct common_datum *comdatum;	/* common datum */
 	struct symtab permissions;	/* class-specific permission symbol table */
 	struct constraint_node *constraints;	/* constraints on class permissions */
-#ifdef CONFIG_SECURITY_SELINUX_MLS
-	struct mls_perms mlsperms;	/* MLS base permission masks */
-#endif
+	struct constraint_node *validatetrans;	/* special transition rules */
+/* Options how a new object user, role, and type should be decided */
+#define DEFAULT_SOURCE         1
+#define DEFAULT_TARGET         2
+	char default_user;
+	char default_role;
+	char default_type;
+/* Options how a new object range should be decided */
+#define DEFAULT_SOURCE_LOW     1
+#define DEFAULT_SOURCE_HIGH    2
+#define DEFAULT_SOURCE_LOW_HIGH        3
+#define DEFAULT_TARGET_LOW     4
+#define DEFAULT_TARGET_HIGH    5
+#define DEFAULT_TARGET_LOW_HIGH        6
+	char default_range;
 };
 
 /* Role attributes */
 struct role_datum {
 	u32 value;			/* internal role value */
+	u32 bounds;			/* boundary of role */
 	struct ebitmap dominates;	/* set of roles dominated by this role */
 	struct ebitmap types;		/* set of authorized types for role */
 };
 
 struct role_trans {
 	u32 role;		/* current role */
-	u32 type;		/* program executable type */
+	u32 type;		/* program executable type, or new object type */
+	u32 tclass;		/* process class, or new object class */
 	u32 new_role;		/* new role */
 	struct role_trans *next;
+};
+
+struct filename_trans {
+	u32 stype;		/* current process */
+	u32 ttype;		/* parent dir context */
+	u16 tclass;		/* class of new object */
+	const char *name;	/* last path component */
+};
+
+struct filename_trans_datum {
+	u32 otype;		/* expected of new object */
 };
 
 struct role_allow {
@@ -84,20 +112,21 @@ struct role_allow {
 /* Type attributes */
 struct type_datum {
 	u32 value;		/* internal type value */
+	u32 bounds;		/* boundary of type */
 	unsigned char primary;	/* primary name? */
+	unsigned char attribute;/* attribute ?*/
 };
 
 /* User attributes */
 struct user_datum {
 	u32 value;			/* internal user value */
+	u32 bounds;			/* bounds of user */
 	struct ebitmap roles;		/* set of authorized roles for user */
-#ifdef CONFIG_SECURITY_SELINUX_MLS
-	struct mls_range_list *ranges;	/* list of authorized MLS ranges for user */
-#endif
+	struct mls_range range;		/* MLS range (min - max) for user */
+	struct mls_level dfltlevel;	/* default login MLS level for user */
 };
 
 
-#ifdef CONFIG_SECURITY_SELINUX_MLS
 /* Sensitivity attributes */
 struct level_datum {
 	struct mls_level *level;	/* sensitivity and associated categories */
@@ -109,7 +138,12 @@ struct cat_datum {
 	u32 value;		/* internal category bit + 1 */
 	unsigned char isalias;  /* is this category an alias for another? */
 };
-#endif
+
+struct range_trans {
+	u32 source_type;
+	u32 target_type;
+	u32 target_class;
+};
 
 /* Boolean data type */
 struct cond_bool_datum {
@@ -118,6 +152,17 @@ struct cond_bool_datum {
 };
 
 struct cond_node;
+
+/*
+ * type set preserves data needed to determine constraint info from
+ * policy source. This is not used by the kernel policy but allows
+ * utilities such as audit2allow to determine constraint denials.
+ */
+struct type_set {
+	struct ebitmap types;
+	struct ebitmap negset;
+	u32 flags;
+};
 
 /*
  * The configuration data includes security contexts for
@@ -142,6 +187,15 @@ struct ocontext {
 			u32 addr[4];
 			u32 mask[4];
 		} node6;        /* IPv6 node information */
+		struct {
+			u64 subnet_prefix;
+			u16 low_pkey;
+			u16 high_pkey;
+		} ibpkey;
+		struct {
+			char *dev_name;
+			u8 port;
+		} ibendport;
 	} u;
 	union {
 		u32 sclass;  /* security class for genfs */
@@ -164,28 +218,27 @@ struct genfs {
 #define SYM_ROLES   2
 #define SYM_TYPES   3
 #define SYM_USERS   4
-#ifdef CONFIG_SECURITY_SELINUX_MLS
-#define SYM_LEVELS  5
-#define SYM_CATS    6
-#define SYM_BOOLS   7
-#define SYM_NUM     8
-#else
 #define SYM_BOOLS   5
-#define SYM_NUM     6
-#endif
+#define SYM_LEVELS  6
+#define SYM_CATS    7
+#define SYM_NUM     8
 
 /* object context array indices */
-#define OCON_ISID  0	/* initial SIDs */
-#define OCON_FS    1	/* unlabeled file systems */
-#define OCON_PORT  2	/* TCP and UDP port numbers */
-#define OCON_NETIF 3	/* network interfaces */
-#define OCON_NODE  4	/* nodes */
-#define OCON_FSUSE 5	/* fs_use */
-#define OCON_NODE6 6	/* IPv6 nodes */
-#define OCON_NUM   7
+#define OCON_ISID	0 /* initial SIDs */
+#define OCON_FS		1 /* unlabeled file systems */
+#define OCON_PORT	2 /* TCP and UDP port numbers */
+#define OCON_NETIF	3 /* network interfaces */
+#define OCON_NODE	4 /* nodes */
+#define OCON_FSUSE	5 /* fs_use */
+#define OCON_NODE6	6 /* IPv6 nodes */
+#define OCON_IBPKEY	7 /* Infiniband PKeys */
+#define OCON_IBENDPORT	8 /* Infiniband end ports */
+#define OCON_NUM	9
 
 /* The policy database */
 struct policydb {
+	int mls_enabled;
+
 	/* symbol tables */
 	struct symtab symtab[SYM_NUM];
 #define p_commons symtab[SYM_COMMONS]
@@ -193,25 +246,18 @@ struct policydb {
 #define p_roles symtab[SYM_ROLES]
 #define p_types symtab[SYM_TYPES]
 #define p_users symtab[SYM_USERS]
+#define p_bools symtab[SYM_BOOLS]
 #define p_levels symtab[SYM_LEVELS]
 #define p_cats symtab[SYM_CATS]
-#define p_bools symtab[SYM_BOOLS]
 
 	/* symbol names indexed by (value - 1) */
-	char **sym_val_to_name[SYM_NUM];
-#define p_common_val_to_name sym_val_to_name[SYM_COMMONS]
-#define p_class_val_to_name sym_val_to_name[SYM_CLASSES]
-#define p_role_val_to_name sym_val_to_name[SYM_ROLES]
-#define p_type_val_to_name sym_val_to_name[SYM_TYPES]
-#define p_user_val_to_name sym_val_to_name[SYM_USERS]
-#define p_sens_val_to_name sym_val_to_name[SYM_LEVELS]
-#define p_cat_val_to_name sym_val_to_name[SYM_CATS]
-#define p_bool_val_to_name sym_val_to_name[SYM_BOOLS]
+	struct flex_array *sym_val_to_name[SYM_NUM];
 
 	/* class, role, and user attributes indexed by (value - 1) */
 	struct class_datum **class_val_to_struct;
 	struct role_datum **role_val_to_struct;
 	struct user_datum **user_val_to_struct;
+	struct flex_array *type_val_to_struct_array;
 
 	/* type enforcement access vectors and transitions */
 	struct avtab te_avtab;
@@ -219,12 +265,18 @@ struct policydb {
 	/* role transitions */
 	struct role_trans *role_tr;
 
+	/* file transitions with the last path component */
+	/* quickly exclude lookups when parent ttype has no rules */
+	struct ebitmap filename_trans_ttypes;
+	/* actual set of filename_trans rules */
+	struct hashtab *filename_trans;
+
 	/* bools indexed by (value - 1) */
 	struct cond_bool_datum **bool_val_to_struct;
 	/* type enforcement conditional access vectors and transitions */
 	struct avtab te_cond_avtab;
 	/* linked list indexing te_cond_avtab by conditional */
-	struct cond_node* cond_list;
+	struct cond_node *cond_list;
 
 	/* role allows */
 	struct role_allow *role_allow;
@@ -233,34 +285,49 @@ struct policydb {
 	   TCP or UDP port numbers, network interfaces and nodes */
 	struct ocontext *ocontexts[OCON_NUM];
 
-        /* security contexts for files in filesystems that cannot support
+	/* security contexts for files in filesystems that cannot support
 	   a persistent label mapping or use another
 	   fixed labeling behavior. */
-  	struct genfs *genfs;
+	struct genfs *genfs;
 
-#ifdef CONFIG_SECURITY_SELINUX_MLS
-	/* number of legitimate MLS levels */
-	u32 nlevels;
+	/* range transitions table (range_trans_key -> mls_range) */
+	struct hashtab *range_tr;
 
-	struct ebitmap trustedreaders;
-	struct ebitmap trustedwriters;
-	struct ebitmap trustedobjects;
-#endif
+	/* type -> attribute reverse mapping */
+	struct flex_array *type_attr_map_array;
+
+	struct ebitmap policycaps;
+
+	struct ebitmap permissive_map;
+
+	/* length of this policy when it was loaded */
+	size_t len;
 
 	unsigned int policyvers;
+
+	unsigned int reject_unknown : 1;
+	unsigned int allow_unknown : 1;
+
+	u16 process_class;
+	u32 process_trans_perms;
 };
 
-extern int policydb_init(struct policydb *p);
-extern int policydb_index_classes(struct policydb *p);
-extern int policydb_index_others(struct policydb *p);
 extern void policydb_destroy(struct policydb *p);
 extern int policydb_load_isids(struct policydb *p, struct sidtab *s);
 extern int policydb_context_isvalid(struct policydb *p, struct context *c);
+extern int policydb_class_isvalid(struct policydb *p, unsigned int class);
+extern int policydb_type_isvalid(struct policydb *p, unsigned int type);
+extern int policydb_role_isvalid(struct policydb *p, unsigned int role);
 extern int policydb_read(struct policydb *p, void *fp);
+extern int policydb_write(struct policydb *p, void *fp);
 
 #define PERM_SYMTAB_SIZE 32
 
 #define POLICYDB_CONFIG_MLS    1
+
+/* the config flags related to unknown classes/perms are bits 2 and 3 */
+#define REJECT_UNKNOWN	0x00000002
+#define ALLOW_UNKNOWN	0x00000004
 
 #define OBJECT_R "object_r"
 #define OBJECT_R_VAL 1
@@ -273,6 +340,11 @@ struct policy_file {
 	size_t len;
 };
 
+struct policy_data {
+	struct policydb *p;
+	void *fp;
+};
+
 static inline int next_entry(void *buf, struct policy_file *fp, size_t bytes)
 {
 	if (bytes > fp->len)
@@ -283,6 +355,27 @@ static inline int next_entry(void *buf, struct policy_file *fp, size_t bytes)
 	fp->len -= bytes;
 	return 0;
 }
+
+static inline int put_entry(const void *buf, size_t bytes, int num, struct policy_file *fp)
+{
+	size_t len = bytes * num;
+
+	memcpy(fp->data, buf, len);
+	fp->data += len;
+	fp->len -= len;
+
+	return 0;
+}
+
+static inline char *sym_name(struct policydb *p, unsigned int sym_num, unsigned int element_nr)
+{
+	struct flex_array *fa = p->sym_val_to_name[sym_num];
+
+	return flex_array_get_ptr(fa, element_nr);
+}
+
+extern u16 string_to_security_class(struct policydb *p, const char *name);
+extern u32 string_to_av_perm(struct policydb *p, u16 tclass, const char *name);
 
 #endif	/* _SS_POLICYDB_H_ */
 

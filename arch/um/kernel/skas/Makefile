@@ -1,15 +1,15 @@
-# 
-# Copyright (C) 2002 - 2004 Jeff Dike (jdike@addtoit.com)
+#
+# Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
 # Licensed under the GPL
 #
 
-obj-y := exec_kern.o mem.o mem_user.o mmu.o process.o process_kern.o \
-	syscall_kern.o syscall_user.o time.o tlb.o trap_user.o uaccess.o \
+obj-y := clone.o mmu.o process.o syscall.o uaccess.o
 
-USER_OBJS = $(filter %_user.o,$(obj-y)) process.o time.o
-USER_OBJS := $(foreach file,$(USER_OBJS),$(obj)/$(file))
+# clone.o is in the stub, so it can't be built with profiling
+# GCC hardened also auto-enables -fpic, but we need %ebx so it can't work ->
+# disable it
 
-$(USER_OBJS) : %.o: %.c
-	$(CC) $(CFLAGS_$(notdir $@)) $(USER_CFLAGS) -c -o $@ $<
+CFLAGS_clone.o := $(CFLAGS_NO_HARDENING)
+UNPROFILE_OBJS := clone.o
 
-subdir- := util
+include arch/um/scripts/Makefile.rules

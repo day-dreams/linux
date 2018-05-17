@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/arch/m32r/mm/fault.c
  *
@@ -7,9 +8,6 @@
  *    Copyright (C) 1995  Linus Torvalds
  */
 
-/* $Id: fault-nommu.c,v 1.1 2004/03/30 06:40:59 sakugawa Exp $ */
-
-#include <linux/config.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -20,13 +18,12 @@
 #include <linux/mman.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
+#include <linux/vt_kern.h>              /* For unblank_screen() */
 
 #include <asm/m32r.h>
-#include <asm/system.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 #include <asm/hardirq.h>
@@ -45,32 +42,6 @@ unsigned int tlb_entry_d_dat[NR_CPUS];
 #define tlb_entry_i tlb_entry_i_dat[smp_processor_id()]
 #define tlb_entry_d tlb_entry_d_dat[smp_processor_id()]
 #endif
-
-/*
- * Unlock any spinlocks which will prevent us from getting the
- * message out
- */
-void bust_spinlocks(int yes)
-{
-	int loglevel_save = console_loglevel;
-
-	if (yes) {
-		oops_in_progress = 1;
-		return;
-	}
-#ifdef CONFIG_VT
-	unblank_screen();
-#endif
-	oops_in_progress = 0;
-	/*
-	 * OK, the message is on the console.  Now we call printk()
-	 * without oops_in_progress set so that printk will give klogd
-	 * a poke.  Hold onto your hats...
-	 */
-	console_loglevel = 15;		/* NMI oopser may have shut the console up */
-	printk(" ");
-	console_loglevel = loglevel_save;
-}
 
 void do_BUG(const char *file, int line)
 {
@@ -124,7 +95,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code,
  * update_mmu_cache()
  *======================================================================*/
 void update_mmu_cache(struct vm_area_struct *vma, unsigned long addr,
-	pte_t pte)
+	pte_t *ptep)
 {
 	BUG();
 }
@@ -161,4 +132,3 @@ void local_flush_tlb_all(void)
 {
 	BUG();
 }
-

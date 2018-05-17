@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Platform dependent support for DIG64 platforms.
  *
@@ -8,14 +9,13 @@
  * Copyright (C) 1999 Walt Drummond <drummond@valinux.com>
  * Copyright (C) 1999 Vijay Chander <vijay@engr.sgi.com>
  */
-#include <linux/config.h>
 
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/kdev_t.h>
 #include <linux/string.h>
-#include <linux/tty.h>
+#include <linux/screen_info.h>
 #include <linux/console.h>
 #include <linux/timex.h>
 #include <linux/sched.h>
@@ -23,17 +23,7 @@
 
 #include <asm/io.h>
 #include <asm/machvec.h>
-#include <asm/system.h>
-
-/*
- * This is here so we can use the CMOS detection in ide-probe.c to
- * determine what drives are present.  In theory, we don't need this
- * as the auto-detection could be done via ide-probe.c:do_probe() but
- * in practice that would be much slower, which is painful when
- * running in the simulator.  Note that passing zeroes in DRIVE_INFO
- * is sufficient (the IDE driver will autodetect the drive geometry).
- */
-char drive_info[4*16];
+#include <asm/setup.h>
 
 void __init
 dig_setup (char **cmdline_p)
@@ -78,9 +68,4 @@ dig_setup (char **cmdline_p)
 	screen_info.orig_video_mode = 3;	/* XXX fake */
 	screen_info.orig_video_isVGA = 1;	/* XXX fake */
 	screen_info.orig_video_ega_bx = 3;	/* XXX fake */
-}
-
-void __init
-dig_irq_init (void)
-{
 }
